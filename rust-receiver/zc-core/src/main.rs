@@ -9,6 +9,14 @@ fn main() {
     let ping = Ping { timestamp: 0 };
     println!("{:?}", ping);
 
+    let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
+    rt.spawn(async {
+        match zc_network::connect("192.168.42.129", 4433).await {
+            Ok(_) => println!("Connected to Android host"),
+            Err(e) => println!("Connection failed: {}", e),
+        }
+    });
+
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new()
         .with_decorations(false)

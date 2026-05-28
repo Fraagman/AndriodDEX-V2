@@ -6,3 +6,4 @@ members = [
     "zc-network",
     "zc-protocol"
 ]
+default-members = ["zc-core"]

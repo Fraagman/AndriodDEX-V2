@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 winit = "0.29.15"
 zc-protocol = { path = "../zc-protocol" }
+zc-network = { path = "../zc-network" }
+tokio = { version = "1.37", features = ["rt", "rt-multi-thread"] }
