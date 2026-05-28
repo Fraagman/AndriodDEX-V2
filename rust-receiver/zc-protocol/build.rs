@@ -8,7 +8,7 @@ fn main() {
     config.out_dir(out_dir);
 
     config.compile_protos(
-        &["proto/protocol.proto", "proto/input.proto"], 
+        &["proto/protocol.proto", "proto/input.proto", "proto/video.proto"], 
         &["proto"]
     ).expect("Failed to compile protocol.proto");
 }

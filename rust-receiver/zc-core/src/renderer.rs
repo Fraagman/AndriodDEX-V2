@@ -8,6 +8,13 @@ struct Vertex {
     position: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    time: f32,
+    use_texture: u32,
+}
+
 const VERTICES: &[Vertex] = &[
     Vertex { position: [-1.0, 1.0] },
     Vertex { position: [-1.0, -1.0] },
@@ -22,7 +29,9 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+    dummy_bind_group: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     config: wgpu::SurfaceConfiguration,
@@ -36,7 +45,7 @@ impl Renderer {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(window.clone()).unwrap();
         
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -85,11 +94,33 @@ impl Renderer {
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Time Uniform Buffer"),
-            size: std::mem::size_of::<f32>() as wgpu::BufferAddress,
+            label: Some("Uniform Buffer"),
+            size: std::mem::size_of::<Uniforms>() as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("Dummy Texture"),
+            view_formats: &[],
+        });
+        let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -102,20 +133,44 @@ impl Renderer {
                         min_binding_size: None,
                     },
                     count: None,
-                }
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
             label: Some("bind_group_layout"),
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: uniform_buffer.as_entire_binding(),
-                }
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&dummy_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
-            label: Some("bind_group"),
+            label: Some("dummy_bind_group"),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -176,11 +231,21 @@ impl Renderer {
             queue,
             surface,
             pipeline,
-            bind_group,
+            bind_group_layout,
+            dummy_bind_group,
+            sampler,
             vertex_buffer,
             uniform_buffer,
             config,
         }
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -191,8 +256,40 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, time: f32) -> Result<(), wgpu::SurfaceError> {
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[time]));
+    pub fn render(&mut self, time: f32, frame_texture_view: Option<&wgpu::TextureView>) -> Result<(), wgpu::SurfaceError> {
+        let uniforms = Uniforms {
+            time,
+            use_texture: if frame_texture_view.is_some() { 1 } else { 0 },
+        };
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        let bind_group = if let Some(view) = frame_texture_view {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+                label: Some("frame_bind_group"),
+            })
+        } else {
+            // Can't move dummy out of self, but we can't return it either. 
+            // Wait, we can't create it here if we just use a reference.
+            // But we can't return a reference from an if-else if one side creates a local variable!
+            // So we'll let the dummy_bind_group be bound if needed below.
+            // Oh wait, bind_group must be a reference.
+            panic!("handled below")
+        };
 
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -222,7 +319,13 @@ impl Renderer {
             });
 
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            
+            if frame_texture_view.is_some() {
+                render_pass.set_bind_group(0, &bind_group, &[]);
+            } else {
+                render_pass.set_bind_group(0, &self.dummy_bind_group, &[]);
+            }
+            
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.draw(0..6, 0..1);
         }

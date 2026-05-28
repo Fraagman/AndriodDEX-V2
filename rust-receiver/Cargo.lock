@@ -3144,6 +3144,7 @@ dependencies = [
  "zc-input",
  "zc-network",
  "zc-protocol",
+ "zc-video",
 ]
 
 [[package]]
@@ -3159,10 +3160,12 @@ dependencies = [
 name = "zc-network"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "quinn",
  "rcgen",
  "rustls",
  "tokio",
+ "zc-protocol",
 ]
 
 [[package]]
@@ -3176,6 +3179,10 @@ dependencies = [
 [[package]]
 name = "zc-video"
 version = "0.1.0"
+dependencies = [
+ "wgpu",
+ "zc-protocol",
+]
 
 [[package]]
 name = "zerocopy"

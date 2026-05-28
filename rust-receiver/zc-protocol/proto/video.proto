@@ -1,0 +1,9 @@
+syntax = "proto3";
+package zc_protocol;
+
+message VideoFrame {
+    uint32 width = 1;
+    uint32 height = 2;
+    uint64 timestamp = 3;
+    bytes rgba_data = 4;
+}
