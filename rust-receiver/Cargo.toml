@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "zc-core",
+    "zc-video",
+    "zc-network",
+    "zc-protocol"
+]

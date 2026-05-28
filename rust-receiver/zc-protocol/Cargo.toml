@@ -1,0 +1,10 @@
+[package]
+name = "zc-protocol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13.4"
+
+[build-dependencies]
+prost-build = "0.13.4"
