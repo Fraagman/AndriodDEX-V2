@@ -64,7 +64,7 @@ fn main() {
 
     let event_loop = EventLoop::new().unwrap();
     let window = std::sync::Arc::new(WindowBuilder::new()
-        .with_decorations(false)
+        .with_decorations(true)
         .build(&event_loop)
         .unwrap());
 
