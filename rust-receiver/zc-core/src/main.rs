@@ -1,9 +1,12 @@
+mod renderer;
+
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 use zc_protocol::protocol::Ping;
+use std::time::Instant;
 
 fn main() {
     let ping = Ping { timestamp: 0 };
@@ -60,20 +63,45 @@ fn main() {
     });
 
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new()
+    let window = std::sync::Arc::new(WindowBuilder::new()
         .with_decorations(false)
         .build(&event_loop)
-        .unwrap();
+        .unwrap());
 
+    let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()));
+    let start_time = Instant::now();
+
+    let window_id = window.id();
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
 
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => {
+                window_id: id,
+            } if id == window_id => {
                 elwt.exit();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(physical_size),
+                window_id: id,
+            } if id == window_id => {
+                renderer.resize(physical_size);
+            }
+            Event::WindowEvent {
+                event: WindowEvent::RedrawRequested,
+                window_id: id,
+            } if id == window_id => {
+                let time = start_time.elapsed().as_secs_f32();
+                match renderer.render(time) {
+                    Ok(_) => {}
+                    Err(wgpu::SurfaceError::Lost) => renderer.resize(window.inner_size()),
+                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                    Err(e) => eprintln!("{:?}", e),
+                }
+            }
+            Event::AboutToWait => {
+                window.request_redraw();
             }
             _ => (),
         }

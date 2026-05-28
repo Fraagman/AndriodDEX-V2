@@ -10,3 +10,6 @@ zc-network = { path = "../zc-network" }
 zc-input = { path = "../zc-input" }
 prost = "0.13"
 tokio = { version = "1.37", features = ["rt", "rt-multi-thread"] }
+wgpu = { version = "0.19" }
+bytemuck = { version = "1.15", features = ["derive"] }
+pollster = "0.3"
