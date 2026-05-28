@@ -28,8 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Client connected from {:?}", connection.remote_address());
             
             loop {
-                match connection.accept_bi().await {
-                    Ok((mut send, mut recv)) => {
+                tokio::select! {
+                    Ok((mut send, mut recv)) = connection.accept_bi() => {
                         tokio::spawn(async move {
                             match recv.read_to_end(1024 * 1024).await {
                                 Ok(data) => {
@@ -40,7 +40,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         });
                     }
-                    Err(_) => break,
+                    Ok(mut recv) = connection.accept_uni() => {
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 8192];
+                            loop {
+                                match recv.read(&mut buf).await {
+                                    Ok(Some(n)) => {
+                                        println!("Received {} bytes:", n);
+                                        for chunk in buf[..n].chunks(16) {
+                                            for b in chunk {
+                                                print!("{:02X} ", b);
+                                            }
+                                            println!();
+                                        }
+                                    }
+                                    Ok(None) => break,
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                    }
+                    else => break,
                 }
             }
         });

@@ -5,5 +5,5 @@ members = [
     "zc-video",
     "zc-network",
     "zc-protocol"
-]
+, "zc-input"]
 default-members = ["zc-core"]

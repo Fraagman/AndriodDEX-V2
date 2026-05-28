@@ -7,4 +7,6 @@ edition = "2021"
 winit = "0.29.15"
 zc-protocol = { path = "../zc-protocol" }
 zc-network = { path = "../zc-network" }
+zc-input = { path = "../zc-input" }
+prost = "0.13"
 tokio = { version = "1.37", features = ["rt", "rt-multi-thread"] }
