@@ -20,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.padding
 import com.example.androidhost.ui.theme.Obsidian
 import com.example.androidhost.ui.theme.Platinum
 import com.example.androidhost.vm.ConnectionViewModel
@@ -37,6 +39,17 @@ fun DesktopShell(
 
 @Composable
 fun DesktopShellContent(isTetheringReady: Boolean, surface: Surface? = null) {
+    var isConnected by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var framesSent by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            isConnected = com.example.androidhost.network.FrameSender.isConnected
+            framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -73,6 +86,19 @@ fun DesktopShellContent(isTetheringReady: Boolean, surface: Surface? = null) {
                         Text("Inject Test Click")
                     }
                 }
+            }
+        }
+
+        if (isConnected || framesSent > 0) {
+            androidx.compose.foundation.layout.Column(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .background(Obsidian.copy(alpha = 0.7f))
+                    .padding(8.dp)
+            ) {
+                Text(text = "Sending frames to 192.168.42.1:55556", color = Platinum, fontSize = 12.sp)
+                Text(text = "Frames sent: $framesSent", color = Platinum, fontSize = 12.sp)
             }
         }
 
