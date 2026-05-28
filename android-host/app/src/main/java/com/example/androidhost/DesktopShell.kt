@@ -1,5 +1,6 @@
 package com.example.androidhost
 
+import android.view.Surface
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -17,49 +18,60 @@ import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.androidhost.ui.theme.Obsidian
 import com.example.androidhost.ui.theme.Platinum
 import com.example.androidhost.vm.ConnectionViewModel
+import com.example.androidhost.vm.DisplayViewModel
 
 @Composable
-fun DesktopShell(viewModel: ConnectionViewModel = viewModel()) {
+fun DesktopShell(
+    viewModel: ConnectionViewModel = viewModel(),
+    displayViewModel: DisplayViewModel = viewModel()
+) {
     val isReady by viewModel.isTetheringReady.collectAsState()
-    DesktopShellContent(isTetheringReady = isReady)
+    val surface by displayViewModel.virtualDisplaySurface.collectAsState()
+    DesktopShellContent(isTetheringReady = isReady, surface = surface)
 }
 
 @Composable
-fun DesktopShellContent(isTetheringReady: Boolean) {
+fun DesktopShellContent(isTetheringReady: Boolean, surface: Surface? = null) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Obsidian)
     ) {
-        androidx.compose.foundation.layout.Column(
-            modifier = Modifier.align(Alignment.Center),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = if (isTetheringReady) {
-                    "USB tethering detected \u2014 waiting for PC"
-                } else {
-                    "Connect USB cable and enable tethering"
+        if (surface != null) {
+            AndroidView(
+                factory = { context ->
+                    android.view.SurfaceView(context)
                 },
-                color = Platinum,
-                fontSize = 14.sp
+                modifier = Modifier.fillMaxSize()
             )
-            
-            if (com.example.androidhost.BuildConfig.DEBUG) {
-                androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
-                androidx.compose.material3.Button(onClick = {
-                    val service = com.example.androidhost.service.DesktopAccessibilityService.instance
-                    if (service != null) {
-                        service.injectClick(500f, 500f)
-                    } else {
-                        android.util.Log.e("A11y", "Service not connected")
+        } else {
+            androidx.compose.foundation.layout.Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Initializing display...",
+                    color = Platinum,
+                    fontSize = 14.sp
+                )
+                
+                if (com.example.androidhost.BuildConfig.DEBUG) {
+                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
+                    androidx.compose.material3.Button(onClick = {
+                        val service = com.example.androidhost.service.DesktopAccessibilityService.instance
+                        if (service != null) {
+                            service.injectClick(500f, 500f)
+                        } else {
+                            android.util.Log.e("A11y", "Service not connected")
+                        }
+                    }) {
+                        Text("Inject Test Click")
                     }
-                }) {
-                    Text("Inject Test Click")
                 }
             }
         }
@@ -95,5 +107,5 @@ class TetheringStateProvider : PreviewParameterProvider<Boolean> {
 fun DesktopShellPreview(
     @PreviewParameter(TetheringStateProvider::class) isTetheringReady: Boolean
 ) {
-    DesktopShellContent(isTetheringReady)
+    DesktopShellContent(isTetheringReady, null)
 }
