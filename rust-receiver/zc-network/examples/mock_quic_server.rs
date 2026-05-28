@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     server_crypto.alpn_protocols = vec![b"androiddex".to_vec()];
     
-    let server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+    let server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
     let endpoint = Endpoint::server(server_config, "0.0.0.0:4433".parse()?)?;
 
     println!("Mock server listening on 0.0.0.0:4433");
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match recv.read_to_end(1024 * 1024).await {
                                 Ok(data) => {
                                     send.write_all(&data).await.unwrap();
-                                    send.finish().await.unwrap();
+                                    send.finish().unwrap();
                                 }
                                 Err(_) => ()
                             }

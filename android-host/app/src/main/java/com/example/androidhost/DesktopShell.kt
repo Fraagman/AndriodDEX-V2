@@ -52,7 +52,12 @@ fun DesktopShellContent(isTetheringReady: Boolean) {
             if (com.example.androidhost.BuildConfig.DEBUG) {
                 androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
                 androidx.compose.material3.Button(onClick = {
-                    com.example.androidhost.service.DesktopAccessibilityService.instance?.injectClick(500f, 500f)
+                    val service = com.example.androidhost.service.DesktopAccessibilityService.instance
+                    if (service != null) {
+                        service.injectClick(500f, 500f)
+                    } else {
+                        android.util.Log.e("A11y", "Service not connected")
+                    }
                 }) {
                     Text("Inject Test Click")
                 }
