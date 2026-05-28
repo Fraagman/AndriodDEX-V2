@@ -37,5 +37,7 @@ class MainActivity : ComponentActivity() {
         }
 
         startService(Intent(this, TetheringService::class.java))
+        
+        com.example.androidhost.network.LocalInputServer.start()
     }
 }

@@ -35,16 +35,29 @@ fun DesktopShellContent(isTetheringReady: Boolean) {
             .fillMaxSize()
             .background(Obsidian)
     ) {
-        Text(
-            text = if (isTetheringReady) {
-                "USB tethering detected \u2014 waiting for PC"
-            } else {
-                "Connect USB cable and enable tethering"
-            },
-            color = Platinum,
-            fontSize = 14.sp,
-            modifier = Modifier.align(Alignment.Center)
-        )
+        androidx.compose.foundation.layout.Column(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = if (isTetheringReady) {
+                    "USB tethering detected \u2014 waiting for PC"
+                } else {
+                    "Connect USB cable and enable tethering"
+                },
+                color = Platinum,
+                fontSize = 14.sp
+            )
+            
+            if (com.example.androidhost.BuildConfig.DEBUG) {
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
+                androidx.compose.material3.Button(onClick = {
+                    com.example.androidhost.service.DesktopAccessibilityService.instance?.injectClick(500f, 500f)
+                }) {
+                    Text("Inject Test Click")
+                }
+            }
+        }
 
         Row(
             modifier = Modifier
