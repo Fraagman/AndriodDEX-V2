@@ -118,7 +118,7 @@ fun DesktopShellContent(
                     .background(Color.Black.copy(alpha = 0.7f))
                     .padding(8.dp)
             ) {
-                Text(text = "Sending frames to 10.214.143.14:55556", color = Color.White, fontSize = 12.sp)
+                Text(text = "Sending frames via QUIC", color = Color.White, fontSize = 12.sp)
                 Text(text = "Frames sent: $framesSent", color = Color.White, fontSize = 12.sp)
             }
         }

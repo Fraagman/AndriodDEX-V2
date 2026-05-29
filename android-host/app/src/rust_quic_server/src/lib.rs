@@ -39,26 +39,65 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
     let port = port as u16;
 
     rt.spawn(async move {
-        // Generate self-signed cert
-        let (cert_der, key_der) = generate_self_signed_cert().expect("Failed to generate cert");
-        let cert = CertificateDer::from(cert_der);
-        let key = PrivateKeyDer::try_from(key_der).expect("Invalid private key");
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Trace)
+                .with_tag("QuicServerRust"),
+        );
+        log::info!("Starting QUIC server background task");
 
-        let mut server_crypto = rustls::ServerConfig::builder()
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Generate self-signed cert
+        let cert_res = generate_self_signed_cert();
+        if let Err(e) = cert_res {
+            log::error!("Failed to generate cert: {}", e);
+            return;
+        }
+        let (cert_der, key_der) = cert_res.unwrap();
+        
+        let cert = CertificateDer::from(cert_der);
+        let key_res = PrivateKeyDer::try_from(key_der);
+        if let Err(e) = key_res {
+            log::error!("Invalid private key: {:?}", e);
+            return;
+        }
+        let key = key_res.unwrap();
+
+        let server_crypto_res = rustls::ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)
-            .expect("Failed to build server crypto");
+            .with_single_cert(vec![cert], key);
+            
+        if let Err(e) = server_crypto_res {
+            log::error!("Failed to build server crypto: {}", e);
+            return;
+        }
+        let mut server_crypto = server_crypto_res.unwrap();
             
         server_crypto.alpn_protocols = vec![b"androiddex".to_vec()];
 
-        let server_config = ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).expect("Failed to create quic server config")
-        ));
+        let quic_config_res = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto);
+        if let Err(e) = quic_config_res {
+            log::error!("Failed to create quic server config: {:?}", e);
+            return;
+        }
+        
+        let server_config = ServerConfig::with_crypto(Arc::new(quic_config_res.unwrap()));
 
-        let bind_addr = format!("0.0.0.0:{}", port).parse().unwrap();
-        let endpoint = Endpoint::server(server_config, bind_addr).expect("Failed to bind endpoint");
+        let bind_addr_res = format!("0.0.0.0:{}", port).parse();
+        if let Err(e) = bind_addr_res {
+            log::error!("Failed to parse bind address: {}", e);
+            return;
+        }
+        
+        let endpoint_res = Endpoint::server(server_config, bind_addr_res.unwrap());
+        if let Err(e) = endpoint_res {
+            log::error!("Failed to bind endpoint: {}", e);
+            return;
+        }
+        let endpoint = endpoint_res.unwrap();
 
-        println!("QUIC server listening on 0.0.0.0:{}", port);
+        log::info!("QUIC server listening on 0.0.0.0:{}", port);
 
         // Accept a single connection for now
         if let Some(incoming) = endpoint.accept().await {
