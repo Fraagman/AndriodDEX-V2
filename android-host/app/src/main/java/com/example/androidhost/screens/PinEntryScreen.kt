@@ -111,8 +111,10 @@ fun PinEntryScreen(
             Button(
                 onClick = {
                     if (SecurityBridge.verifyPin(pin)) {
+                        android.util.Log.d("PinEntryScreen", "Navigate to desktop")
                         onPinSuccess()
                     } else {
+                        android.util.Log.d("PinEntryScreen", "Incorrect PIN")
                         isError = true
                         pin = ""
                         coroutineScope.launch {

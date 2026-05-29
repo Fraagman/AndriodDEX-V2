@@ -9,13 +9,20 @@ mod tests {
     #[test]
     fn test_generate_pin() {
         let mut seen = std::collections::HashMap::new();
-        for _ in 0..1000 {
+        for i in 0..1000 {
             let pin = pairing::generate_pin();
             assert_eq!(pin.len(), 6);
             assert!(pin.chars().all(|c| c.is_digit(10)));
             let first_digit = pin.chars().next().unwrap();
             *seen.entry(first_digit).or_insert(0) += 1;
+            
+            // Output for verification
+            if i < 10 {
+                println!("Generated PIN {}: {}", i + 1, pin);
+            }
         }
+        println!("... and 990 more.");
+        println!("Leading digit distribution over 1000 PINs: {:?}", seen);
         // Ensure no "000000" bias, should see roughly equal distribution (~100 each)
         assert!(seen.len() >= 9); 
     }
