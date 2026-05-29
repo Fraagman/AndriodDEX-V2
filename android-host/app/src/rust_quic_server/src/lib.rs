@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
     static ref SERVER_STATE: Mutex<Option<ServerState>> = Mutex::new(None);
+    static ref PAIRING_WAKER: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
 }
 
 struct ServerState {
@@ -24,9 +25,10 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error:
 
 #[no_mangle]
 pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
-    mut _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     port: jint,
+    data_path: jni::objects::JString,
 ) -> jlong {
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
@@ -38,13 +40,17 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
 
     let port = port as u16;
 
+    let path_str: String = env.get_string(&data_path).expect("Couldn't get data path string").into();
+    let data_path_buf = std::path::PathBuf::from(path_str);
+    zc_security::storage::set_data_path(data_path_buf.clone());
+
     rt.spawn(async move {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Trace)
                 .with_tag("QuicServerRust"),
         );
-        log::info!("Starting QUIC server background task");
+        log::info!("Starting QUIC server background task with storage: {:?}", data_path_buf);
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -99,65 +105,126 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
 
         log::info!("QUIC server listening on 0.0.0.0:{}", port);
 
-        // Accept a single connection for now
-        if let Some(incoming) = endpoint.accept().await {
-            match incoming.await {
-                Ok(connection) => {
-                    println!("QUIC connected to client");
+        let mut video_rx_opt = Some(video_rx);
+        
+        loop {
+            if let Some(incoming) = endpoint.accept().await {
+                match incoming.await {
+                    Ok(connection) => {
+                        println!("QUIC connected to client");
 
-                    // Spawn task to send video frames
-                    let conn_video = connection.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            if let Some(frame_data) = video_rx.recv().await {
-                                match conn_video.open_uni().await {
-                                    Ok(mut stream) => {
-                                        let len = frame_data.len() as u32;
-                                        if stream.write_all(&len.to_le_bytes()).await.is_err() {
-                                            break;
-                                        }
-                                        if stream.write_all(&frame_data).await.is_err() {
-                                            break;
-                                        }
+                        let is_pairing = connection.handshake_data().unwrap().downcast::<rustls::ServerConnection>().unwrap().alpn_protocol() == Some(b"androiddex-pairing".as_slice());
+
+                        if is_pairing {
+                            log::info!("Handling pairing connection...");
+                            let conn = connection.clone();
+                            tokio::spawn(async move {
+                                if let Ok(mut stream) = conn.accept_uni().await {
+                                    let mut pubkey = [0u8; 32];
+                                    if stream.read_exact(&mut pubkey).await.is_ok() {
+                                        log::warn!("Received pairing request. Waiting for Java to provide PIN.");
+                                        
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        *PAIRING_WAKER.lock().unwrap() = Some(tx);
+                                        
+                                        // Wait for Java to call providePin
+                                        // Since we are in a tokio task, blocking recv will block the worker thread.
+                                        // It's better to use tokio::sync::oneshot, but mpsc is fine for this low-concurrency pairing thread if we don't mind blocking one worker.
+                                        // To be safe, we'll just poll or use tokio channel.
+                                        
+                                        // We will spawn a blocking task to wait for the mpsc channel
+                                        let conn_clone = conn.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            if let Ok(pin) = rx.recv() {
+                                                let psk = zc_security::pairing::derive_psk(&pin, &pubkey);
+                                                let fp = [0u8; 32]; // dummy for server
+                                                let _ = zc_security::storage::store_trust_data(&fp, &psk);
+                                                
+                                                // Send OK response
+                                                let rt = tokio::runtime::Handle::current();
+                                                rt.block_on(async move {
+                                                    if let Ok(mut reply) = conn_clone.open_uni().await {
+                                                        let _ = reply.write_all(b"OK").await;
+                                                        let _ = reply.finish();
+                                                    }
+                                                    Ok::<(), Box<dyn std::error::Error>>(())
+                                                }).ok();
+                                            }
+                                        });
                                     }
-                                    Err(_) => break, // Connection closed
+                                }
+                            });
+                            continue;
+                        }
+                        
+                        // Authenticate
+                        let auth_res = async {
+                            if let Ok(mut auth_stream) = connection.accept_uni().await {
+                                let mut token = [0u8; 32];
+                                if auth_stream.read_exact(&mut token).await.is_err() { return false; }
+                                if let Some((_, psk)) = zc_security::storage::load_trust_data() {
+                                    use sha2::{Sha256, Digest};
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(&psk);
+                                    hasher.update(b"auth");
+                                    let expected: [u8; 32] = hasher.finalize().into();
+                                    return token == expected;
                                 }
                             }
-                        }
-                    });
+                            false
+                        }.await;
 
-                    // Accept input streams
-                    let conn_input = connection.clone();
-                    let input_tx_clone = input_tx.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            match conn_input.accept_uni().await {
-                                Ok(mut stream) => {
-                                    tokio::spawn({
-                                        let input_tx = input_tx_clone.clone();
-                                        async move {
-                                            loop {
-                                                let mut len_buf = [0u8; 4];
-                                                if stream.read_exact(&mut len_buf).await.is_err() {
-                                                    break;
-                                                }
-                                                let len = u32::from_le_bytes(len_buf) as usize;
-                                                let mut buf = vec![0u8; len];
-                                                if stream.read_exact(&mut buf).await.is_err() {
-                                                    break;
-                                                }
-                                                let _ = input_tx.send(buf);
-                                            }
+                        if !auth_res {
+                            log::error!("Authentication failed");
+                            continue;
+                        }
+                        log::info!("Client authenticated successfully");
+                        
+
+
+                        // For simplicity, handle one connection at a time
+                        // Stop the previous tasks and start new ones
+                        
+                        // We will just do it sequentially for now
+                        let mut video_rx = std::mem::replace(&mut video_rx_opt, None).unwrap();
+                        let conn_video = connection.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                if let Some(frame_data) = video_rx.recv().await {
+                                    if let Ok(mut stream) = conn_video.open_uni().await {
+                                        let len = frame_data.len() as u32;
+                                        let _ = stream.write_all(&len.to_le_bytes()).await;
+                                        let _ = stream.write_all(&frame_data).await;
+                                    }
+                                }
+                            }
+                        });
+
+                        let conn_input = connection.clone();
+                        let input_tx_clone = input_tx.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                if let Ok(mut stream) = conn_input.accept_uni().await {
+                                    let tx = input_tx_clone.clone();
+                                    tokio::spawn(async move {
+                                        loop {
+                                            let mut len_buf = [0u8; 4];
+                                            if stream.read_exact(&mut len_buf).await.is_err() { break; }
+                                            let len = u32::from_le_bytes(len_buf) as usize;
+                                            let mut buf = vec![0u8; len];
+                                            if stream.read_exact(&mut buf).await.is_err() { break; }
+                                            let _ = tx.send(buf);
                                         }
                                     });
+                                } else {
+                                    break;
                                 }
-                                Err(_) => break, // Connection closed
                             }
-                        }
-                    });
-                }
-                Err(e) => {
-                    println!("Connection failed: {}", e);
+                        });
+                    }
+                    Err(e) => {
+                        println!("Connection failed: {}", e);
+                    }
                 }
             }
         }
@@ -212,5 +279,17 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_send(
         if let Ok(elements) = env.convert_byte_array(data) {
             let _ = state.video_tx.try_send(elements);
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_providePin(
+    mut env: JNIEnv,
+    _class: JClass,
+    pin: jni::objects::JString,
+) {
+    let pin_str: String = env.get_string(&pin).expect("Couldn't get string").into();
+    if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {
+        let _ = tx.send(pin_str);
     }
 }

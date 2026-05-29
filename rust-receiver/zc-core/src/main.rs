@@ -37,8 +37,13 @@ fn main() {
     
     let host = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1".to_string());
 
+    let pairing_pin = Arc::new(Mutex::new(None));
+    let pin_clone = pairing_pin.clone();
+
     rt.spawn(async move {
-        match zc_network::connect(&host, 4433).await {
+        match zc_network::connect(&host, 4433, move |pin| {
+            *pin_clone.lock().unwrap() = Some(pin);
+        }).await {
             Ok(conn) => {
                 println!("Connected to mock server or host");
                 is_connected_quic.store(true, Ordering::SeqCst);
@@ -247,6 +252,7 @@ fn main() {
                                         &mut encoder,
                                         is_connected.load(Ordering::SeqCst),
                                         mouse_pos,
+                                        pairing_pin.lock().unwrap().clone(),
                                     );
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
                                 }

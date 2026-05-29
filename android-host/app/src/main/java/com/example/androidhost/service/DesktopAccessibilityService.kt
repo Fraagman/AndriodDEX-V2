@@ -167,7 +167,7 @@ class DesktopAccessibilityService : AccessibilityService() {
     // ---- Input Server (via QUIC polling) ----
 
     private fun startInputServer() {
-        com.example.androidhost.quic.QuicServer.startServer(4433)
+        com.example.androidhost.quic.QuicServer.startServer(4433, filesDir.absolutePath)
         
         inputServerThread = Thread {
             val buffer = ByteArray(1024 * 1024)

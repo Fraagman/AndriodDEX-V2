@@ -17,3 +17,5 @@ rcgen = "0.12"
 lazy_static = "1.4"
 android_logger = "0.15.1"
 log = "0.4.30"
+zc-security = { path = "../../../../rust-receiver/zc-security" }
+sha2 = "0.11"

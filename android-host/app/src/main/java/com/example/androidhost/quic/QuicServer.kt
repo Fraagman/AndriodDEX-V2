@@ -9,9 +9,9 @@ class QuicServer {
             System.loadLibrary("rust_quic_server")
         }
 
-        fun startServer(port: Int) {
+        fun startServer(port: Int, dataPath: String) {
             if (handle == 0L) {
-                handle = start(port)
+                handle = start(port, dataPath)
                 android.util.Log.d("QuicServer", "QUIC server started, handle = $handle")
             }
         }
@@ -31,7 +31,7 @@ class QuicServer {
         }
 
         @JvmStatic
-        private external fun start(port: Int): Long
+        private external fun start(port: Int, dataPath: String): Long
 
         @JvmStatic
         private external fun pollData(handle: Long, buffer: ByteArray): Int

@@ -1,0 +1,10 @@
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\zc_security-81e0ccfe57954ba2.d: C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\lib.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\cert.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\pairing.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\storage.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libzc_security-81e0ccfe57954ba2.rlib: C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\lib.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\cert.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\pairing.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\storage.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libzc_security-81e0ccfe57954ba2.rmeta: C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\lib.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\cert.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\pairing.rs C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\storage.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\lib.rs:
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\cert.rs:
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\pairing.rs:
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security\src\storage.rs:

@@ -50,13 +50,12 @@ impl OverlayUi {
         encoder: &mut wgpu::CommandEncoder,
         is_connected: bool,
         mouse_pos: (f64, f64),
+        pairing_pin: Option<String>,
     ) {
         let raw_input = self.state.take_egui_input(window);
         
-        // Determine fade out based on mouse position
-        // Top-left area: 0-250px x, 0-100px y
         let (mx, my) = mouse_pos;
-        let is_hovered = mx >= 0.0 && mx <= 250.0 && my >= 0.0 && my <= 100.0;
+        let is_hovered = mx >= 0.0 && mx <= 250.0 && my >= 0.0 && my <= 120.0;
         
         let alpha = self.context.animate_bool_with_time(
             egui::Id::new("overlay_fade"),
@@ -72,9 +71,9 @@ impl OverlayUi {
                 egui::Id::new("overlay"),
             ));
 
-            let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, 80.0));
+            let rect_height = if pairing_pin.is_some() { 100.0 } else { 80.0 };
+            let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, rect_height));
             
-            // Draw background
             painter.rect(
                 rect,
                 Rounding::same(8.0),
@@ -82,7 +81,6 @@ impl OverlayUi {
                 Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8)),
             );
 
-            // Text 1: Title
             painter.text(
                 rect.min + Vec2::new(10.0, 10.0),
                 egui::Align2::LEFT_TOP,
@@ -91,7 +89,6 @@ impl OverlayUi {
                 Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8),
             );
 
-            // Text 2: Status
             let status_text = if is_connected { "Status: Connected" } else { "Status: Disconnected" };
             let status_color = if is_connected { 
                 Color32::from_rgba_premultiplied(0, 255, 0, (255.0 * alpha) as u8) 
@@ -107,7 +104,6 @@ impl OverlayUi {
                 status_color,
             );
 
-            // Text 3: Latency
             painter.text(
                 rect.min + Vec2::new(10.0, 50.0),
                 egui::Align2::LEFT_TOP,
@@ -115,6 +111,16 @@ impl OverlayUi {
                 FontId::proportional(14.0),
                 Color32::from_rgba_premultiplied(180, 180, 180, (255.0 * alpha) as u8),
             );
+
+            if let Some(pin) = pairing_pin {
+                painter.text(
+                    rect.min + Vec2::new(10.0, 70.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("Pairing PIN: {}", pin),
+                    FontId::proportional(14.0),
+                    Color32::from_rgba_premultiplied(255, 165, 0, (255.0 * alpha) as u8),
+                );
+            }
         }
 
         let full_output = self.context.end_frame();
