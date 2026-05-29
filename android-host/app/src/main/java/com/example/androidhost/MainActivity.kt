@@ -10,9 +10,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.example.androidhost.service.TetheringService
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
@@ -23,7 +24,21 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            DesktopShell()
+            val currentScreen = androidx.compose.runtime.remember { 
+                androidx.compose.runtime.mutableStateOf(Screen.PIN) 
+            }
+
+            when (currentScreen.value) {
+                Screen.PIN -> com.example.androidhost.screens.PinEntryScreen(
+                    onPinSuccess = { currentScreen.value = Screen.DESKTOP }
+                )
+                Screen.LOCK -> com.example.androidhost.screens.BiometricLockScreen(
+                    onUnlockSuccess = { currentScreen.value = Screen.DESKTOP }
+                )
+                Screen.DESKTOP -> DesktopShell(
+                    onLockSession = { currentScreen.value = Screen.LOCK }
+                )
+            }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -40,4 +55,8 @@ class MainActivity : ComponentActivity() {
         
         com.example.androidhost.network.LocalInputServer.start()
     }
+}
+
+enum class Screen {
+    PIN, LOCK, DESKTOP
 }

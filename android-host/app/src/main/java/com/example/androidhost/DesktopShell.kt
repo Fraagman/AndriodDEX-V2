@@ -36,7 +36,8 @@ import kotlinx.coroutines.delay
 fun DesktopShell(
     viewModel: ConnectionViewModel = viewModel(),
     displayViewModel: DisplayViewModel = viewModel(),
-    shellViewModel: ShellViewModel = viewModel()
+    shellViewModel: ShellViewModel = viewModel(),
+    onLockSession: () -> Unit = {}
 ) {
     val isReady by viewModel.isTetheringReady.collectAsState()
     val surface by displayViewModel.virtualDisplaySurface.collectAsState()
@@ -44,7 +45,8 @@ fun DesktopShell(
     DesktopShellContent(
         isTetheringReady = isReady,
         surface = surface,
-        shellViewModel = shellViewModel
+        shellViewModel = shellViewModel,
+        onLockSession = onLockSession
     )
 }
 
@@ -52,7 +54,8 @@ fun DesktopShell(
 fun DesktopShellContent(
     isTetheringReady: Boolean,
     surface: Surface? = null,
-    shellViewModel: ShellViewModel? = null
+    shellViewModel: ShellViewModel? = null,
+    onLockSession: () -> Unit = {}
 ) {
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
@@ -105,6 +108,10 @@ fun DesktopShellContent(
                         }
                     }) {
                         Text("Inject Test Click")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = { onLockSession() }) {
+                        Text("Lock Session")
                     }
                 }
             }

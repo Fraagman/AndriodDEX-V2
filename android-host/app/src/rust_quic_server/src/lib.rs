@@ -1,5 +1,5 @@
 use jni::objects::{JByteArray, JClass};
-use jni::sys::{jint, jlong};
+use jni::sys::{jint, jlong, jboolean};
 use jni::JNIEnv;
 use quinn::{Endpoint, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -240,6 +240,32 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
     *global_state = Some(state);
 
     1 // Return dummy handle since we use a global singleton for simplicity
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_example_androidhost_security_SecurityBridge_verifyPin(
+    mut env: JNIEnv,
+    _class: JClass,
+    pin: jni::objects::JString,
+) -> jboolean {
+    let pin_str: String = env.get_string(&pin).expect("Couldn't get string").into();
+    // For development, hardcode test PIN
+    if pin_str == "000000" {
+        // Also feed the PIN to the QUIC server pairing flow so it proceeds
+        if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {
+            let _ = tx.send(pin_str);
+        }
+        return 1;
+    }
+    
+    // Attempt to verify via QUIC pairing flow
+    if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {
+        let _ = tx.send(pin_str.clone());
+        // We can't synchronously return success/failure here for QUIC derive, but for the requirement we just need true/false. 
+        // We will return false for anything other than "000000" for now, as requested.
+    }
+    
+    0
 }
 
 #[no_mangle]
