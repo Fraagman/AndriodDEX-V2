@@ -14,3 +14,10 @@ message KeyboardEvent {
   uint32 modifiers = 3;
   uint64 timestamp = 4;
 }
+
+message InputEvent {
+  oneof event {
+    MouseEvent mouse = 1;
+    KeyboardEvent keyboard = 2;
+  }
+}

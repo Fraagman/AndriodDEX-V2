@@ -89,15 +89,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                     Ok(mut recv) = connection.accept_uni() => {
+                        // Decode InputEvent messages from the client
                         tokio::spawn(async move {
-                            let mut buf = vec![0u8; 8192];
+                            use zc_protocol::protocol::InputEvent;
+                            use prost::Message;
+
+                            println!("[INPUT STREAM] Accepted input stream from client");
                             loop {
-                                match recv.read(&mut buf).await {
-                                    Ok(Some(n)) => {
-                                        println!("Received {} bytes", n);
+                                let mut len_buf = [0u8; 4];
+                                match recv.read_exact(&mut len_buf).await {
+                                    Ok(()) => {}
+                                    Err(_) => {
+                                        println!("[INPUT STREAM] Stream closed");
+                                        break;
                                     }
-                                    Ok(None) => break,
-                                    Err(_) => break,
+                                }
+                                let len = u32::from_le_bytes(len_buf) as usize;
+                                if len > 1024 * 1024 {
+                                    println!("[INPUT STREAM] Frame too large: {} bytes", len);
+                                    break;
+                                }
+                                let mut data = vec![0u8; len];
+                                match recv.read_exact(&mut data).await {
+                                    Ok(()) => {}
+                                    Err(_) => {
+                                        println!("[INPUT STREAM] Failed to read data");
+                                        break;
+                                    }
+                                }
+
+                                match InputEvent::decode(&data[..]) {
+                                    Ok(event) => {
+                                        use zc_protocol::protocol::input_event::Event;
+                                        match event.event {
+                                            Some(Event::Mouse(m)) => {
+                                                println!("[MOUSE] x={}, y={}, buttons={}, ts={}", m.x, m.y, m.buttons, m.timestamp);
+                                            }
+                                            Some(Event::Keyboard(k)) => {
+                                                println!("[KEYBOARD] keycode={}, pressed={}, modifiers={}, ts={}", k.keycode, k.pressed, k.modifiers, k.timestamp);
+                                            }
+                                            None => {
+                                                println!("[INPUT] Empty InputEvent");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("[INPUT] Failed to decode InputEvent: {}", e);
+                                    }
                                 }
                             }
                         });
