@@ -1,0 +1,7 @@
+syntax = "proto3";
+package zc_audio;
+
+message AudioPacket {
+  bytes pcm_data = 1;  // Raw PCM 16-bit stereo 48kHz for now
+  uint64 timestamp = 2;
+}

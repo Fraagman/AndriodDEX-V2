@@ -107,6 +107,7 @@ impl ServerCertVerifier for PinnedCertVerifier {
 }
 
 pub async fn connect(host: &str, port: u16, pin_callback: impl Fn(String) + Send + 'static) -> Result<Connection, QuinnError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if let Some((fp, psk)) = load_trust_data() {
         println!("Loaded trust data, performing authenticated connect...");
         return connect_authenticated(host, port, fp, psk).await;
@@ -130,7 +131,7 @@ pub async fn connect(host: &str, port: u16, pin_callback: impl Fn(String) + Send
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
-    let server_addr = format!("{}:{}", host, port + 1).parse()?;
+    let server_addr = format!("{}:{}", host, port).parse()?;
     
     let pairing_conn = endpoint
         .connect(server_addr, "localhost")?
@@ -166,6 +167,7 @@ pub async fn connect(host: &str, port: u16, pin_callback: impl Fn(String) + Send
 }
 
 pub async fn connect_authenticated(host: &str, port: u16, fp: Fingerprint, psk: Psk) -> Result<Connection, QuinnError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let verifier = PinnedCertVerifier { expected: fp };
 
     let mut crypto = rustls::ClientConfig::builder()

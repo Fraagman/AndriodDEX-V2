@@ -12,7 +12,7 @@ cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS
 cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENV
 cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENDIAN
 cargo:rerun-if-env-changed=CC_aarch64-linux-android
-CC_aarch64-linux-android = Some(C:\Users\omrai\AppData\Local\Android\sdk\ndk\30.0.14904198\toolchains\llvm\prebuilt\windows-x86_64\bin\clang)
+CC_aarch64-linux-android = Some(C:/Users/Asus/AppData/Local/Android/Sdk/ndk/26.1.10909125\toolchains\llvm\prebuilt\windows-x86_64\bin\clang)
 cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
 cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
 CRATE_CC_NO_DEFAULTS = None
@@ -51,7 +51,7 @@ exit code: 0
 exit code: 0
 cargo:rustc-link-lib=static=ring_core_0_17_14_
 cargo:rerun-if-env-changed=CC_aarch64-linux-android
-CC_aarch64-linux-android = Some(C:\Users\omrai\AppData\Local\Android\sdk\ndk\30.0.14904198\toolchains\llvm\prebuilt\windows-x86_64\bin\clang)
+CC_aarch64-linux-android = Some(C:/Users/Asus/AppData/Local/Android/Sdk/ndk/26.1.10909125\toolchains\llvm\prebuilt\windows-x86_64\bin\clang)
 cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
 cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
 CRATE_CC_NO_DEFAULTS = None
@@ -66,7 +66,7 @@ CFLAGS_aarch64-linux-android = Some(--target=aarch64-linux-android29)
 cargo:rerun-if-env-changed=CC_SHELL_ESCAPED_FLAGS
 CC_SHELL_ESCAPED_FLAGS = None
 cargo:rustc-link-lib=static=ring_core_0_17_14__test
-cargo:rustc-link-search=native=C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\build\ring-69290570be1e3dc4\out
+cargo:rustc-link-search=native=C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\build\ring-69290570be1e3dc4\out
 cargo:rerun-if-changed=crypto\chacha\asm\chacha-armv4.pl
 cargo:rerun-if-changed=crypto\chacha\asm\chacha-armv8.pl
 cargo:rerun-if-changed=crypto\chacha\asm\chacha-x86.pl

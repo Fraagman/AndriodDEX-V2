@@ -42,6 +42,7 @@ fn main() {
 
     rt.spawn(async move {
         match zc_network::connect(&host, 4433, move |pin| {
+            println!("PAIRING PIN GENERATED: {}", pin);
             *pin_clone.lock().unwrap() = Some(pin);
         }).await {
             Ok(conn) => {

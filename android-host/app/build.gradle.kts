@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.example.androidhost"
     compileSdk = 36
+    ndkVersion = "26.1.10909125"
     defaultConfig {
         applicationId = "com.example.androidhost"
         minSdk = 29
@@ -51,6 +52,7 @@ kotlin {
 
 tasks.register<Exec>("cargoNdkBuild") {
     workingDir = file("src/rust_quic_server")
+    environment("ANDROID_NDK_HOME", "C:/Users/Asus/AppData/Local/Android/Sdk/ndk/26.1.10909125")
     commandLine(
         "cargo", "ndk",
         "-t", "aarch64-linux-android",

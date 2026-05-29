@@ -29,6 +29,12 @@ import com.example.androidhost.ui.components.Taskbar
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.ConnectionViewModel
 import com.example.androidhost.vm.DisplayViewModel
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Switch
+import androidx.compose.ui.text.font.FontWeight
 import com.example.androidhost.vm.ShellViewModel
 import kotlinx.coroutines.delay
 
@@ -37,7 +43,8 @@ fun DesktopShell(
     viewModel: ConnectionViewModel = viewModel(),
     displayViewModel: DisplayViewModel = viewModel(),
     shellViewModel: ShellViewModel = viewModel(),
-    onLockSession: () -> Unit = {}
+    onLockSession: () -> Unit = {},
+    onRequestAudioCapture: (Boolean) -> Unit = {}
 ) {
     val isReady by viewModel.isTetheringReady.collectAsState()
     val surface by displayViewModel.virtualDisplaySurface.collectAsState()
@@ -46,7 +53,8 @@ fun DesktopShell(
         isTetheringReady = isReady,
         surface = surface,
         shellViewModel = shellViewModel,
-        onLockSession = onLockSession
+        onLockSession = onLockSession,
+        onRequestAudioCapture = onRequestAudioCapture
     )
 }
 
@@ -55,13 +63,23 @@ fun DesktopShellContent(
     isTetheringReady: Boolean,
     surface: Surface? = null,
     shellViewModel: ShellViewModel? = null,
-    onLockSession: () -> Unit = {}
+    onLockSession: () -> Unit = {},
+    onRequestAudioCapture: (Boolean) -> Unit = {}
 ) {
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
     var showLauncher by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
 
+    val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        delay(2000)
+        if (!isAudioCapturing) {
+            onRequestAudioCapture(true)
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -150,11 +168,56 @@ fun DesktopShellContent(
             )
         }
 
+        // Settings Overlay Dialog
+        if (showSettings) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .clickable { showSettings = false }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .width(320.dp)
+                        .background(Color(0xFF1E1E1E), shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .clickable(enabled = false) {}
+                        .padding(24.dp)
+                ) {
+                    Text(
+                        text = "System Settings",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 20.dp)
+                    )
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Enable System Audio",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = isAudioCapturing,
+                            onCheckedChange = { onRequestAudioCapture(it) }
+                        )
+                    }
+                }
+            }
+        }
+
         // Taskbar at bottom
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             Taskbar(
                 quicState = quicState,
-                onLauncherClick = { showLauncher = !showLauncher }
+                isAudioCapturing = isAudioCapturing,
+                onLauncherClick = { showLauncher = !showLauncher },
+                onSettingsClick = { showSettings = !showSettings }
             )
         }
     }

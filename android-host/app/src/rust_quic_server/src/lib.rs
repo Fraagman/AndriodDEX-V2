@@ -80,7 +80,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
         }
         let mut server_crypto = server_crypto_res.unwrap();
             
-        server_crypto.alpn_protocols = vec![b"androiddex".to_vec()];
+        server_crypto.alpn_protocols = vec![b"androiddex".to_vec(), b"androiddex-pairing".to_vec()];
 
         let quic_config_res = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto);
         if let Err(e) = quic_config_res {
