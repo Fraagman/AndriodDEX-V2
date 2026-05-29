@@ -21,7 +21,7 @@ import java.util.*
 
 @Composable
 fun Taskbar(
-    isConnected: Boolean,
+    quicState: Int, // 0 = Disconnected, 1 = Connecting, 2 = Active
     onLauncherClick: () -> Unit
 ) {
     var currentTime by remember { mutableStateOf(getCurrentTime()) }
@@ -63,15 +63,32 @@ fun Taskbar(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // Right: Connection Status Dot
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(
-                    color = if (isConnected) Color.Green else Color.Red,
-                    shape = CircleShape
-                )
-        )
+        // Right: Connection Status
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val statusText = when (quicState) {
+                2 -> "QUIC Active"
+                1 -> "QUIC Connecting"
+                else -> "Disconnected"
+            }
+            Text(
+                text = statusText,
+                color = Color.White,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        color = when (quicState) {
+                            2 -> Color.Green
+                            1 -> Color.Yellow
+                            else -> Color.Red
+                        },
+                        shape = CircleShape
+                    )
+            )
+        }
     }
 }
 

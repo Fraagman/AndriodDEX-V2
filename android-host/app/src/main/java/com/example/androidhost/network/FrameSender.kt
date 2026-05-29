@@ -64,9 +64,7 @@ object FrameSender {
             
             // Send directly through QuicServer
             QuicServer.sendFrame(protobufBytes)
-            
-            val count = framesSent.incrementAndGet()
-            Log.d(TAG, "Frames sent: $count")
+            Log.d(TAG, "Video frame sent via QUIC")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send frame", e)
         }

@@ -54,7 +54,7 @@ fun DesktopShellContent(
     surface: Surface? = null,
     shellViewModel: ShellViewModel? = null
 ) {
-    var isConnected by remember { mutableStateOf(false) }
+    var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
     var showLauncher by remember { mutableStateOf(false) }
 
@@ -62,7 +62,10 @@ fun DesktopShellContent(
 
     LaunchedEffect(Unit) {
         while (true) {
-            isConnected = com.example.androidhost.network.FrameSender.isConnected
+            val handleStarted = com.example.androidhost.network.FrameSender.isConnected
+            val hasData = com.example.androidhost.service.DesktopAccessibilityService.hasReceivedData
+            
+            quicState = if (hasData) 2 else if (handleStarted) 1 else 0
             framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
             delay(1000)
         }
@@ -107,7 +110,7 @@ fun DesktopShellContent(
             }
         }
 
-        if (isConnected || framesSent > 0) {
+        if (quicState > 0 || framesSent > 0) {
             Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -143,7 +146,7 @@ fun DesktopShellContent(
         // Taskbar at bottom
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             Taskbar(
-                isConnected = isConnected,
+                quicState = quicState,
                 onLauncherClick = { showLauncher = !showLauncher }
             )
         }

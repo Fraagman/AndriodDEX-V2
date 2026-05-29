@@ -27,6 +27,8 @@ class DesktopAccessibilityService : AccessibilityService() {
         private const val INPUT_PORT = 55557
         var instance: DesktopAccessibilityService? = null
             private set
+        var hasReceivedData = false
+            private set
     }
 
     private var inputServerThread: Thread? = null
@@ -173,6 +175,8 @@ class DesktopAccessibilityService : AccessibilityService() {
                 try {
                     val bytesRead = com.example.androidhost.quic.QuicServer.pollInput(buffer)
                     if (bytesRead > 0) {
+                        hasReceivedData = true
+                        Log.d(TAG, "Input event received via QUIC")
                         val data = buffer.copyOf(bytesRead)
                         handleInputEvent(data)
                     } else {

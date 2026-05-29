@@ -12,6 +12,7 @@ class QuicServer {
         fun startServer(port: Int) {
             if (handle == 0L) {
                 handle = start(port)
+                android.util.Log.d("QuicServer", "QUIC server started, handle = $handle")
             }
         }
 
