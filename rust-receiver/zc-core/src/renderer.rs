@@ -256,83 +256,53 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, time: f32, frame_texture_view: Option<&wgpu::TextureView>) -> Result<(), wgpu::SurfaceError> {
+    pub fn config(&self) -> &wgpu::SurfaceConfiguration {
+        &self.config
+    }
+
+    pub fn get_target_view(&self) -> Result<(wgpu::SurfaceTexture, wgpu::TextureView), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok((output, view))
+    }
+
+    pub fn create_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+            label: Some("frame_bind_group"),
+        })
+    }
+
+    pub fn draw_video<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, bind_group: Option<&'a wgpu::BindGroup>, time: f32) {
         let uniforms = Uniforms {
             time,
-            use_texture: if frame_texture_view.is_some() { 1 } else { 0 },
+            use_texture: if bind_group.is_some() { 1 } else { 0 },
         };
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        let bind_group = if let Some(view) = frame_texture_view {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-                label: Some("frame_bind_group"),
-            })
-        } else {
-            // Can't move dummy out of self, but we can't return it either. 
-            // Wait, we can't create it here if we just use a reference.
-            // But we can't return a reference from an if-else if one side creates a local variable!
-            // So we'll let the dummy_bind_group be bound if needed below.
-            // Oh wait, bind_group must be a reference.
-            panic!("handled below")
-        };
-
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            render_pass.set_pipeline(&self.pipeline);
-            
-            if frame_texture_view.is_some() {
-                render_pass.set_bind_group(0, &bind_group, &[]);
-            } else {
-                render_pass.set_bind_group(0, &self.dummy_bind_group, &[]);
-            }
-            
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..6, 0..1);
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        render_pass.set_pipeline(&self.pipeline);
         
-        Ok(())
+        if let Some(bg) = bind_group {
+            render_pass.set_bind_group(0, bg, &[]);
+        } else {
+            render_pass.set_bind_group(0, &self.dummy_bind_group, &[]);
+        }
+        
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.draw(0..6, 0..1);
     }
 }

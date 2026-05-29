@@ -1,14 +1,16 @@
 mod renderer;
+mod ui;
 
 use winit::{
-    event::{Event, WindowEvent},
+    event::{Event, WindowEvent, ElementState},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
+    keyboard::{KeyCode, PhysicalKey},
 };
-use zc_protocol::protocol::{InputEvent, Ping};
+use zc_protocol::protocol::Ping;
 use zc_protocol::video::VideoFrame;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Instant;
 use prost::Message;
 
@@ -23,16 +25,21 @@ fn main() {
     // Shared state for input sending: holds serialized InputEvent bytes
     // The input polling thread pushes here; the QUIC sender drains from here.
     let input_buffer: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::with_capacity(INPUT_BUFFER_MAX)));
+    
+    // Connection state
+    let is_connected = Arc::new(AtomicBool::new(false));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
 
     // Clone for the QUIC task
     let input_buffer_for_quic = input_buffer.clone();
+    let is_connected_quic = is_connected.clone();
 
     rt.spawn(async move {
         match zc_network::connect("127.0.0.1", 4433).await {
             Ok(conn) => {
                 println!("Connected to mock server or host");
+                is_connected_quic.store(true, Ordering::SeqCst);
 
                 // Spawn video receiver on a separate uni stream
                 let conn_video = conn.clone();
@@ -83,16 +90,21 @@ fn main() {
                                 let len = serialized.len() as u32;
                                 if input_stream.write_all(&len.to_le_bytes()).await.is_err() {
                                     eprintln!("Input stream write failed (length)");
+                                    is_connected_quic.store(false, Ordering::SeqCst);
                                     return;
                                 }
                                 if input_stream.write_all(&serialized).await.is_err() {
                                     eprintln!("Input stream write failed (data)");
+                                    is_connected_quic.store(false, Ordering::SeqCst);
                                     return;
                                 }
                             }
                         }
                     }
-                    Err(e) => eprintln!("Failed to open input stream: {}", e),
+                    Err(e) => {
+                        eprintln!("Failed to open input stream: {}", e);
+                        is_connected_quic.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             Err(e) => println!("Connection failed: {}", e),
@@ -135,52 +147,116 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
 
     let window = std::sync::Arc::new(WindowBuilder::new()
+        .with_title("AndroidDex Receiver")
         .with_decorations(true)
         .build(&event_loop)
         .unwrap());
 
     let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()));
+    
+    // Initialize egui overlay
+    let mut overlay_ui = ui::overlay::OverlayUi::new(
+        renderer.device(),
+        renderer.config().format,
+        &window,
+    );
+
     let mut video_decoder: Option<zc_video::VideoDecoder> = None;
     let start_time = Instant::now();
+    let mut mouse_pos = (0.0, 0.0);
 
     let window_id = window.id();
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
 
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id: id,
-            } if id == window_id => {
-                elwt.exit();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(physical_size),
-                window_id: id,
-            } if id == window_id => {
-                renderer.resize(physical_size);
-            }
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                window_id: id,
-            } if id == window_id => {
-                while let Ok(frame) = frame_rx.try_recv() {
-                    if video_decoder.is_none() {
-                        video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
-                    }
-                    if let Some(decoder) = video_decoder.as_mut() {
-                        decoder.decode_and_upload(renderer.queue(), frame);
-                    }
+        match &event {
+            Event::WindowEvent { window_id: id, event: w_event } if *id == window_id => {
+                if overlay_ui.handle_event(&window, w_event) {
+                    return; // event consumed by egui
                 }
 
-                let time = start_time.elapsed().as_secs_f32();
-                let view = video_decoder.as_ref().map(|d| &d.texture_view);
+                match w_event {
+                    WindowEvent::CloseRequested => {
+                        elwt.exit();
+                    }
+                    WindowEvent::KeyboardInput {
+                        event: key_event,
+                        ..
+                    } => {
+                        if key_event.physical_key == PhysicalKey::Code(KeyCode::Escape) && key_event.state == ElementState::Pressed {
+                            println!("Escape pressed, exiting gracefully...");
+                            elwt.exit();
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        mouse_pos = (position.x, position.y);
+                    }
+                    WindowEvent::Resized(physical_size) => {
+                        renderer.resize(*physical_size);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        while let Ok(frame) = frame_rx.try_recv() {
+                            if video_decoder.is_none() {
+                                video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
+                            }
+                            if let Some(decoder) = video_decoder.as_mut() {
+                                decoder.decode_and_upload(renderer.queue(), frame);
+                            }
+                        }
 
-                match renderer.render(time, view) {
-                    Ok(_) => {}
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => renderer.resize(window.inner_size()),
-                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                    Err(e) => eprintln!("{:?}", e),
+                        let time = start_time.elapsed().as_secs_f32();
+                        let view_opt = video_decoder.as_ref().map(|d| &d.texture_view);
+
+                        match renderer.get_target_view() {
+                            Ok((frame, view)) => {
+                                let bind_group = view_opt.map(|v| renderer.create_bind_group(v));
+
+                                // 1. Render Video
+                                {
+                                    let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
+                                    {
+                                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("Video Render Pass"),
+                                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            })],
+                                            depth_stencil_attachment: None,
+                                            timestamp_writes: None,
+                                            occlusion_query_set: None,
+                                        });
+                                        renderer.draw_video(&mut rpass, bind_group.as_ref(), time);
+                                    }
+                                    renderer.queue().submit(std::iter::once(encoder.finish()));
+                                }
+                                
+                                // 2. Render Overlay on top
+                                {
+                                    let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Overlay Encoder") });
+                                    overlay_ui.render(
+                                        &window,
+                                        renderer.device(),
+                                        renderer.queue(),
+                                        &view,
+                                        &mut encoder,
+                                        is_connected.load(Ordering::SeqCst),
+                                        mouse_pos,
+                                    );
+                                    renderer.queue().submit(std::iter::once(encoder.finish()));
+                                }
+                                
+                                frame.present();
+                            }
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => renderer.resize(window.inner_size()),
+                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(e) => eprintln!("{:?}", e),
+                        }
+                    }
+                    _ => (),
                 }
             }
             Event::AboutToWait => {
