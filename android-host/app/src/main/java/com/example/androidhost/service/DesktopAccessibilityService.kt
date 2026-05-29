@@ -64,9 +64,39 @@ class DesktopAccessibilityService : AccessibilityService() {
 
     // ---- Cursor Overlay ----
 
+    private var virtualDisplayId = android.view.Display.DEFAULT_DISPLAY
+
+    private fun findVirtualDisplay(): android.view.Display? {
+        val displayManager = getSystemService(android.content.Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        for (display in displayManager.displays) {
+            if (display.name == "AndroidDex") {
+                virtualDisplayId = display.displayId
+                return display
+            }
+        }
+        return null
+    }
+
     private fun showCursorOverlay() {
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        cursorView = CursorView(this)
+        val targetDisplay = findVirtualDisplay()
+        if (targetDisplay == null) {
+            Log.e(TAG, "AndroidDex VirtualDisplay not found, retrying in 1s...")
+            mainHandler.postDelayed({ showCursorOverlay() }, 1000)
+            return
+        }
+
+        val displayContext = createDisplayContext(targetDisplay)
+        // TYPE_ACCESSIBILITY_OVERLAY might require the service context, so we create a window context from the display
+        val windowContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            createWindowContext(targetDisplay, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+        } else {
+            displayContext
+        }
+
+        windowManager = windowContext.getSystemService(WINDOW_SERVICE) as WindowManager
+        cursorView = CursorView(windowContext).apply {
+            setWillNotDraw(false)
+        }
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -83,7 +113,7 @@ class DesktopAccessibilityService : AccessibilityService() {
         mainHandler.post {
             try {
                 windowManager?.addView(cursorView, params)
-                Log.d(TAG, "Cursor overlay added")
+                Log.d(TAG, "Cursor overlay added to VirtualDisplay (ID: $virtualDisplayId)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to add cursor overlay", e)
             }
@@ -354,23 +384,27 @@ class DesktopAccessibilityService : AccessibilityService() {
             moveTo(x, y)
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, 10)
-        val gesture = GestureDescription.Builder()
-            .addStroke(stroke)
-            .build()
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && virtualDisplayId != android.view.Display.DEFAULT_DISPLAY) {
+            builder.setDisplayId(virtualDisplayId)
+        }
+        
+        val gesture = builder.build()
 
         val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 super.onCompleted(gestureDescription)
-                Log.d(TAG, "Gesture completed at $x, $y")
+                Log.d(TAG, "Gesture completed at $x, $y on display $virtualDisplayId")
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 super.onCancelled(gestureDescription)
-                Log.e(TAG, "Gesture cancelled at $x, $y")
+                Log.e(TAG, "Gesture cancelled at $x, $y on display $virtualDisplayId")
             }
         }, null)
 
         if (!dispatched) {
-            Log.e(TAG, "Failed to dispatch gesture at $x, $y")
+            Log.e(TAG, "Failed to dispatch gesture at $x, $y on display $virtualDisplayId")
         }
     }
 
@@ -380,7 +414,13 @@ class DesktopAccessibilityService : AccessibilityService() {
             lineTo(x, y - (direction * 100))
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, 100)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && virtualDisplayId != android.view.Display.DEFAULT_DISPLAY) {
+            builder.setDisplayId(virtualDisplayId)
+        }
+        
+        val gesture = builder.build()
         dispatchGesture(gesture, null, null)
     }
 }
