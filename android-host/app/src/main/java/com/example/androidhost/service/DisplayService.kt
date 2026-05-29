@@ -48,7 +48,7 @@ class DisplayService : Service() {
         val width = 1920
         val height = 1080
         val dpi = 320
-        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
 
         // Using ImageReader directly to satisfy the raw RGBA uncompressed requirement over TCP
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)

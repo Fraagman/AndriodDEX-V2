@@ -23,11 +23,11 @@ object FrameSender {
         thread = Thread {
             while (isRunning) {
                 try {
-                    Log.d(TAG, "Connecting to 192.168.42.1:55556...")
-                    socket = Socket("192.168.42.1", 55556)
+                    Log.d(TAG, "Connecting to 10.214.143.14:55556...")
+                    socket = Socket("10.214.143.14", 55556)
                     outStream = socket?.getOutputStream()
                     isConnected = true
-                    Log.d(TAG, "Connected to 192.168.42.1:55556")
+                    Log.d(TAG, "Connected to 10.214.143.14:55556")
                     
                     // Keep thread alive while connected
                     while (isRunning && socket?.isConnected == true && !socket!!.isClosed) {

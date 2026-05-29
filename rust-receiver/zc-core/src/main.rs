@@ -99,7 +99,7 @@ fn main() {
                 
                 match renderer.render(time, view) {
                     Ok(_) => {}
-                    Err(wgpu::SurfaceError::Lost) => renderer.resize(window.inner_size()),
+                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => renderer.resize(window.inner_size()),
                     Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
                     Err(e) => eprintln!("{:?}", e),
                 }

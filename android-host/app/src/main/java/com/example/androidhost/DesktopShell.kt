@@ -97,7 +97,7 @@ fun DesktopShellContent(isTetheringReady: Boolean, surface: Surface? = null) {
                     .background(Obsidian.copy(alpha = 0.7f))
                     .padding(8.dp)
             ) {
-                Text(text = "Sending frames to 192.168.42.1:55556", color = Platinum, fontSize = 12.sp)
+                Text(text = "Sending frames to 10.214.143.14:55556", color = Platinum, fontSize = 12.sp)
                 Text(text = "Frames sent: $framesSent", color = Platinum, fontSize = 12.sp)
             }
         }
