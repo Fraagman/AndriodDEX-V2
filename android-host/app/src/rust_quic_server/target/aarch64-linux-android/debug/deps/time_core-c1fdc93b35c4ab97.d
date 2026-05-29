@@ -1,0 +1,10 @@
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\time_core-c1fdc93b35c4ab97.d: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\convert.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\hint.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\util.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libtime_core-c1fdc93b35c4ab97.rlib: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\convert.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\hint.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\util.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libtime_core-c1fdc93b35c4ab97.rmeta: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\convert.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\hint.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\util.rs
+
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\lib.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\convert.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\hint.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\time-core-0.1.8\src\util.rs:

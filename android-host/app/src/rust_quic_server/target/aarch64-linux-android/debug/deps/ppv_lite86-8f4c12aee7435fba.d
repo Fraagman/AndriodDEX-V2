@@ -1,0 +1,10 @@
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\ppv_lite86-8f4c12aee7435fba.d: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\soft.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\types.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\generic.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libppv_lite86-8f4c12aee7435fba.rlib: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\soft.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\types.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\generic.rs
+
+C:\Users\omrai\OneDrive\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\aarch64-linux-android\debug\deps\libppv_lite86-8f4c12aee7435fba.rmeta: C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\lib.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\soft.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\types.rs C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\generic.rs
+
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\lib.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\soft.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\types.rs:
+C:\Users\omrai\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ppv-lite86-0.2.21\src\generic.rs:

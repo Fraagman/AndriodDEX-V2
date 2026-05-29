@@ -15,6 +15,12 @@ android {
         versionName = "1.0"
     }
 
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir("src/main/jniLibs")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -41,6 +47,27 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+tasks.register<Exec>("cargoNdkBuild") {
+    workingDir = file("src/rust_quic_server")
+    commandLine(
+        "cargo", "ndk",
+        "-t", "aarch64-linux-android",
+        "-P", "29",
+        "build"
+    )
+    
+    doLast {
+        val srcFile = file("src/rust_quic_server/target/aarch64-linux-android/debug/librust_quic_server.so")
+        val dstDir = file("src/main/jniLibs/arm64-v8a")
+        dstDir.mkdirs()
+        srcFile.copyTo(File(dstDir, "librust_quic_server.so"), overwrite = true)
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("cargoNdkBuild")
 }
 
 dependencies {

@@ -6,59 +6,27 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 
+import com.example.androidhost.quic.QuicServer
+
 object FrameSender {
     private const val TAG = "FrameSender"
     private var isRunning = false
-    private var thread: Thread? = null
-    private var socket: Socket? = null
-    private var outStream: OutputStream? = null
-
     val framesSent = AtomicInteger(0)
-    var isConnected = false
-        private set
+    
+    val isConnected: Boolean
+        get() = com.example.androidhost.quic.QuicServer.handle != 0L
 
     fun start() {
         if (isRunning) return
         isRunning = true
-        thread = Thread {
-            while (isRunning) {
-                try {
-                    Log.d(TAG, "Connecting to 10.214.143.14:55556...")
-                    socket = Socket("10.214.143.14", 55556)
-                    outStream = socket?.getOutputStream()
-                    isConnected = true
-                    Log.d(TAG, "Connected to 10.214.143.14:55556")
-                    
-                    // Keep thread alive while connected
-                    while (isRunning && socket?.isConnected == true && !socket!!.isClosed) {
-                        Thread.sleep(1000)
-                    }
-                } catch (e: Exception) {
-                    isConnected = false
-                    Log.e(TAG, "Connection failed, retrying in 5 seconds", e)
-                    try {
-                        Thread.sleep(5000)
-                    } catch (ie: InterruptedException) {
-                        break
-                    }
-                } finally {
-                    isConnected = false
-                    try { socket?.close() } catch (e: Exception) {}
-                    socket = null
-                    outStream = null
-                }
-            }
-        }.apply { start() }
+        Log.d(TAG, "Starting FrameSender (via QUIC)")
     }
 
     fun stop() {
         isRunning = false
-        try { socket?.close() } catch (e: Exception) {}
-        thread?.interrupt()
-        thread = null
     }
 
-    private fun writeVarint(value: Long, out: OutputStream) {
+    private fun writeVarint(value: Long, out: java.io.ByteArrayOutputStream) {
         var v = value
         while (true) {
             if ((v and 0xFFFFFFFFFFFFFF80u.toLong()) == 0L) {
@@ -71,7 +39,7 @@ object FrameSender {
     }
 
     fun sendFrame(width: Int, height: Int, data: ByteArray) {
-        val out = outStream ?: return
+        if (!isRunning) return
         try {
             // Encode VideoFrame protobuf
             // Tag 1 (width)
@@ -94,18 +62,13 @@ object FrameSender {
             
             val protobufBytes = protoBaos.toByteArray()
             
-            // Length prefix (4 bytes big-endian)
-            val lengthPrefix = ByteBuffer.allocate(4).putInt(protobufBytes.size).array()
-            
-            out.write(lengthPrefix)
-            out.write(protobufBytes)
-            out.flush()
+            // Send directly through QuicServer
+            QuicServer.sendFrame(protobufBytes)
             
             val count = framesSent.incrementAndGet()
             Log.d(TAG, "Frames sent: $count")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send frame", e)
-            try { socket?.close() } catch (ex: Exception) {}
         }
     }
 }

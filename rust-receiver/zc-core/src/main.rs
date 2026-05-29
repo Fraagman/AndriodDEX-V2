@@ -34,9 +34,11 @@ fn main() {
     // Clone for the QUIC task
     let input_buffer_for_quic = input_buffer.clone();
     let is_connected_quic = is_connected.clone();
+    
+    let host = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1".to_string());
 
     rt.spawn(async move {
-        match zc_network::connect("127.0.0.1", 4433).await {
+        match zc_network::connect(&host, 4433).await {
             Ok(conn) => {
                 println!("Connected to mock server or host");
                 is_connected_quic.store(true, Ordering::SeqCst);

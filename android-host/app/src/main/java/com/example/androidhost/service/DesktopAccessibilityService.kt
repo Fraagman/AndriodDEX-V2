@@ -162,54 +162,30 @@ class DesktopAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---- Input Server (TCP on port 55557) ----
+    // ---- Input Server (via QUIC polling) ----
 
     private fun startInputServer() {
+        com.example.androidhost.quic.QuicServer.startServer(4433)
+        
         inputServerThread = Thread {
-            try {
-                serverSocket = ServerSocket(INPUT_PORT)
-                Log.d(TAG, "Input server listening on port $INPUT_PORT")
-                while (!Thread.currentThread().isInterrupted) {
-                    val client = serverSocket?.accept() ?: break
-                    Log.d(TAG, "Input client connected from ${client.remoteSocketAddress}")
-                    Thread {
-                        try {
-                            val dis = DataInputStream(client.getInputStream())
-                            while (!Thread.currentThread().isInterrupted) {
-                                // Read 4-byte little-endian length prefix
-                                val lenBytes = ByteArray(4)
-                                dis.readFully(lenBytes)
-                                val len = ByteBuffer.wrap(lenBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt()
-
-                                if (len <= 0 || len > 1024 * 1024) {
-                                    Log.e(TAG, "Invalid frame length: $len")
-                                    break
-                                }
-
-                                val data = ByteArray(len)
-                                dis.readFully(data)
-                                handleInputEvent(data)
-                            }
-                        } catch (e: EOFException) {
-                            Log.d(TAG, "Input client disconnected (EOF)")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Input client error", e)
-                        } finally {
-                            try { client.close() } catch (e: Exception) {}
-                        }
-                    }.apply {
-                        name = "InputClientHandler"
-                        isDaemon = true
-                        start()
+            val buffer = ByteArray(1024 * 1024)
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    val bytesRead = com.example.androidhost.quic.QuicServer.pollInput(buffer)
+                    if (bytesRead > 0) {
+                        val data = buffer.copyOf(bytesRead)
+                        handleInputEvent(data)
+                    } else {
+                        Thread.sleep(10) // Small delay if no data
                     }
-                }
-            } catch (e: Exception) {
-                if (!Thread.currentThread().isInterrupted) {
-                    Log.e(TAG, "Input server error", e)
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(TAG, "Input polling error", e)
                 }
             }
         }.apply {
-            name = "InputServerThread"
+            name = "InputPollingThread"
             isDaemon = true
             start()
         }
@@ -217,8 +193,6 @@ class DesktopAccessibilityService : AccessibilityService() {
 
     private fun stopInputServer() {
         inputServerThread?.interrupt()
-        try { serverSocket?.close() } catch (e: Exception) {}
-        serverSocket = null
         inputServerThread = null
     }
 
