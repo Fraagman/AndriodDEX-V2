@@ -4,6 +4,9 @@ members = [
     "zc-core",
     "zc-video",
     "zc-network",
-    "zc-protocol"
-, "zc-input", "zc-security"]
+    "zc-protocol",
+    "zc-input",
+    "zc-security",
+    "zc-audio"
+]
 default-members = ["zc-core"]

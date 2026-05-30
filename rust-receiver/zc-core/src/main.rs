@@ -21,6 +21,15 @@ fn main() {
     println!("{:?}", ping);
 
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<VideoFrame>();
+    
+    // Initialize audio player on main thread so stream lives forever
+    let (_audio_player, audio_sender) = match zc_audio::AudioPlayer::new() {
+        Ok((player, sender)) => (Some(player), Some(sender)),
+        Err(e) => {
+            eprintln!("Failed to initialize audio player: {}", e);
+            (None, None)
+        }
+    };
 
     // Shared state for input sending: holds serialized InputEvent bytes
     // The input polling thread pushes here; the QUIC sender drains from here.
@@ -49,31 +58,64 @@ fn main() {
                 println!("Connected to mock server or host");
                 is_connected_quic.store(true, Ordering::SeqCst);
 
-                // Spawn video receiver on a separate uni stream
-                let conn_video = conn.clone();
-                tokio::spawn(async move {
-                    if let Ok(mut stream) = conn_video.accept_uni().await {
-                        println!("Accepted video stream");
-                        std::thread::spawn(move || {
-                            let rt2 = tokio::runtime::Runtime::new().unwrap();
-                            rt2.block_on(async {
-                                loop {
-                                    let mut len_buf = [0u8; 4];
-                                    if stream.read_exact(&mut len_buf).await.is_err() {
-                                        break;
-                                    }
-                                    let len = u32::from_le_bytes(len_buf) as usize;
-                                    let mut frame_buf = vec![0u8; len];
-                                    if stream.read_exact(&mut frame_buf).await.is_err() {
-                                        break;
-                                    }
+                // Spawn media receiver on multiple uni streams
+                let conn_media = conn.clone();
+                // audio_sender is moved in from outer scope
+                let conn_media = conn.clone();
 
+                tokio::spawn(async move {
+                    loop {
+                        if let Ok(mut stream) = conn_media.accept_uni().await {
+                            let frame_tx_clone = frame_tx.clone();
+                            let ap_clone = audio_sender.clone();
+                            // Keep audio_player alive by cloning the Option (it doesn't implement Clone, wait, we can't clone it easily without Arc.
+                            // But wait! audio_player just needs to be held by the parent task so it doesn't get dropped.
+                            // tokio::spawn takes ownership of its environment, but it's a loop.
+                            // We don't need to move `audio_player` into the inner task. We can just move it into the outer `tokio::spawn`.
+                            // Let's just do `let _player_keepalive = &audio_player;` in the outer task so it's captured and moved into the outer task!
+                            tokio::spawn(async move {
+                                let mut len_buf = [0u8; 4];
+                                if stream.read_exact(&mut len_buf).await.is_err() {
+                                    return;
+                                }
+                                let len = u32::from_le_bytes(len_buf) as usize;
+                                let mut frame_buf = vec![0u8; len];
+                                if stream.read_exact(&mut frame_buf).await.is_err() {
+                                    return;
+                                }
+
+                                if frame_buf.is_empty() { return; }
+
+                                // Distinguish between Video (starts with 0x08) and Audio (starts with 0x00 big-endian length)
+                                if frame_buf[0] == 8 {
                                     if let Ok(frame) = VideoFrame::decode(&frame_buf[..]) {
-                                        let _ = frame_tx.send(frame);
+                                        let _ = frame_tx_clone.send(frame);
+                                    }
+                                } else if frame_buf[0] == 0 {
+                                    // Audio frame has 4-byte BE length prefix
+                                    if frame_buf.len() > 4 {
+                                        let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
+                                        if packet_len <= frame_buf.len() - 4 {
+                                            if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
+                                                if let Some(player) = ap_clone {
+                                                    let pcm_bytes = &audio_packet.pcm_data;
+                                                    if pcm_bytes.len() % 2 == 0 {
+                                                        let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
+                                                        for chunk in pcm_bytes.chunks_exact(2) {
+                                                            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                                            i16_samples.push(sample);
+                                                        }
+                                                        player.play_pcm(&i16_samples);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             });
-                        });
+                        } else {
+                            break;
+                        }
                     }
                 });
 

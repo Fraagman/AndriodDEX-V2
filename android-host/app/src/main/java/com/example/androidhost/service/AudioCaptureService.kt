@@ -101,12 +101,12 @@ class AudioCaptureService : Service() {
         val format = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
             .setSampleRate(48000)
-            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
             .build()
 
         val minBufferSize = AudioRecord.getMinBufferSize(
             48000,
-            AudioFormat.CHANNEL_IN_STEREO,
+            AudioFormat.CHANNEL_OUT_STEREO,
             AudioFormat.ENCODING_PCM_16BIT
         )
         

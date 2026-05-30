@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package audio;
+
+message AudioPacket {
+  bytes pcm_data = 1;  // Raw PCM 16-bit stereo 48kHz for now (we'll add Opus later)
+  uint64 timestamp = 2;
+}

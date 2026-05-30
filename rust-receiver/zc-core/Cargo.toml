@@ -17,3 +17,4 @@ pollster = "0.3"
 egui = "0.27"
 egui-wgpu = "0.27"
 egui-winit = { version = "0.27", default-features = false, features = ["links"] }
+zc-audio = { version = "0.1.0", path = "../zc-audio" }
