@@ -60,6 +60,7 @@ fun AnimatedWaveform(modifier: Modifier = Modifier) {
 fun Taskbar(
     quicState: Int, // 0 = Disconnected, 1 = Connecting, 2 = Active
     isAudioCapturing: Boolean,
+    vmState: com.example.androidhost.service.VmState,
     onLauncherClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
@@ -137,6 +138,35 @@ fun Taskbar(
                         color = when (quicState) {
                             2 -> Color.Green
                             1 -> Color.Yellow
+                            else -> Color.Red
+                        },
+                        shape = CircleShape
+                    )
+            )
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            // VM Status
+            val vmStatusText = when (vmState) {
+                com.example.androidhost.service.VmState.RUNNING -> "VM: Running"
+                com.example.androidhost.service.VmState.STARTING -> "VM: Starting"
+                com.example.androidhost.service.VmState.UNSUPPORTED -> "VM: Unsupported"
+                else -> "VM: Off"
+            }
+            Text(
+                text = vmStatusText,
+                color = Color.White,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        color = when (vmState) {
+                            com.example.androidhost.service.VmState.RUNNING -> Color.Green
+                            com.example.androidhost.service.VmState.STARTING -> Color.Yellow
+                            com.example.androidhost.service.VmState.UNSUPPORTED -> Color.Yellow
                             else -> Color.Red
                         },
                         shape = CircleShape

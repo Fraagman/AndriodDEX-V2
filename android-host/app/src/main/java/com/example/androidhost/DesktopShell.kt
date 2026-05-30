@@ -72,6 +72,7 @@ fun DesktopShellContent(
     var showSettings by remember { mutableStateOf(false) }
 
     val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
+    val vmState by com.example.androidhost.service.VmService.vmState.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
 
     LaunchedEffect(Unit) {
@@ -207,6 +208,36 @@ fun DesktopShellContent(
                             onCheckedChange = { onRequestAudioCapture(it) }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "AVF VM Desktop",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        Button(
+                            onClick = {
+                                val intent = android.content.Intent(context, com.example.androidhost.service.VmService::class.java)
+                                if (vmState == com.example.androidhost.service.VmState.RUNNING) {
+                                    intent.action = "STOP_VM"
+                                    context.startService(intent)
+                                } else {
+                                    intent.action = "START_VM"
+                                    context.startService(intent)
+                                }
+                            },
+                            enabled = vmState != com.example.androidhost.service.VmState.UNSUPPORTED
+                        ) {
+                            Text(if (vmState == com.example.androidhost.service.VmState.RUNNING) "Stop" else "Start")
+                        }
+                    }
                 }
             }
         }
@@ -216,6 +247,7 @@ fun DesktopShellContent(
             Taskbar(
                 quicState = quicState,
                 isAudioCapturing = isAudioCapturing,
+                vmState = vmState,
                 onLauncherClick = { showLauncher = !showLauncher },
                 onSettingsClick = { showSettings = !showSettings }
             )
