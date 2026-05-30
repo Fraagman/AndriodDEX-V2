@@ -32,12 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Client connected from {:?} (pairing: {})", connection.remote_address(), is_pairing);
             
             if is_pairing {
+                // Wait for the client to send "P" and public key
+                let _ = connection.accept_uni().await;
                 // Send OK to pass pairing
                 if let Ok(mut send) = connection.open_uni().await {
                     let _ = send.write_all(b"OK").await;
                     let _ = send.finish();
                 }
-                // Allow the client to disconnect and reconnect
+                // Wait for client to close
+                let _ = connection.closed().await;
                 return;
             }
             
@@ -54,19 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for y in 0..height {
                         for x in 0..width {
                             let idx = ((y * width + x) * 4) as usize;
-                            if x < width / 2 {
-                                // Red
-                                rgba_data[idx] = 255;
-                                rgba_data[idx+1] = 0;
-                                rgba_data[idx+2] = 0;
-                                rgba_data[idx+3] = 255;
-                            } else {
-                                // Blue
-                                rgba_data[idx] = 0;
-                                rgba_data[idx+1] = 0;
-                                rgba_data[idx+2] = 255;
-                                rgba_data[idx+3] = 255;
-                            }
+                            rgba_data[idx] = (x as f32 / width as f32 * 255.0) as u8;     // R (gradient horizontally)
+                            rgba_data[idx+1] = (y as f32 / height as f32 * 255.0) as u8;  // G (gradient vertically)
+                            rgba_data[idx+2] = 128;                                       // B (constant)
+                            rgba_data[idx+3] = 255;                                       // A
                         }
                     }
 
