@@ -269,6 +269,7 @@ fn main() {
                     }
                     WindowEvent::RedrawRequested => {
                         while let Ok(frame) = frame_rx.try_recv() {
+                            println!("Received frame, source: {}", frame.source);
                             last_is_vm = frame.source == 1; // 1 is VM_WAYLAND
                             
                             let recreate = match video_decoder.as_ref() {

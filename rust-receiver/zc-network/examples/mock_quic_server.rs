@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let cert_der = cert.cert.der().to_vec();
     let key_der = cert.key_pair.serialize_der();
@@ -15,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_no_client_auth()
         .with_single_cert(cert_chain, private_key)?;
     
-    server_crypto.alpn_protocols = vec![b"androiddex".to_vec()];
+    server_crypto.alpn_protocols = vec![b"androiddex-pairing".to_vec(), b"androiddex".to_vec()];
     
     let server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
     let endpoint = Endpoint::server(server_config, "0.0.0.0:4433".parse()?)?;
@@ -25,7 +27,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
             let connection = incoming.await.unwrap();
-            println!("Client connected from {:?}", connection.remote_address());
+            let is_pairing = connection.handshake_data().unwrap().downcast::<quinn::crypto::rustls::HandshakeData>().unwrap().protocol == Some(b"androiddex-pairing".to_vec());
+            
+            println!("Client connected from {:?} (pairing: {})", connection.remote_address(), is_pairing);
+            
+            if is_pairing {
+                // Send OK to pass pairing
+                if let Ok(mut send) = connection.open_uni().await {
+                    let _ = send.write_all(b"OK").await;
+                    let _ = send.finish();
+                }
+                // Allow the client to disconnect and reconnect
+                return;
+            }
             
             let conn_clone = connection.clone();
             tokio::spawn(async move {
@@ -62,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             height,
                             timestamp: 0,
                             rgba_data: rgba_data.clone(),
+                            source: 1, // VM_WAYLAND
                         };
                         let mut buf = Vec::new();
                         frame.encode(&mut buf).unwrap();
