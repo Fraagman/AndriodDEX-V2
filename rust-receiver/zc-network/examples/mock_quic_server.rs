@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let conn_clone = connection.clone();
             tokio::spawn(async move {
                 if let Ok(mut send) = conn_clone.open_uni().await {
-                    use zc_protocol::video::VideoFrame;
+                    use zc_protocol::video::{HybridFrame, hybrid_frame, TileUpdate, VideoFrame};
                     use prost::Message;
 
                     let width = 1920;
@@ -70,16 +70,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    // Send base video frame once
+                    let frame = VideoFrame {
+                        width,
+                        height,
+                        timestamp: 0,
+                        rgba_data: rgba_data.clone(),
+                        source: 1, // VM_WAYLAND
+                    };
+                    let hybrid_video = HybridFrame {
+                        payload: Some(hybrid_frame::Payload::Video(frame)),
+                    };
+                    let mut buf = Vec::new();
+                    hybrid_video.encode(&mut buf).unwrap();
+                    let len = buf.len() as u32;
+                    let _ = send.write_all(&len.to_le_bytes()).await;
+                    let _ = send.write_all(&buf).await;
+
+                    // Then send a tile continuously
+                    let tile_width = 100;
+                    let tile_height = 100;
+                    let mut tile_rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
+                    for i in 0..(tile_width * tile_height) {
+                        tile_rgba[(i * 4) as usize] = 0;
+                        tile_rgba[(i * 4 + 1) as usize] = 255;
+                        tile_rgba[(i * 4 + 2) as usize] = 0;
+                        tile_rgba[(i * 4 + 3) as usize] = 255; // Solid green
+                    }
+                    
+                    let mut zstd_data = Vec::new();
+                    zstd::stream::copy_encode(tile_rgba.as_slice(), &mut zstd_data, 1).unwrap();
+
                     loop {
-                        let frame = VideoFrame {
-                            width,
-                            height,
-                            timestamp: 0,
-                            rgba_data: rgba_data.clone(),
-                            source: 1, // VM_WAYLAND
+                        let tile = TileUpdate {
+                            x: 0,
+                            y: 0,
+                            width: tile_width,
+                            height: tile_height,
+                            zstd_data: zstd_data.clone(),
+                        };
+                        let hybrid_tile = HybridFrame {
+                            payload: Some(hybrid_frame::Payload::Tile(tile)),
                         };
                         let mut buf = Vec::new();
-                        frame.encode(&mut buf).unwrap();
+                        hybrid_tile.encode(&mut buf).unwrap();
                         
                         let len = buf.len() as u32;
                         if send.write_all(&len.to_le_bytes()).await.is_err() { break; }

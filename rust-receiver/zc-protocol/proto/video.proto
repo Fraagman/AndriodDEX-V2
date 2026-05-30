@@ -13,3 +13,27 @@ message VideoFrame {
     bytes rgba_data = 4;
     SourceType source = 5;
 }
+
+message TileUpdate {
+    uint32 x = 1;
+    uint32 y = 2;
+    uint32 width = 3;
+    uint32 height = 4;
+    bytes zstd_data = 5;
+}
+
+message CursorUpdate {
+    uint32 x = 1;
+    uint32 y = 2;
+    bytes bitmap = 3;
+    uint32 width = 4;
+    uint32 height = 5;
+}
+
+message HybridFrame {
+    oneof payload {
+        VideoFrame video = 1;
+        TileUpdate tile = 2;
+        CursorUpdate cursor = 3;
+    }
+}

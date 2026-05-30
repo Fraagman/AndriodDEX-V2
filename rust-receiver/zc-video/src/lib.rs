@@ -1,8 +1,11 @@
 use wgpu::util::DeviceExt;
 use zc_protocol::video::VideoFrame;
 
+pub mod tile_compositor;
+pub use tile_compositor::TileCompositor;
+
 pub struct VideoDecoder {
-    texture: wgpu::Texture,
+    pub texture: wgpu::Texture,
     pub texture_view: wgpu::TextureView,
     texture_size: wgpu::Extent3d,
 }

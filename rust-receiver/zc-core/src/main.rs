@@ -8,7 +8,7 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
 };
 use zc_protocol::protocol::Ping;
-use zc_protocol::video::VideoFrame;
+use zc_protocol::video::{VideoFrame, HybridFrame, hybrid_frame};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Instant;
@@ -20,7 +20,7 @@ fn main() {
     let ping = Ping { timestamp: 0 };
     println!("{:?}", ping);
 
-    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<VideoFrame>();
+    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<HybridFrame>();
     
     // Initialize audio player on main thread so stream lives forever
     let (_audio_player, audio_sender) = match zc_audio::AudioPlayer::new() {
@@ -88,7 +88,7 @@ fn main() {
 
                                 // Distinguish between Video (starts with 0x08) and Audio (starts with 0x00 big-endian length)
                                 if frame_buf[0] == 8 {
-                                    if let Ok(frame) = VideoFrame::decode(&frame_buf[..]) {
+                                    if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
                                         let _ = frame_tx_clone.send(frame);
                                     }
                                 } else if frame_buf[0] == 0 {
@@ -238,6 +238,13 @@ fn main() {
     let mut mouse_pos = (0.0, 0.0);
     let mut last_is_vm = false;
 
+    let mut tile_compositor = zc_video::TileCompositor::new(
+        renderer.device(),
+        renderer.config().format,
+        0,
+        0,
+    );
+
     let window_id = window.id();
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
@@ -268,21 +275,35 @@ fn main() {
                         renderer.resize(*physical_size);
                     }
                     WindowEvent::RedrawRequested => {
-                        while let Ok(frame) = frame_rx.try_recv() {
-                            println!("Received frame, source: {}", frame.source);
-                            last_is_vm = frame.source == 1; // 1 is VM_WAYLAND
-                            
-                            let recreate = match video_decoder.as_ref() {
-                                Some(decoder) => decoder.width() != frame.width || decoder.height() != frame.height,
-                                None => true,
-                            };
-                            
-                            if recreate {
-                                video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
-                            }
-                            
-                            if let Some(decoder) = video_decoder.as_mut() {
-                                decoder.decode_and_upload(renderer.queue(), frame);
+                        while let Ok(hybrid) = frame_rx.try_recv() {
+                            match hybrid.payload {
+                                Some(hybrid_frame::Payload::Video(frame)) => {
+                                    println!("Received base frame, source: {}", frame.source);
+                                    last_is_vm = frame.source == 1;
+                                    
+                                    tile_compositor.set_base_size(frame.width, frame.height);
+
+                                    let recreate = match video_decoder.as_ref() {
+                                        Some(decoder) => decoder.width() != frame.width || decoder.height() != frame.height,
+                                        None => true,
+                                    };
+                                    
+                                    if recreate {
+                                        video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
+                                    }
+                                    
+                                    if let Some(decoder) = video_decoder.as_mut() {
+                                        decoder.decode_and_upload(renderer.queue(), frame);
+                                    }
+                                }
+                                Some(hybrid_frame::Payload::Tile(tile)) => {
+                                    println!("Received tile at ({}, {}) {}x{}", tile.x, tile.y, tile.width, tile.height);
+                                    tile_compositor.apply_tile(tile, renderer.device(), renderer.queue());
+                                }
+                                Some(hybrid_frame::Payload::Cursor(cursor)) => {
+                                    tile_compositor.update_cursor(cursor, renderer.device(), renderer.queue());
+                                }
+                                None => {}
                             }
                         }
 
@@ -311,7 +332,9 @@ fn main() {
                                             timestamp_writes: None,
                                             occlusion_query_set: None,
                                         });
-                                        renderer.draw_video(&mut rpass, bind_group.as_ref(), time);
+                                        if let Some(decoder) = video_decoder.as_ref() {
+                                            tile_compositor.composite(&decoder.texture, &mut rpass, renderer.device(), renderer.queue());
+                                        }
                                     }
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
                                 }

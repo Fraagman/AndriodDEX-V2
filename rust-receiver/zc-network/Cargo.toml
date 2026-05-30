@@ -18,3 +18,4 @@ rcgen = "0.13"
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "time"] }
 prost = "0.13"
 zc-protocol = { path = "../zc-protocol" }
+zstd = "0.13"
