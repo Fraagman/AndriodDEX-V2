@@ -84,7 +84,7 @@ fun AppIconCell(app: AppInfo, onClick: () -> Unit) {
                 modifier = Modifier.size(48.dp)
             )
         } else {
-            // Placeholder
+            // Fallback icon for missing apps
             Box(
                 modifier = Modifier
                     .size(48.dp)

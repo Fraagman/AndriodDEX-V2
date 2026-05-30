@@ -3,8 +3,8 @@ set -e
 
 echo "Downloading minimal VM payload (Alpine Linux rootfs)..."
 
-# In a real scenario, this would be a custom built kernel, initrd, and rootfs.
-# For demonstration/MVP purposes, we provide instructions and a dummy file.
+# This script downloads or prepares the VM payload.
+# For production, this should fetch the actual signed VM image.
 
 # 1. Download Alpine Mini Root Filesystem
 # wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/aarch64/alpine-minirootfs-3.19.0-aarch64.tar.gz
@@ -24,8 +24,11 @@ echo "Downloading minimal VM payload (Alpine Linux rootfs)..."
 # Create /mnt/etc/xdg/weston/weston.ini ...
 # sudo umount /mnt
 
-echo "Creating dummy vm.img for MVP testing..."
-dd if=/dev/zero of=vm.img bs=1M count=10
+if [ ! -f vm.img ]; then
+    echo "Error: vm.img not found. Please provide a valid Microdroid payload."
+    exit 1
+fi
+
 echo "Done."
 
 echo "To test on device:"

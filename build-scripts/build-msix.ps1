@@ -11,26 +11,10 @@ $MSIX_PATH = "$RELEASE_DIR\androiddex.msix"
 New-Item -ItemType Directory -Force -Path "$PACKAGING_DIR\Assets" | Out-Null
 New-Item -ItemType Directory -Force -Path $RELEASE_DIR | Out-Null
 
-# Create dummy assets for the appx
-function Create-DummyImage {
-    param ($Path, $Width, $Height)
-    if (-not (Test-Path $Path)) {
-        # Using a simple script to generate an image
-        Add-Type -AssemblyName System.Drawing
-        $bmp = New-Object System.Drawing.Bitmap $Width, $Height
-        $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-        $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::Blue)
-        $graphics.FillRectangle($brush, 0, 0, $Width, $Height)
-        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-        $graphics.Dispose()
-        $bmp.Dispose()
-    }
-}
-Create-DummyImage "$PACKAGING_DIR\Assets\StoreLogo.png" 50 50
-Create-DummyImage "$PACKAGING_DIR\Assets\Square150x150Logo.png" 150 150
-Create-DummyImage "$PACKAGING_DIR\Assets\Square44x44Logo.png" 44 44
-Create-DummyImage "$PACKAGING_DIR\Assets\Wide310x150Logo.png" 310 150
-Create-DummyImage "$PACKAGING_DIR\Assets\SplashScreen.png" 620 300
+# Images will be generated and placed in Assets directory directly
+
+# (Removed large dummy asset generation)
+
 
 # Step 1: cargo build
 Write-Host "Building zc-core in release mode..."
@@ -72,9 +56,18 @@ if (Test-Path $MSIX_PATH) { Remove-Item $MSIX_PATH -Force }
 & $MakeAppxPath pack /d $PACKAGING_DIR /p $MSIX_PATH /o
 
 # Step 4: Sign
-# Instructions say: If signtool.exe available: signtool sign /fd sha256 /a androiddex.msix
 Write-Host "Signing MSIX..."
-& $SignToolPath sign /fd sha256 /a $MSIX_PATH
+$CertPath = "$PACKAGING_DIR\AndroidDEX.pfx"
+$CertPassword = "password"
+
+if (-not (Test-Path $CertPath)) {
+    Write-Host "Generating self-signed certificate for signing..."
+    $Cert = New-SelfSignedCertificate -Type Custom -Subject "CN=AndroidDex Test" -KeyUsage DigitalSignature -FriendlyName "AndroidDEX Dev Cert" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+    $Password = ConvertTo-SecureString -String $CertPassword -Force -AsPlainText
+    Export-PfxCertificate -Cert $Cert -FilePath $CertPath -Password $Password
+}
+
+& $SignToolPath sign /fd sha256 /a /f $CertPath /p $CertPassword $MSIX_PATH
 if ($LASTEXITCODE -ne 0) {
     Write-Host "SignTool failed to sign automatically. You might need to specify a certificate manually." -ForegroundColor Yellow
 }

@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     );
     
     db.close();
-    return NextResponse.json({ success: true, id });
+    return NextResponse.json({ success: true, id }, { status: 201 });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

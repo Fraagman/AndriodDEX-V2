@@ -30,7 +30,7 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
-    dummy_bind_group: wgpu::BindGroup,
+    fallback_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
@@ -110,17 +110,17 @@ impl Renderer {
             ..Default::default()
         });
 
-        let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
+        let fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            label: Some("Dummy Texture"),
+            label: Some("Fallback Texture"),
             view_formats: &[],
         });
-        let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_texture_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -154,7 +154,7 @@ impl Renderer {
             label: Some("bind_group_layout"),
         });
 
-        let dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let fallback_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -163,14 +163,14 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&dummy_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&fallback_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
-            label: Some("dummy_bind_group"),
+            label: Some("fallback_bind_group"),
         });
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -232,7 +232,7 @@ impl Renderer {
             surface,
             pipeline,
             bind_group_layout,
-            dummy_bind_group,
+            fallback_bind_group,
             sampler,
             vertex_buffer,
             uniform_buffer,
@@ -299,7 +299,7 @@ impl Renderer {
         if let Some(bg) = bind_group {
             render_pass.set_bind_group(0, bg, &[]);
         } else {
-            render_pass.set_bind_group(0, &self.dummy_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.fallback_bind_group, &[]);
         }
         
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));

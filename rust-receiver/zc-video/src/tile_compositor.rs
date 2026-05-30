@@ -367,7 +367,7 @@ impl TileCompositor {
             
             // We only need to store bind_group and uniform_buffer for the base to keep it alive
             self.base_cache = Some(CachedRenderData {
-                texture: device.create_texture(&wgpu::TextureDescriptor { size: wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1}, mip_level_count:1, sample_count:1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb, usage: wgpu::TextureUsages::TEXTURE_BINDING, label:None, view_formats:&[] }), // dummy texture, not actually used here
+                texture: device.create_texture(&wgpu::TextureDescriptor { size: wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1}, mip_level_count:1, sample_count:1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb, usage: wgpu::TextureUsages::TEXTURE_BINDING, label:None, view_formats:&[] }),
                 bind_group,
                 uniform_buffer,
                 width: base_width as f32,

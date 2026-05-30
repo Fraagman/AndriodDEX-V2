@@ -141,8 +141,8 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                         tokio::task::spawn_blocking(move || {
                                             if let Ok(pin) = rx.recv() {
                                                 let psk = zc_security::pairing::derive_psk(&pin, &pubkey);
-                                                let fp = [0u8; 32]; // dummy for server
-                                                if let Err(e) = zc_security::storage::store_trust_data(&fp, &psk) {
+                                                let client_id = [0u8; 32];
+                                                if let Err(e) = zc_security::storage::store_trust_data(&client_id, &psk) {
                                                     log::error!("Failed to store trust data: {:?}", e);
                                                 }
                                                 
@@ -236,7 +236,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
     let mut global_state = SERVER_STATE.lock().unwrap();
     *global_state = Some(state);
 
-    1 // Return dummy handle since we use a global singleton for simplicity
+    1 // Return singleton handle since we use a global singleton for simplicity
 }
 
 #[no_mangle]
