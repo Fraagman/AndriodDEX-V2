@@ -157,7 +157,29 @@ fn main() {
                     }
                 }
             }
-            Err(e) => println!("Connection failed: {}", e),
+            Err(e) => {
+                println!("Connection failed: {}. Falling back to mock 1kHz audio...", e);
+                if let Some(ap) = audio_sender {
+                    std::thread::spawn(move || {
+                        let mut phase: f32 = 0.0;
+                        let phase_inc = 1000.0 * 2.0 * std::f32::consts::PI / 48000.0;
+                        loop {
+                            let mut buffer = Vec::with_capacity(4800);
+                            for _ in 0..2400 {
+                                let sample = (phase.sin() * 30000.0) as i16;
+                                buffer.push(sample); // Left
+                                buffer.push(sample); // Right
+                                phase += phase_inc;
+                                if phase > 2.0 * std::f32::consts::PI {
+                                    phase -= 2.0 * std::f32::consts::PI;
+                                }
+                            }
+                            ap.play_pcm(&buffer);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    });
+                }
+            }
         }
     });
 
