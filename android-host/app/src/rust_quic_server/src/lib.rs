@@ -88,7 +88,11 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
             return;
         }
         
-        let server_config = ServerConfig::with_crypto(Arc::new(quic_config_res.unwrap()));
+        let mut server_config = ServerConfig::with_crypto(Arc::new(quic_config_res.unwrap()));
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
+        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+        server_config.transport_config(Arc::new(transport_config));
 
         let bind_addr_res = format!("0.0.0.0:{}", port).parse();
         if let Err(e) = bind_addr_res {
@@ -113,13 +117,19 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                     Ok(connection) => {
                         println!("QUIC connected to client");
 
-                        let is_pairing = connection.handshake_data().unwrap().downcast::<rustls::ServerConnection>().unwrap().alpn_protocol() == Some(b"androiddex-pairing".as_slice());
+                        let conn_clone = connection.clone();
+                        let mut video_rx = std::mem::replace(&mut video_rx_opt, None).unwrap();
+                        let input_tx_clone = input_tx.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Ok(mut stream) = conn_clone.accept_uni().await {
+                                let mut prefix = [0u8; 1];
+                                if stream.read_exact(&mut prefix).await.is_err() {
+                                    return;
+                                }
 
-                        if is_pairing {
-                            log::info!("Handling pairing connection...");
-                            let conn = connection.clone();
-                            tokio::spawn(async move {
-                                if let Ok(mut stream) = conn.accept_uni().await {
+                                if prefix[0] == b'P' {
+                                    log::info!("Handling pairing connection...");
                                     let mut pubkey = [0u8; 32];
                                     if stream.read_exact(&mut pubkey).await.is_ok() {
                                         log::warn!("Received pairing request. Waiting for Java to provide PIN.");
@@ -127,23 +137,19 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                         let (tx, rx) = std::sync::mpsc::channel();
                                         *PAIRING_WAKER.lock().unwrap() = Some(tx);
                                         
-                                        // Wait for Java to call providePin
-                                        // Since we are in a tokio task, blocking recv will block the worker thread.
-                                        // It's better to use tokio::sync::oneshot, but mpsc is fine for this low-concurrency pairing thread if we don't mind blocking one worker.
-                                        // To be safe, we'll just poll or use tokio channel.
-                                        
-                                        // We will spawn a blocking task to wait for the mpsc channel
-                                        let conn_clone = conn.clone();
+                                        let c_clone = conn_clone.clone();
                                         tokio::task::spawn_blocking(move || {
                                             if let Ok(pin) = rx.recv() {
                                                 let psk = zc_security::pairing::derive_psk(&pin, &pubkey);
                                                 let fp = [0u8; 32]; // dummy for server
-                                                let _ = zc_security::storage::store_trust_data(&fp, &psk);
+                                                if let Err(e) = zc_security::storage::store_trust_data(&fp, &psk) {
+                                                    log::error!("Failed to store trust data: {:?}", e);
+                                                }
                                                 
                                                 // Send OK response
                                                 let rt = tokio::runtime::Handle::current();
                                                 rt.block_on(async move {
-                                                    if let Ok(mut reply) = conn_clone.open_uni().await {
+                                                    if let Ok(mut reply) = c_clone.open_uni().await {
                                                         let _ = reply.write_all(b"OK").await;
                                                         let _ = reply.finish();
                                                     }
@@ -152,75 +158,66 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                             }
                                         });
                                     }
-                                }
-                            });
-                            continue;
-                        }
-                        
-                        // Authenticate
-                        let auth_res = async {
-                            if let Ok(mut auth_stream) = connection.accept_uni().await {
-                                let mut token = [0u8; 32];
-                                if auth_stream.read_exact(&mut token).await.is_err() { return false; }
-                                if let Some((_, psk)) = zc_security::storage::load_trust_data() {
-                                    use sha2::{Sha256, Digest};
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(&psk);
-                                    hasher.update(b"auth");
-                                    let expected: [u8; 32] = hasher.finalize().into();
-                                    return token == expected;
-                                }
-                            }
-                            false
-                        }.await;
-
-                        if !auth_res {
-                            log::error!("Authentication failed");
-                            continue;
-                        }
-                        log::info!("Client authenticated successfully");
-                        
-
-
-                        // For simplicity, handle one connection at a time
-                        // Stop the previous tasks and start new ones
-                        
-                        // We will just do it sequentially for now
-                        let mut video_rx = std::mem::replace(&mut video_rx_opt, None).unwrap();
-                        let conn_video = connection.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                if let Some(frame_data) = video_rx.recv().await {
-                                    if let Ok(mut stream) = conn_video.open_uni().await {
-                                        let len = frame_data.len() as u32;
-                                        let _ = stream.write_all(&len.to_le_bytes()).await;
-                                        let _ = stream.write_all(&frame_data).await;
+                                    return;
+                                } else if prefix[0] == b'A' {
+                                    log::info!("Handling auth connection...");
+                                    let mut token = [0u8; 32];
+                                    if stream.read_exact(&mut token).await.is_err() { return; }
+                                    
+                                    let mut auth_ok = false;
+                                    if let Some((_, psk)) = zc_security::storage::load_trust_data() {
+                                        use sha2::{Sha256, Digest};
+                                        let mut hasher = Sha256::new();
+                                        hasher.update(&psk);
+                                        hasher.update(b"auth");
+                                        let expected: [u8; 32] = hasher.finalize().into();
+                                        auth_ok = token == expected;
                                     }
-                                }
-                            }
-                        });
+                                    
+                                    if !auth_ok {
+                                        log::error!("Authentication failed");
+                                        return;
+                                    }
+                                    log::info!("Client authenticated successfully");
 
-                        let conn_input = connection.clone();
-                        let input_tx_clone = input_tx.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                if let Ok(mut stream) = conn_input.accept_uni().await {
-                                    let tx = input_tx_clone.clone();
+                                    // Spawns video and input handlers
+                                    let conn_video = conn_clone.clone();
                                     tokio::spawn(async move {
                                         loop {
-                                            let mut len_buf = [0u8; 4];
-                                            if stream.read_exact(&mut len_buf).await.is_err() { break; }
-                                            let len = u32::from_le_bytes(len_buf) as usize;
-                                            let mut buf = vec![0u8; len];
-                                            if stream.read_exact(&mut buf).await.is_err() { break; }
-                                            let _ = tx.send(buf);
+                                            if let Some(frame_data) = video_rx.recv().await {
+                                                if let Ok(mut stream) = conn_video.open_uni().await {
+                                                    let len = frame_data.len() as u32;
+                                                    let _ = stream.write_all(&len.to_le_bytes()).await;
+                                                    let _ = stream.write_all(&frame_data).await;
+                                                }
+                                            }
                                         }
                                     });
-                                } else {
-                                    break;
+
+                                    let conn_input = conn_clone.clone();
+                                    tokio::spawn(async move {
+                                        loop {
+                                            if let Ok(mut stream) = conn_input.accept_uni().await {
+                                                let tx = input_tx_clone.clone();
+                                                tokio::spawn(async move {
+                                                    loop {
+                                                        let mut len_buf = [0u8; 4];
+                                                        if stream.read_exact(&mut len_buf).await.is_err() { break; }
+                                                        let len = u32::from_le_bytes(len_buf) as usize;
+                                                        let mut buf = vec![0u8; len];
+                                                        if stream.read_exact(&mut buf).await.is_err() { break; }
+                                                        let _ = tx.send(buf);
+                                                    }
+                                                });
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         });
+                        
                     }
                     Err(e) => {
                         println!("Connection failed: {}", e);
@@ -249,14 +246,6 @@ pub extern "C" fn Java_com_example_androidhost_security_SecurityBridge_verifyPin
     pin: jni::objects::JString,
 ) -> jboolean {
     let pin_str: String = env.get_string(&pin).expect("Couldn't get string").into();
-    // For development, hardcode test PIN
-    if pin_str == "000000" {
-        // Also feed the PIN to the QUIC server pairing flow so it proceeds
-        if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {
-            let _ = tx.send(pin_str);
-        }
-        return 1;
-    }
     
     // Attempt to verify via QUIC pairing flow
     if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {

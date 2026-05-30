@@ -17,9 +17,9 @@ import com.example.androidhost.service.TetheringService
 
 class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
-        // Continue regardless of permission, we just won't show notifications if denied
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        // Continue regardless of permission, we just won't show notifications or capture audio if denied
     }
 
     private val mediaProjectionLauncher = registerForActivityResult(
@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val currentScreen = androidx.compose.runtime.remember { 
-                androidx.compose.runtime.mutableStateOf(Screen.DESKTOP) 
+                androidx.compose.runtime.mutableStateOf(Screen.PIN) 
             }
 
             when (currentScreen.value) {
@@ -71,19 +71,23 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val permissionsToRequest = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
             }
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (permissionsToRequest.isNotEmpty()) {
+            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
 
         startService(Intent(this, TetheringService::class.java))
         
         com.example.androidhost.network.LocalInputServer.start()
+        com.example.androidhost.quic.QuicServer.startServer(4433, filesDir.absolutePath)
     }
 }
 

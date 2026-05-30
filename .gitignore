@@ -14,4 +14,4 @@
 .cxx
 local.properties
 rust-receiver/target/  
- 
+ android-host/app/src/rust_quic_server/target/

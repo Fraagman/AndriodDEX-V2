@@ -127,7 +127,12 @@ pub async fn connect(host: &str, port: u16, pin_callback: impl Fn(String) + Send
     
     crypto.alpn_protocols = vec![b"androiddex-pairing".to_vec()];
 
-    let client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    client_config.transport_config(Arc::new(transport_config));
+    
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
@@ -143,6 +148,7 @@ pub async fn connect(host: &str, port: u16, pin_callback: impl Fn(String) + Send
     let public = PublicKey::from(&secret);
 
     let mut stream = pairing_conn.open_uni().await?;
+    stream.write_all(b"P").await?;
     stream.write_all(public.as_bytes()).await?;
     stream.finish()?;
 
@@ -177,7 +183,12 @@ pub async fn connect_authenticated(host: &str, port: u16, fp: Fingerprint, psk: 
     
     crypto.alpn_protocols = vec![b"androiddex".to_vec()];
 
-    let client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    client_config.transport_config(Arc::new(transport_config));
+    
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
@@ -192,6 +203,7 @@ pub async fn connect_authenticated(host: &str, port: u16, fp: Fingerprint, psk: 
     hasher.update(&psk);
     hasher.update(b"auth");
     let token: [u8; 32] = hasher.finalize().into();
+    auth_stream.write_all(b"A").await?;
     auth_stream.write_all(&token).await?;
     auth_stream.finish()?;
 

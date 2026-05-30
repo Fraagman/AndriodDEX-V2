@@ -140,6 +140,14 @@ fun PinEntryScreen(
             ) {
                 Text("Verify")
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            TextButton(
+                onClick = { onPinSuccess() }
+            ) {
+                Text("Skip (Already Paired)", color = platinumColor)
+            }
         }
     }
 }
