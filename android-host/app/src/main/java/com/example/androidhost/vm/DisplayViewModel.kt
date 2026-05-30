@@ -15,6 +15,15 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class DisplayViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private val _regionStats = MutableStateFlow(Pair(0, false))
+        val regionStats: StateFlow<Pair<Int, Boolean>> = _regionStats.asStateFlow()
+
+        fun updateRegionStats(tilesSent: Int, isVideo: Boolean) {
+            _regionStats.value = Pair(tilesSent, isVideo)
+        }
+    }
+
     private val _virtualDisplaySurface = MutableStateFlow<Surface?>(null)
     val virtualDisplaySurface: StateFlow<Surface?> = _virtualDisplaySurface.asStateFlow()
 

@@ -38,36 +38,87 @@ object FrameSender {
         }
     }
 
-    fun sendFrame(width: Int, height: Int, data: ByteArray) {
+    fun sendVideoFrame(width: Int, height: Int, data: ByteArray) {
         if (!isRunning) return
         try {
-            // Encode VideoFrame protobuf
-            // Tag 1 (width)
             val protoBaos = java.io.ByteArrayOutputStream(data.size + 100)
-            protoBaos.write(8)
+            protoBaos.write(8) // Tag 1 (width)
             writeVarint(width.toLong(), protoBaos)
-            
-            // Tag 2 (height)
-            protoBaos.write(16)
+            protoBaos.write(16) // Tag 2 (height)
             writeVarint(height.toLong(), protoBaos)
-            
-            // Tag 3 (timestamp = 0)
-            protoBaos.write(24)
+            protoBaos.write(24) // Tag 3 (timestamp = 0)
             writeVarint(0L, protoBaos)
-            
-            // Tag 4 (rgba_data)
-            protoBaos.write(34)
+            protoBaos.write(34) // Tag 4 (rgba_data)
             writeVarint(data.size.toLong(), protoBaos)
             protoBaos.write(data)
-            
-            val protobufBytes = protoBaos.toByteArray()
-            
-            // Send directly through QuicServer
-            QuicServer.sendFrame(protobufBytes)
+            val vfBytes = protoBaos.toByteArray()
+
+            val hfBaos = java.io.ByteArrayOutputStream(vfBytes.size + 10)
+            hfBaos.write(10) // HybridFrame.video (tag 1, wire type 2)
+            writeVarint(vfBytes.size.toLong(), hfBaos)
+            hfBaos.write(vfBytes)
+
+            QuicServer.sendFrame(hfBaos.toByteArray())
             val count = framesSent.incrementAndGet()
             Log.d(TAG, "Video frame sent via QUIC: $count")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send frame", e)
+        }
+    }
+
+    fun sendTileUpdate(x: Int, y: Int, width: Int, height: Int, zstdData: ByteArray) {
+        if (!isRunning) return
+        try {
+            val protoBaos = java.io.ByteArrayOutputStream(zstdData.size + 100)
+            protoBaos.write(8) // Tag 1 (x)
+            writeVarint(x.toLong(), protoBaos)
+            protoBaos.write(16) // Tag 2 (y)
+            writeVarint(y.toLong(), protoBaos)
+            protoBaos.write(24) // Tag 3 (width)
+            writeVarint(width.toLong(), protoBaos)
+            protoBaos.write(32) // Tag 4 (height)
+            writeVarint(height.toLong(), protoBaos)
+            protoBaos.write(42) // Tag 5 (zstd_data)
+            writeVarint(zstdData.size.toLong(), protoBaos)
+            protoBaos.write(zstdData)
+            val tuBytes = protoBaos.toByteArray()
+
+            val hfBaos = java.io.ByteArrayOutputStream(tuBytes.size + 10)
+            hfBaos.write(18) // HybridFrame.tile (tag 2, wire type 2)
+            writeVarint(tuBytes.size.toLong(), hfBaos)
+            hfBaos.write(tuBytes)
+
+            QuicServer.sendFrame(hfBaos.toByteArray())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send tile", e)
+        }
+    }
+
+    fun sendCursorUpdate(x: Int, y: Int, width: Int, height: Int, bitmap: ByteArray) {
+        if (!isRunning) return
+        try {
+            val protoBaos = java.io.ByteArrayOutputStream(bitmap.size + 100)
+            protoBaos.write(8) // Tag 1 (x)
+            writeVarint(x.toLong(), protoBaos)
+            protoBaos.write(16) // Tag 2 (y)
+            writeVarint(y.toLong(), protoBaos)
+            protoBaos.write(26) // Tag 3 (bitmap, wire type 2)
+            writeVarint(bitmap.size.toLong(), protoBaos)
+            protoBaos.write(bitmap)
+            protoBaos.write(32) // Tag 4 (width)
+            writeVarint(width.toLong(), protoBaos)
+            protoBaos.write(40) // Tag 5 (height)
+            writeVarint(height.toLong(), protoBaos)
+            val cuBytes = protoBaos.toByteArray()
+
+            val hfBaos = java.io.ByteArrayOutputStream(cuBytes.size + 10)
+            hfBaos.write(26) // HybridFrame.cursor (tag 3, wire type 2)
+            writeVarint(cuBytes.size.toLong(), hfBaos)
+            hfBaos.write(cuBytes)
+
+            QuicServer.sendFrame(hfBaos.toByteArray())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send cursor", e)
         }
     }
 }

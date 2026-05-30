@@ -42,6 +42,8 @@ class DisplayService : Service() {
     private var imageReader: ImageReader? = null
     private var isRunning = false
     private var drawThread: Thread? = null
+    private var lastKeyframeTime = 0L
+    private val regionDetector = RegionDetector()
 
     private fun createVirtualDisplay() {
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -116,7 +118,18 @@ class DisplayService : Service() {
                                 }
                             }
                         }
-                        com.example.androidhost.network.FrameSender.sendFrame(width, height, data)
+                        
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastKeyframeTime >= 1000) {
+                            com.example.androidhost.network.FrameSender.sendVideoFrame(width, height, data)
+                            lastKeyframeTime = currentTime
+                            // Also process so RegionDetector updates its previous frame buffer
+                            regionDetector.processFrame(width, height, data)
+                        } else {
+                            regionDetector.processFrame(width, height, data)
+                            com.example.androidhost.vm.DisplayViewModel.updateRegionStats(regionDetector.tilesSentLastFrame, regionDetector.videoDetectedLastFrame)
+                        }
+                        
                         image.close()
                     }
                 } catch (e: Exception) {

@@ -113,4 +113,7 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
+
+  // Zstd compression for tiles
+  implementation("com.github.luben:zstd-jni:1.5.5-11")
 }

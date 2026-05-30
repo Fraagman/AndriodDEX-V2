@@ -86,10 +86,11 @@ fn main() {
 
                                 if frame_buf.is_empty() { return; }
 
-                                // Distinguish between Video (starts with 0x08) and Audio (starts with 0x00 big-endian length)
-                                if frame_buf[0] == 8 {
+                                if frame_buf[0] != 0 {
                                     if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
                                         let _ = frame_tx_clone.send(frame);
+                                    } else {
+                                        eprintln!("Failed to decode HybridFrame");
                                     }
                                 } else if frame_buf[0] == 0 {
                                     // Audio frame has 4-byte BE length prefix

@@ -136,6 +136,8 @@ fun DesktopShellContent(
             }
         }
 
+        val regionStats by com.example.androidhost.vm.DisplayViewModel.regionStats.collectAsState()
+
         if (quicState > 0 || framesSent > 0) {
             Column(
                 modifier = Modifier
@@ -146,6 +148,11 @@ fun DesktopShellContent(
             ) {
                 Text(text = "Sending frames via QUIC", color = Color.White, fontSize = 12.sp)
                 Text(text = "Frames sent: $framesSent", color = Color.White, fontSize = 12.sp)
+                if (com.example.androidhost.BuildConfig.DEBUG) {
+                    Text(text = "Tiles: ${regionStats.first}", color = Color.White, fontSize = 12.sp)
+                    Text(text = "Video: ${if (regionStats.second) "Y" else "N"}", color = Color.White, fontSize = 12.sp)
+                    Text(text = "Cursor: 0,0", color = Color.White, fontSize = 12.sp) // TODO: actual cursor
+                }
             }
         }
 
