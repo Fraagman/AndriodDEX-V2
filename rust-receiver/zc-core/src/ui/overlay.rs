@@ -52,6 +52,7 @@ impl OverlayUi {
         mouse_pos: (f64, f64),
         pairing_pin: Option<String>,
         is_vm: bool,
+        is_kiosk: bool,
     ) {
         let raw_input = self.state.take_egui_input(window);
         
@@ -146,6 +147,29 @@ impl OverlayUi {
                     Color32::from_rgba_premultiplied(255, 165, 0, (255.0 * alpha) as u8),
                 );
             }
+        }
+
+        if is_kiosk {
+            let window_size = window.inner_size();
+            let banner_rect = Rect::from_min_size(
+                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 / 2.0 - 100.0, 10.0),
+                Vec2::new(200.0, 30.0)
+            );
+            
+            painter.rect(
+                banner_rect,
+                Rounding::same(4.0),
+                Color32::from_rgba_premultiplied(0, 0, 0, 150),
+                Stroke::new(1.0, Color32::WHITE),
+            );
+            
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Managed Terminal",
+                FontId::proportional(16.0),
+                Color32::WHITE,
+            );
         }
 
         let full_output = self.context.end_frame();

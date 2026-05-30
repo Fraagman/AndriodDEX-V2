@@ -1,5 +1,6 @@
 mod renderer;
 mod ui;
+mod kiosk;
 
 use winit::{
     event::{Event, WindowEvent, ElementState},
@@ -238,6 +239,7 @@ fn main() {
     let start_time = Instant::now();
     let mut mouse_pos = (0.0, 0.0);
     let mut last_is_vm = false;
+    let is_kiosk = kiosk::is_kiosk_mode();
 
     let mut tile_compositor = zc_video::TileCompositor::new(
         renderer.device(),
@@ -258,15 +260,19 @@ fn main() {
 
                 match w_event {
                     WindowEvent::CloseRequested => {
-                        elwt.exit();
+                        if !is_kiosk {
+                            elwt.exit();
+                        }
                     }
                     WindowEvent::KeyboardInput {
                         event: key_event,
                         ..
                     } => {
                         if key_event.physical_key == PhysicalKey::Code(KeyCode::Escape) && key_event.state == ElementState::Pressed {
-                            println!("Escape pressed, exiting gracefully...");
-                            elwt.exit();
+                            if !is_kiosk {
+                                println!("Escape pressed, exiting gracefully...");
+                                elwt.exit();
+                            }
                         }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
@@ -353,6 +359,7 @@ fn main() {
                                         mouse_pos,
                                         pairing_pin.lock().unwrap().clone(),
                                         last_is_vm,
+                                        is_kiosk,
                                     );
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
                                 }

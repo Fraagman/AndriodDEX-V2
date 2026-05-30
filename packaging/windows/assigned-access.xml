@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<AssignedAccessConfiguration xmlns="http://schemas.microsoft.com/AssignedAccess/2017/config">
+    <Profiles>
+        <Profile Id="{D91A54F1-52CB-4AF9-94D2-0B2129BC08D1}">
+            <AllAppsList>
+                <AllowedApps>
+                    <App AppUserModelId="AndroidDex.ZeroClientReceiver!App" />
+                </AllowedApps>
+            </AllAppsList>
+            <StartLayout />
+            <Taskbar ShowTaskbar="false"/>
+        </Profile>
+    </Profiles>
+</AssignedAccessConfiguration>
