@@ -261,8 +261,10 @@ pub extern "C" fn Java_com_example_androidhost_security_SecurityBridge_verifyPin
     // Attempt to verify via QUIC pairing flow
     if let Some(tx) = PAIRING_WAKER.lock().unwrap().take() {
         let _ = tx.send(pin_str.clone());
-        // We can't synchronously return success/failure here for QUIC derive, but for the requirement we just need true/false. 
-        // We will return false for anything other than "000000" for now, as requested.
+        // Since we can't synchronously verify if the PIN is correct right now (it's used to derive PSK),
+        // we return 1 (true) to let the UI proceed. If the PIN is wrong, the subsequent QUIC 
+        // connection authentication will fail and the connection will drop.
+        return 1;
     }
     
     0

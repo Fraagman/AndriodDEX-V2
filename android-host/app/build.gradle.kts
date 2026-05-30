@@ -60,9 +60,10 @@ tasks.register<Exec>("cargoNdkBuild") {
         "build"
     )
     
+    val srcFile = file("src/rust_quic_server/target/aarch64-linux-android/debug/librust_quic_server.so")
+    val dstDir = file("src/main/jniLibs/arm64-v8a")
+    
     doLast {
-        val srcFile = file("src/rust_quic_server/target/aarch64-linux-android/debug/librust_quic_server.so")
-        val dstDir = file("src/main/jniLibs/arm64-v8a")
         dstDir.mkdirs()
         srcFile.copyTo(File(dstDir, "librust_quic_server.so"), overwrite = true)
     }

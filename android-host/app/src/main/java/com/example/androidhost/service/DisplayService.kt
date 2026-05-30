@@ -121,8 +121,15 @@ class DisplayService : Service() {
                     }
                 } catch (e: Exception) {
                     Log.e("DisplayService", "Error in draw thread", e)
+                    if (e is InterruptedException) {
+                        break
+                    }
                 }
-                Thread.sleep(33) // ~30 FPS
+                try {
+                    Thread.sleep(33) // ~30 FPS
+                } catch (e: InterruptedException) {
+                    break
+                }
             }
         }
         drawThread?.start()

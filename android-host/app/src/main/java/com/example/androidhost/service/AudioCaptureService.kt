@@ -54,11 +54,18 @@ class AudioCaptureService : Service() {
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
         if (resultCode != -1 && data != null) {
-            startForeground(NOTIFICATION_ID, createNotification())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, createNotification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
             isServiceRunning.value = true
             startAudioCapture(resultCode, data)
         } else {
             Log.e(TAG, "Invalid result code or screen capture intent data. Stopping service.")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
             stopSelf()
         }
 
