@@ -8,6 +8,14 @@ pub struct VideoDecoder {
 }
 
 impl VideoDecoder {
+    pub fn width(&self) -> u32 {
+        self.texture_size.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.texture_size.height
+    }
+
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) -> Self {
         let texture_size = wgpu::Extent3d {
             width,

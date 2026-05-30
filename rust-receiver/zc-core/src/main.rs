@@ -236,6 +236,7 @@ fn main() {
     let mut video_decoder: Option<zc_video::VideoDecoder> = None;
     let start_time = Instant::now();
     let mut mouse_pos = (0.0, 0.0);
+    let mut last_is_vm = false;
 
     let window_id = window.id();
     event_loop.run(move |event, elwt| {
@@ -268,9 +269,17 @@ fn main() {
                     }
                     WindowEvent::RedrawRequested => {
                         while let Ok(frame) = frame_rx.try_recv() {
-                            if video_decoder.is_none() {
+                            last_is_vm = frame.source == 1; // 1 is VM_WAYLAND
+                            
+                            let recreate = match video_decoder.as_ref() {
+                                Some(decoder) => decoder.width() != frame.width || decoder.height() != frame.height,
+                                None => true,
+                            };
+                            
+                            if recreate {
                                 video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
                             }
+                            
                             if let Some(decoder) = video_decoder.as_mut() {
                                 decoder.decode_and_upload(renderer.queue(), frame);
                             }
@@ -318,6 +327,7 @@ fn main() {
                                         is_connected.load(Ordering::SeqCst),
                                         mouse_pos,
                                         pairing_pin.lock().unwrap().clone(),
+                                        last_is_vm,
                                     );
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
                                 }

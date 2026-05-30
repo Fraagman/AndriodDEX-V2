@@ -51,6 +51,7 @@ impl OverlayUi {
         is_connected: bool,
         mouse_pos: (f64, f64),
         pairing_pin: Option<String>,
+        is_vm: bool,
     ) {
         let raw_input = self.state.take_egui_input(window);
         
@@ -65,12 +66,36 @@ impl OverlayUi {
 
         self.context.begin_frame(raw_input);
 
-        if alpha > 0.0 {
-            let painter = self.context.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("overlay"),
-            ));
+        let painter = self.context.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("overlay"),
+        ));
 
+        // VM Label - always visible in top-right corner if is_vm is true
+        if is_vm {
+            let window_size = window.inner_size();
+            let label_rect = Rect::from_min_size(
+                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 - 40.0, 10.0),
+                Vec2::new(30.0, 20.0)
+            );
+            
+            painter.rect(
+                label_rect,
+                Rounding::same(4.0),
+                Color32::from_rgba_premultiplied(50, 50, 0, 200),
+                Stroke::new(1.0, Color32::YELLOW),
+            );
+            
+            painter.text(
+                label_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "VM",
+                FontId::proportional(10.0),
+                Color32::YELLOW,
+            );
+        }
+
+        if alpha > 0.0 {
             let rect_height = if pairing_pin.is_some() { 100.0 } else { 80.0 };
             let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, rect_height));
             
