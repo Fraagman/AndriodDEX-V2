@@ -75,6 +75,8 @@ fun DesktopShellContent(
     val vmState by com.example.androidhost.service.VmService.vmState.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
 
+    val isNative by com.example.androidhost.service.VmService.isNative.collectAsState()
+
     LaunchedEffect(Unit) {
         delay(2000)
         if (!isAudioCapturing) {
@@ -157,12 +159,30 @@ fun DesktopShellContent(
 
         // Windows
         windows.forEach { window ->
-            WindowChrome(
-                windowState = window,
-                onClose = { shellViewModel?.closeWindow(window.id) },
-                onMinimize = { shellViewModel?.minimizeWindow(window.id) },
-                onMaximize = { shellViewModel?.maximizeWindow(window.id) }
-            )
+            if (window.packageName == "com.androiddex.codeserver") {
+                com.example.androidhost.ui.linux.CodeServerWindow(
+                    windowState = window,
+                    onClose = { shellViewModel?.closeWindow(window.id) },
+                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
+                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
+                )
+            } else if (window.packageName == "com.androiddex.terminal") {
+                com.example.androidhost.ui.linux.TerminalWindow(
+                    windowState = window,
+                    onClose = { shellViewModel?.closeWindow(window.id) },
+                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
+                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
+                )
+            } else {
+                WindowChrome(
+                    windowState = window,
+                    onClose = { shellViewModel?.closeWindow(window.id) },
+                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
+                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
+                ) {
+                    // Empty for unsupported mock windows
+                }
+            }
         }
 
         // Launcher Overlay
@@ -222,7 +242,7 @@ fun DesktopShellContent(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "AVF VM Desktop",
+                            text = "Compute Engine",
                             color = Color.White,
                             fontSize = 14.sp,
                             modifier = Modifier.weight(1f)
@@ -238,8 +258,7 @@ fun DesktopShellContent(
                                     intent.action = "START_VM"
                                     context.startService(intent)
                                 }
-                            },
-                            enabled = vmState != com.example.androidhost.service.VmState.UNSUPPORTED
+                            }
                         ) {
                             Text(if (vmState == com.example.androidhost.service.VmState.RUNNING) "Stop" else "Start")
                         }
@@ -254,6 +273,7 @@ fun DesktopShellContent(
                 quicState = quicState,
                 isAudioCapturing = isAudioCapturing,
                 vmState = vmState,
+                isNative = isNative,
                 onLauncherClick = { showLauncher = !showLauncher },
                 onSettingsClick = { showSettings = !showSettings }
             )

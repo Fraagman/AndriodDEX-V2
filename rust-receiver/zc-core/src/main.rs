@@ -45,143 +45,147 @@ fn main() {
     let input_buffer_for_quic = input_buffer.clone();
     let is_connected_quic = is_connected.clone();
     
-    let host = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1".to_string());
-
     let pairing_pin = Arc::new(Mutex::new(None));
-    let pin_clone = pairing_pin.clone();
+    let pairing_pin_for_task = pairing_pin.clone();
 
     rt.spawn(async move {
-        match zc_network::connect(&host, 4433, move |pin| {
-            println!("PAIRING PIN GENERATED: {}", pin);
-            *pin_clone.lock().unwrap() = Some(pin);
-        }).await {
-            Ok(conn) => {
-                println!("Connected to mock server or host");
-                is_connected_quic.store(true, Ordering::SeqCst);
+        loop {
+            let pin_clone = pairing_pin_for_task.clone();
+            let frame_tx_loop = frame_tx.clone();
+            let audio_sender_loop = audio_sender.clone();
+            let input_buffer_loop = input_buffer_for_quic.clone();
+            let is_connected_loop = is_connected_quic.clone();
 
-                // Spawn media receiver on multiple uni streams
-                let conn_media = conn.clone();
-                // audio_sender is moved in from outer scope
-                let conn_media = conn.clone();
+            match zc_network::connect(4433, move |pin| {
+                println!("PAIRING PIN GENERATED: {}", pin);
+                *pin_clone.lock().unwrap() = Some(pin);
+            }).await {
+                Ok(conn) => {
+                    println!("Connected to mock server or host");
+                    is_connected_loop.store(true, Ordering::SeqCst);
 
-                tokio::spawn(async move {
-                    loop {
-                        if let Ok(mut stream) = conn_media.accept_uni().await {
-                            let frame_tx_clone = frame_tx.clone();
-                            let ap_clone = audio_sender.clone();
-                            // Keep audio_player alive by cloning the Option (it doesn't implement Clone, wait, we can't clone it easily without Arc.
-                            // But wait! audio_player just needs to be held by the parent task so it doesn't get dropped.
-                            // tokio::spawn takes ownership of its environment, but it's a loop.
-                            // We don't need to move `audio_player` into the inner task. We can just move it into the outer `tokio::spawn`.
-                            // Let's just do `let _player_keepalive = &audio_player;` in the outer task so it's captured and moved into the outer task!
-                            tokio::spawn(async move {
-                                let mut len_buf = [0u8; 4];
-                                if stream.read_exact(&mut len_buf).await.is_err() {
-                                    return;
-                                }
-                                let len = u32::from_le_bytes(len_buf) as usize;
-                                let mut frame_buf = vec![0u8; len];
-                                if stream.read_exact(&mut frame_buf).await.is_err() {
-                                    return;
-                                }
+                    let conn_media = conn.clone();
 
-                                if frame_buf.is_empty() { return; }
-
-                                if frame_buf[0] != 0 {
-                                    if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
-                                        let _ = frame_tx_clone.send(frame);
-                                    } else {
-                                        eprintln!("Failed to decode HybridFrame");
+                    tokio::spawn(async move {
+                        loop {
+                            if let Ok(mut stream) = conn_media.accept_uni().await {
+                                let frame_tx_inner = frame_tx_loop.clone();
+                                let ap_inner = audio_sender_loop.clone();
+                                tokio::spawn(async move {
+                                    let mut len_buf = [0u8; 4];
+                                    if stream.read_exact(&mut len_buf).await.is_err() {
+                                        return;
                                     }
-                                } else if frame_buf[0] == 0 {
-                                    // Audio frame has 4-byte BE length prefix
-                                    if frame_buf.len() > 4 {
-                                        let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
-                                        if packet_len <= frame_buf.len() - 4 {
-                                            if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
-                                                if let Some(player) = ap_clone {
-                                                    let pcm_bytes = &audio_packet.pcm_data;
-                                                    if pcm_bytes.len() % 2 == 0 {
-                                                        let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
-                                                        for chunk in pcm_bytes.chunks_exact(2) {
-                                                            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                                            i16_samples.push(sample);
+                                    let len = u32::from_le_bytes(len_buf) as usize;
+                                    let mut frame_buf = vec![0u8; len];
+                                    if stream.read_exact(&mut frame_buf).await.is_err() {
+                                        return;
+                                    }
+
+                                    if frame_buf.is_empty() { return; }
+
+                                    if frame_buf[0] != 0 {
+                                        if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
+                                            let _ = frame_tx_inner.send(frame);
+                                        } else {
+                                            eprintln!("Failed to decode HybridFrame");
+                                        }
+                                    } else if frame_buf[0] == 0 {
+                                        // Audio frame has 4-byte BE length prefix
+                                        if frame_buf.len() > 4 {
+                                            let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
+                                            if packet_len <= frame_buf.len() - 4 {
+                                                if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
+                                                    if let Some(player) = ap_inner {
+                                                        let pcm_bytes = &audio_packet.pcm_data;
+                                                        if pcm_bytes.len() % 2 == 0 {
+                                                            let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
+                                                            for chunk in pcm_bytes.chunks_exact(2) {
+                                                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                                                i16_samples.push(sample);
+                                                            }
+                                                            player.play_pcm(&i16_samples);
                                                         }
-                                                        player.play_pcm(&i16_samples);
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                            });
-                        } else {
-                            break;
-                        }
-                    }
-                });
-
-                // Open a dedicated unidirectional stream for INPUT events (PC -> Android)
-                match conn.open_uni().await {
-                    Ok(mut input_stream) => {
-                        println!("Opened input stream to server");
-
-                        // Drain the buffer and send input events continuously
-                        loop {
-                            let events: Vec<Vec<u8>> = {
-                                let mut buf = input_buffer_for_quic.lock().unwrap();
-                                buf.drain(..).collect()
-                            };
-
-                            if events.is_empty() {
-                                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-                                continue;
+                                });
+                            } else {
+                                break;
                             }
-
-                            for serialized in events {
-                                let len = serialized.len() as u32;
-                                if input_stream.write_all(&len.to_le_bytes()).await.is_err() {
-                                    eprintln!("Input stream write failed (length)");
-                                    is_connected_quic.store(false, Ordering::SeqCst);
-                                    return;
-                                }
-                                if input_stream.write_all(&serialized).await.is_err() {
-                                    eprintln!("Input stream write failed (data)");
-                                    is_connected_quic.store(false, Ordering::SeqCst);
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to open input stream: {}", e);
-                        is_connected_quic.store(false, Ordering::SeqCst);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Connection failed: {}. Falling back to mock 1kHz audio...", e);
-                if let Some(ap) = audio_sender {
-                    std::thread::spawn(move || {
-                        let mut phase: f32 = 0.0;
-                        let phase_inc = 1000.0 * 2.0 * std::f32::consts::PI / 48000.0;
-                        loop {
-                            let mut buffer = Vec::with_capacity(4800);
-                            for _ in 0..2400 {
-                                let sample = (phase.sin() * 30000.0) as i16;
-                                buffer.push(sample); // Left
-                                buffer.push(sample); // Right
-                                phase += phase_inc;
-                                if phase > 2.0 * std::f32::consts::PI {
-                                    phase -= 2.0 * std::f32::consts::PI;
-                                }
-                            }
-                            ap.play_pcm(&buffer);
-                            std::thread::sleep(std::time::Duration::from_millis(50));
                         }
                     });
+
+                    // Open a dedicated unidirectional stream for INPUT events (PC -> Android)
+                    match conn.open_uni().await {
+                        Ok(mut input_stream) => {
+                            println!("Opened input stream to server");
+
+                            // Drain the buffer and send input events continuously
+                            loop {
+                                let events: Vec<Vec<u8>> = {
+                                    let mut buf = input_buffer_loop.lock().unwrap();
+                                    buf.drain(..).collect()
+                                };
+
+                                if events.is_empty() {
+                                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                    continue;
+                                }
+
+                                for serialized in events {
+                                    let len = serialized.len() as u32;
+                                    if input_stream.write_all(&len.to_le_bytes()).await.is_err() {
+                                        eprintln!("Input stream write failed (length)");
+                                        is_connected_loop.store(false, Ordering::SeqCst);
+                                        break;
+                                    }
+                                    if input_stream.write_all(&serialized).await.is_err() {
+                                        eprintln!("Input stream write failed (data)");
+                                        is_connected_loop.store(false, Ordering::SeqCst);
+                                        break;
+                                    }
+                                }
+                                if !is_connected_loop.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to open input stream: {}", e);
+                            is_connected_loop.store(false, Ordering::SeqCst);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Connection failed: {}. Falling back to mock 1kHz audio...", e);
+                    if let Some(ref ap) = audio_sender_loop {
+                        let ap = ap.clone();
+                        std::thread::spawn(move || {
+                            let mut phase: f32 = 0.0;
+                            let phase_inc = 1000.0 * 2.0 * std::f32::consts::PI / 48000.0;
+                            // Only play fallback for 3 seconds before next connection attempt
+                            for _ in 0..60 {
+                                let mut buffer = Vec::with_capacity(4800);
+                                for _ in 0..2400 {
+                                    let sample = (phase.sin() * 30000.0) as i16;
+                                    buffer.push(sample); // Left
+                                    buffer.push(sample); // Right
+                                    phase += phase_inc;
+                                    if phase > 2.0 * std::f32::consts::PI {
+                                        phase -= 2.0 * std::f32::consts::PI;
+                                    }
+                                }
+                                ap.play_pcm(&buffer);
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                        });
+                    }
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });
 
@@ -282,6 +286,10 @@ fn main() {
                         renderer.resize(*physical_size);
                     }
                     WindowEvent::RedrawRequested => {
+                        let inner_size = window.inner_size();
+                        if inner_size.width == 0 || inner_size.height == 0 {
+                            return;
+                        }
                         while let Ok(hybrid) = frame_rx.try_recv() {
                             match hybrid.payload {
                                 Some(hybrid_frame::Payload::Video(frame)) => {

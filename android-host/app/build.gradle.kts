@@ -115,5 +115,5 @@ dependencies {
   implementation(libs.androidx.biometric)
 
   // Zstd compression for tiles
-  implementation("com.github.luben:zstd-jni:1.5.5-11")
+  implementation("com.github.luben:zstd-jni:1.5.5-11@aar")
 }

@@ -53,24 +53,33 @@ class VmService : Service() {
         return START_NOT_STICKY
     }
 
+    private var isAvfSupported = false
+
     private fun checkSupport() {
         if (Build.VERSION.SDK_INT >= 33 && packageManager.hasSystemFeature("android.software.virtualization")) {
             try {
                 Class.forName("android.system.virtualmachine.VirtualMachineManager")
-                _vmState.value = VmState.OFF
+                isAvfSupported = true
             } catch (e: ClassNotFoundException) {
-                _vmState.value = VmState.UNSUPPORTED
-                Log.e(TAG, "VirtualMachineManager class not found, AVF is not supported")
+                isAvfSupported = false
             }
         } else {
-            _vmState.value = VmState.UNSUPPORTED
-            Log.e(TAG, "AVF is not supported on this device")
+            isAvfSupported = false
         }
+        
+        _isNative.value = !isAvfSupported
+        _vmState.value = VmState.OFF
     }
 
     fun startVm(payloadPath: String) {
-        if (_vmState.value == VmState.UNSUPPORTED) {
-            Log.e(TAG, "Cannot start VM: Unsupported")
+        if (!isAvfSupported) {
+            Log.i(TAG, "AVF unsupported, falling back to Native Compute Layer")
+            _vmState.value = VmState.STARTING
+            val nclIntent = Intent(this, NativeComputeService::class.java).apply {
+                action = "START_NCL"
+            }
+            startService(nclIntent)
+            _vmState.value = VmState.RUNNING
             return
         }
 
@@ -171,6 +180,14 @@ class VmService : Service() {
     }
 
     fun stopVm() {
+        if (!isAvfSupported) {
+            val nclIntent = Intent(this, NativeComputeService::class.java).apply {
+                action = "STOP_NCL"
+            }
+            startService(nclIntent)
+            _vmState.value = VmState.STOPPED
+            return
+        }
         if (_vmState.value == VmState.RUNNING || _vmState.value == VmState.STARTING) {
             try {
                 val stopMethod = virtualMachineClass?.getMethod("stop")
@@ -186,5 +203,8 @@ class VmService : Service() {
         private const val TAG = "VmService"
         private val _vmState = MutableStateFlow(VmState.OFF)
         val vmState: StateFlow<VmState> = _vmState.asStateFlow()
+        
+        private val _isNative = MutableStateFlow(false)
+        val isNative: StateFlow<Boolean> = _isNative.asStateFlow()
     }
 }

@@ -96,6 +96,29 @@ impl OverlayUi {
             );
         }
 
+        if !is_connected {
+            let window_size = window.inner_size();
+            let banner_rect = Rect::from_min_size(
+                Pos2::new(0.0, 0.0),
+                Vec2::new(window_size.width as f32, window_size.height as f32)
+            );
+            
+            painter.rect(
+                banner_rect,
+                Rounding::ZERO,
+                Color32::from_rgba_premultiplied(0, 0, 0, 200),
+                Stroke::NONE,
+            );
+            
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Connect USB cable and enable USB tethering.",
+                FontId::proportional(24.0),
+                Color32::WHITE,
+            );
+        }
+
         if alpha > 0.0 {
             let rect_height = if pairing_pin.is_some() { 100.0 } else { 80.0 };
             let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, rect_height));

@@ -25,7 +25,8 @@ fun WindowChrome(
     windowState: WindowState,
     onClose: () -> Unit,
     onMinimize: () -> Unit,
-    onMaximize: () -> Unit
+    onMaximize: () -> Unit,
+    content: @Composable () -> Unit
 ) {
     if (windowState.isMinimized) {
         return // Don't draw if minimized
@@ -84,7 +85,7 @@ fun WindowChrome(
 
         // Window Content Area
         Box(modifier = Modifier.fillMaxSize().padding(top = 32.dp)) {
-            // Future: Render actual window content here
+            content()
         }
     }
 }

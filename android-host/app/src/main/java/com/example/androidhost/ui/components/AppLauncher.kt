@@ -113,6 +113,8 @@ private fun loadTargetApps(context: Context): List<AppInfo> {
     val pm = context.packageManager
     
     val targetPackages = listOf(
+        "com.androiddex.codeserver", // Native Compute: VS Code
+        "com.androiddex.terminal",   // Native Compute: Terminal
         "com.android.chrome",
         "com.google.android.documentsui", // Files
         "com.android.settings",
@@ -133,7 +135,11 @@ private fun loadTargetApps(context: Context): List<AppInfo> {
             result.add(AppInfo(pkg, label, icon))
         } catch (e: PackageManager.NameNotFoundException) {
             // Provide a fallback if not installed on this specific emulator/device
-            val fallbackName = pkg.substringAfterLast(".").replaceFirstChar { it.uppercase() }
+            val fallbackName = when (pkg) {
+                "com.androiddex.codeserver" -> "VS Code"
+                "com.androiddex.terminal" -> "Terminal"
+                else -> pkg.substringAfterLast(".").replaceFirstChar { it.uppercase() }
+            }
             result.add(AppInfo(pkg, fallbackName, null))
         }
     }

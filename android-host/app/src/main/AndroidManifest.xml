@@ -31,6 +31,7 @@
         <service android:name=".service.DisplayService" android:exported="false" />
         <service android:name=".service.AudioCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <service android:name=".service.VmService" android:exported="false" />
+        <service android:name=".service.NativeComputeService" android:exported="false" />
         
         <service
             android:name=".service.DesktopAccessibilityService"

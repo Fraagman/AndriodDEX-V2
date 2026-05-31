@@ -61,6 +61,7 @@ fun Taskbar(
     quicState: Int, // 0 = Disconnected, 1 = Connecting, 2 = Active
     isAudioCapturing: Boolean,
     vmState: com.example.androidhost.service.VmState,
+    isNative: Boolean,
     onLauncherClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
@@ -146,13 +147,15 @@ fun Taskbar(
 
             Spacer(modifier = Modifier.width(16.dp))
 
-            // VM Status
+            // Compute Engine Status
+            val typePrefix = if (isNative) "Native" else "Virtualized"
             val vmStatusText = when (vmState) {
-                com.example.androidhost.service.VmState.RUNNING -> "VM: Running"
-                com.example.androidhost.service.VmState.STARTING -> "VM: Starting"
-                com.example.androidhost.service.VmState.UNSUPPORTED -> "VM: Unsupported"
-                else -> "VM: Off"
+                com.example.androidhost.service.VmState.RUNNING -> "$typePrefix: Running"
+                com.example.androidhost.service.VmState.STARTING -> "$typePrefix: Starting"
+                com.example.androidhost.service.VmState.UNSUPPORTED -> "$typePrefix: Ready"
+                else -> "$typePrefix: Ready"
             }
+            
             Text(
                 text = vmStatusText,
                 color = Color.White,
@@ -166,8 +169,7 @@ fun Taskbar(
                         color = when (vmState) {
                             com.example.androidhost.service.VmState.RUNNING -> Color.Green
                             com.example.androidhost.service.VmState.STARTING -> Color.Yellow
-                            com.example.androidhost.service.VmState.UNSUPPORTED -> Color.Yellow
-                            else -> Color.Red
+                            else -> Color.Gray
                         },
                         shape = CircleShape
                     )
