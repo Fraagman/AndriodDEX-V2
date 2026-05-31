@@ -15,6 +15,17 @@ use futures_util::StreamExt;
 
 pub type QuinnError = Box<dyn std::error::Error + Send + Sync>;
 
+#[derive(Debug, Clone)]
+pub enum ConnectionPhase {
+    Idle,
+    Scanning(String, u32),
+    Found(String),
+    Handshaking,
+    WaitingForPin(String),
+    Connected,
+    Failed(String),
+}
+
 #[derive(Debug)]
 struct TrustOnFirstUseVerifier {
     fingerprint: Arc<Mutex<Option<Fingerprint>>>,
@@ -110,80 +121,102 @@ impl ServerCertVerifier for PinnedCertVerifier {
     }
 }
 
-async fn scan_rndis_subnet(endpoint: &Endpoint, port: u16) -> Result<Connection, QuinnError> {
-    println!("Scanning RNDIS subnet...");
+async fn scan_rndis_subnet(
+    endpoint: &Endpoint,
+    port: u16,
+    status_callback: &(impl Fn(ConnectionPhase) + Send + Sync + Clone + 'static),
+) -> Result<Connection, QuinnError> {
     let interfaces = get_if_addrs().unwrap_or_default();
-    let mut rndis_subnet = false;
+    let mut private_subnets = Vec::new();
     
     for iface in interfaces {
         if let std::net::IpAddr::V4(ipv4) = iface.ip() {
-            let octets = ipv4.octets();
-            if octets[0] == 192 && octets[1] == 168 && octets[2] == 42 {
-                rndis_subnet = true;
-                break;
+            if !ipv4.is_loopback() && (ipv4.is_private() || ipv4.octets()[0] == 100) {
+                let octets = ipv4.octets();
+                let subnet_base = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
+                private_subnets.push((subnet_base, ipv4));
             }
         }
     }
     
-    if !rndis_subnet {
-        return Err("No RNDIS subnet (192.168.42.x) found on host. Connect USB cable and enable USB tethering.".into());
+    if private_subnets.is_empty() {
+        status_callback(ConnectionPhase::Idle);
+        return Err("No private subnets found. Connect USB cable and enable USB tethering.".into());
     }
 
-    let fast_targets = vec![
-        Ipv4Addr::new(192, 168, 42, 1),
-        Ipv4Addr::new(192, 168, 42, 129),
-    ];
-
-    for ip in fast_targets {
-        let addr = SocketAddr::new(IpAddr::V4(ip), port);
-        if let Ok(connecting) = endpoint.connect(addr, "localhost") {
-            if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(300), connecting).await {
-                println!("Connected to {}:{}", ip, port);
-                return Ok(conn);
+    let mut attempt = 1;
+    loop {
+        for (subnet_base, local_ip) in &private_subnets {
+            let subnet_str = format!("{}/24", subnet_base);
+            status_callback(ConnectionPhase::Scanning(subnet_str, attempt));
+            
+            let octets = subnet_base.octets();
+            
+            let mut fast_targets = vec![
+                Ipv4Addr::new(octets[0], octets[1], octets[2], 1),
+                Ipv4Addr::new(octets[0], octets[1], octets[2], 254),
+                Ipv4Addr::new(octets[0], octets[1], octets[2], 211),
+                Ipv4Addr::new(octets[0], octets[1], octets[2], 129),
+            ];
+            
+            // Second fast path if local IP ends in .207 etc
+            if octets[3] > 0 {
+                fast_targets.push(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3].wrapping_add(4)));
             }
-        }
-    }
-
-    // Hybrid scan of the remaining /24
-    let mut all_ips = Vec::new();
-    for i in 2..255 {
-        if i != 129 {
-            all_ips.push(Ipv4Addr::new(192, 168, 42, i));
-        }
-    }
-
-    // 4 concurrent probes
-    for chunk in all_ips.chunks(4) {
-        let mut futures = FuturesUnordered::new();
-        for &ip in chunk {
-            let ep = endpoint.clone();
-            futures.push(async move {
-                let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                if let Ok(connecting) = ep.connect(addr, "localhost") {
-                    if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(100), connecting).await {
-                        return Some((ip, conn));
+            
+            for ip in &fast_targets {
+                let addr = SocketAddr::new(IpAddr::V4(*ip), port);
+                if let Ok(connecting) = endpoint.connect(addr, "localhost") {
+                    if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(200), connecting).await {
+                        status_callback(ConnectionPhase::Found(ip.to_string()));
+                        return Ok(conn);
                     }
                 }
-                None
-            });
-        }
-        
-        while let Some(res) = futures.next().await {
-            if let Some((ip, conn)) = res {
-                println!("Connected to {}:{}", ip, port);
-                return Ok(conn);
+            }
+            
+            let mut all_ips = Vec::new();
+            for i in 1..255 {
+                let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], i);
+                if !fast_targets.contains(&ip) && ip != *local_ip {
+                    all_ips.push(ip);
+                }
+            }
+            
+            // Full scan of the /24 subnet concurrently
+            for chunk in all_ips.chunks(8) {
+                let mut futures = FuturesUnordered::new();
+                for &ip in chunk {
+                    let ep = endpoint.clone();
+                    futures.push(async move {
+                        let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                        if let Ok(connecting) = ep.connect(addr, "localhost") {
+                            if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(150), connecting).await {
+                                return Some((ip, conn));
+                            }
+                        }
+                        None
+                    });
+                }
+                
+                while let Some(res) = futures.next().await {
+                    if let Some((ip, conn)) = res {
+                        status_callback(ConnectionPhase::Found(ip.to_string()));
+                        return Ok(conn);
+                    }
+                }
             }
         }
+        
+        status_callback(ConnectionPhase::Failed("USB tethering detected, but phone is not responding. Retrying...".to_string()));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        attempt += 1;
     }
-    
-    Err("RNDIS scan failed: No Android QUIC server found on 192.168.42.0/24".into())
 }
 
-pub async fn connect(port: u16, pin_callback: impl Fn(String) + Send + 'static) -> Result<Connection, QuinnError> {
+pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send + Sync + Clone + 'static) -> Result<Connection, QuinnError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     
     if let Some((fp, psk)) = load_trust_data() {
-        println!("Loaded trust data, performing authenticated connect...");
         let verifier = PinnedCertVerifier { expected: fp };
         let mut crypto = rustls::ClientConfig::builder()
             .dangerous()
@@ -200,7 +233,9 @@ pub async fn connect(port: u16, pin_callback: impl Fn(String) + Send + 'static) 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
         
-        let conn = scan_rndis_subnet(&endpoint, port).await?;
+        let conn = scan_rndis_subnet(&endpoint, port, &status_callback).await?;
+        
+        status_callback(ConnectionPhase::Handshaking);
         
         let mut auth_stream = conn.open_uni().await?;
         let mut hasher = Sha256::new();
@@ -211,10 +246,9 @@ pub async fn connect(port: u16, pin_callback: impl Fn(String) + Send + 'static) 
         auth_stream.write_all(&token).await?;
         auth_stream.finish()?;
         
+        status_callback(ConnectionPhase::Connected);
         return Ok(conn);
     }
-    
-    println!("No trust data found, initiating pairing...");
     
     let fingerprint = Arc::new(Mutex::new(None));
     let verifier = TrustOnFirstUseVerifier {
@@ -237,30 +271,31 @@ pub async fn connect(port: u16, pin_callback: impl Fn(String) + Send + 'static) 
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
     
-    let conn = scan_rndis_subnet(&endpoint, port).await?;
+    let conn = scan_rndis_subnet(&endpoint, port, &status_callback).await?;
 
     let fp = fingerprint.lock().unwrap().unwrap();
     
     let secret = EphemeralSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
 
+    status_callback(ConnectionPhase::Handshaking);
+
     let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
     send_stream.write_all(b"P").await?;
     send_stream.write_all(public.as_bytes()).await?;
 
     let pin = generate_pin();
-    pin_callback(pin.clone());
+    status_callback(ConnectionPhase::WaitingForPin(pin.clone()));
 
     let mut buf = [0u8; 2];
     recv_stream.read_exact(&mut buf).await?;
     if &buf != b"OK" {
+        status_callback(ConnectionPhase::Failed("Pairing rejected".into()));
         return Err("Pairing rejected".into());
     }
 
     let psk = derive_psk(&pin, public.as_bytes());
     store_trust_data(&fp, &psk)?;
-    
-    println!("Pairing successful, authenticating on same connection...");
     
     let mut auth_stream = conn.open_uni().await?;
     let mut hasher = Sha256::new();
@@ -271,5 +306,6 @@ pub async fn connect(port: u16, pin_callback: impl Fn(String) + Send + 'static) 
     auth_stream.write_all(&token).await?;
     auth_stream.finish()?;
     
+    status_callback(ConnectionPhase::Connected);
     Ok(conn)
 }

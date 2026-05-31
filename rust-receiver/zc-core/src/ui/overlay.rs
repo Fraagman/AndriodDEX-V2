@@ -3,6 +3,7 @@ use egui_wgpu::Renderer;
 use egui_wgpu::ScreenDescriptor;
 use egui_winit::State;
 use winit::window::Window;
+use zc_network::ConnectionPhase;
 
 pub struct OverlayUi {
     pub context: egui::Context,
@@ -48,17 +49,19 @@ impl OverlayUi {
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
-        is_connected: bool,
+        phase: &ConnectionPhase,
         mouse_pos: (f64, f64),
-        pairing_pin: Option<String>,
         is_vm: bool,
         is_kiosk: bool,
     ) {
         let raw_input = self.state.take_egui_input(window);
         
+        let is_connected = matches!(phase, ConnectionPhase::Connected);
+        
         let (mx, my) = mouse_pos;
         let is_hovered = mx >= 0.0 && mx <= 250.0 && my >= 0.0 && my <= 120.0;
         
+        // Status rect fades in on hover regardless of connection
         let alpha = self.context.animate_bool_with_time(
             egui::Id::new("overlay_fade"),
             is_hovered,
@@ -96,31 +99,60 @@ impl OverlayUi {
             );
         }
 
-        if !is_connected {
-            let window_size = window.inner_size();
-            let banner_rect = Rect::from_min_size(
-                Pos2::new(0.0, 0.0),
-                Vec2::new(window_size.width as f32, window_size.height as f32)
-            );
-            
-            painter.rect(
-                banner_rect,
-                Rounding::ZERO,
-                Color32::from_rgba_premultiplied(0, 0, 0, 200),
-                Stroke::NONE,
-            );
-            
-            painter.text(
-                banner_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Connect USB cable and enable USB tethering.",
-                FontId::proportional(24.0),
-                Color32::WHITE,
-            );
+        let window_size = window.inner_size();
+        let banner_rect = Rect::from_min_size(
+            Pos2::new(0.0, 0.0),
+            Vec2::new(window_size.width as f32, window_size.height as f32)
+        );
+
+        match phase {
+            ConnectionPhase::Connected => {} // Draw nothing full-screen
+            ConnectionPhase::WaitingForPin(pin) => {
+                painter.rect(
+                    banner_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_premultiplied(0, 0, 0, 220),
+                    Stroke::NONE,
+                );
+                
+                let formatted_pin = pin.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+                painter.text(
+                    banner_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Your PIN: {}", formatted_pin),
+                    FontId::proportional(48.0),
+                    Color32::WHITE,
+                );
+            }
+            other_phase => {
+                let msg = match other_phase {
+                    ConnectionPhase::Idle => "Connect USB cable and enable USB tethering.".to_string(),
+                    ConnectionPhase::Scanning(subnet, attempt) => format!("Scanning {}... (attempt {})", subnet, attempt),
+                    ConnectionPhase::Found(addr) => format!("Found AndroidDex phone at {}. Connecting...", addr),
+                    ConnectionPhase::Handshaking => "Handshaking...".to_string(),
+                    ConnectionPhase::Failed(reason) => format!("Connection failed: {}. Retrying...", reason),
+                    _ => "".to_string(),
+                };
+                
+                painter.rect(
+                    banner_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_premultiplied(0, 0, 0, 200),
+                    Stroke::NONE,
+                );
+                
+                painter.text(
+                    banner_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    msg,
+                    FontId::proportional(24.0),
+                    Color32::WHITE,
+                );
+            }
         }
 
         if alpha > 0.0 {
-            let rect_height = if pairing_pin.is_some() { 100.0 } else { 80.0 };
+            let rect_height = 80.0;
             let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, rect_height));
             
             painter.rect(
@@ -160,16 +192,6 @@ impl OverlayUi {
                 FontId::proportional(14.0),
                 Color32::from_rgba_premultiplied(180, 180, 180, (255.0 * alpha) as u8),
             );
-
-            if let Some(pin) = pairing_pin {
-                painter.text(
-                    rect.min + Vec2::new(10.0, 70.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("Pairing PIN: {}", pin),
-                    FontId::proportional(14.0),
-                    Color32::from_rgba_premultiplied(255, 165, 0, (255.0 * alpha) as u8),
-                );
-            }
         }
 
         if is_kiosk {

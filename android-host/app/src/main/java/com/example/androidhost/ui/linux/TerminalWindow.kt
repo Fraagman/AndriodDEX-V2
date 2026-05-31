@@ -30,34 +30,57 @@ fun TerminalWindow(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                val scrollView = ScrollView(context)
-                val textView = TextView(context).apply {
+                val scrollView = ScrollView(context).apply {
                     setBackgroundColor(Color.BLACK)
+                }
+                val editText = android.widget.EditText(context).apply {
+                    setBackgroundColor(Color.TRANSPARENT)
                     setTextColor(Color.GREEN)
                     textSize = 14f
-                    text = "Welcome to AndroidDex Native Terminal\n"
+                    setText("Welcome to AndroidDex Native Terminal\n$ ")
                     setPadding(16, 16, 16, 16)
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    gravity = android.view.Gravity.TOP or android.view.Gravity.START
                 }
-                scrollView.addView(textView)
+                scrollView.addView(editText)
                 
-                // Spawn simple bash process (Reduced scope for MVP since full PTY + SurfaceView is too large)
                 try {
                     val process = ProcessBuilder("sh").redirectErrorStream(true).start()
                     val reader = BufferedReader(InputStreamReader(process.inputStream))
+                    val writer = process.outputStream.bufferedWriter()
+                    
                     thread {
                         while (true) {
                             val line = reader.readLine() ?: break
-                            textView.post {
-                                textView.append(line + "\n")
+                            editText.post {
+                                editText.append(line + "\n$ ")
                                 scrollView.fullScroll(ScrollView.FOCUS_DOWN)
                             }
                         }
                     }
-                    val writer = process.outputStream.bufferedWriter()
-                    writer.write("ls -la /data/data/com.example.androidhost/files/termux\n")
-                    writer.flush()
+
+                    editText.setOnKeyListener { _, keyCode, event ->
+                        if (event.action == android.view.KeyEvent.ACTION_DOWN && keyCode == android.view.KeyEvent.KEYCODE_ENTER) {
+                            val lines = editText.text.toString().split("\n")
+                            val lastLine = lines.last().substringAfter("$ ")
+                            if (lastLine.isNotEmpty()) {
+                                try {
+                                    writer.write(lastLine + "\n")
+                                    writer.flush()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            } else {
+                                editText.append("\n$ ")
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 } catch (e: Exception) {
-                    textView.append("Failed to launch shell: ${e.message}\n")
+                    editText.append("Failed to launch shell: ${e.message}\n")
                 }
 
                 scrollView

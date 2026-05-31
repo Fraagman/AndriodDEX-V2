@@ -52,4 +52,4 @@ impl ServerCertVerifier for SkipServerVerification {
 
 pub mod client;
 
-pub use client::connect;
+pub use client::{connect, ConnectionPhase};

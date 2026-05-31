@@ -100,6 +100,10 @@ class NativeComputeService : Service() {
                         fos.write(buffer, 0, len)
                     }
                     fos.close()
+                    // Android FileOutputStream strips POSIX permissions, restore execute bits
+                    if (newFile.parentFile?.name == "bin" || newFile.parentFile?.name == "libexec" || newFile.name.endsWith(".sh")) {
+                        newFile.setExecutable(true)
+                    }
                 }
                 zipInputStream.closeEntry()
                 entry = zipInputStream.nextEntry

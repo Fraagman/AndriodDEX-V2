@@ -18,6 +18,16 @@ use prost::Message;
 const INPUT_BUFFER_MAX: usize = 1000;
 
 fn main() {
+    if cfg!(windows) {
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("AndroidDex.exe"));
+        let exe_str = exe_path.to_str().unwrap_or("AndroidDex.exe");
+        let command_str = format!("netsh advfirewall firewall add rule name=\"AndroidDex QUIC\" dir=out action=allow protocol=udp localport=any remoteport=4433 program=\"{}\" enable=yes", exe_str);
+        
+        let _ = std::process::Command::new("powershell")
+            .args(&["-Command", &command_str])
+            .spawn();
+    }
+
     let ping = Ping { timestamp: 0 };
     println!("{:?}", ping);
 
@@ -36,32 +46,32 @@ fn main() {
     // The input polling thread pushes here; the QUIC sender drains from here.
     let input_buffer: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::with_capacity(INPUT_BUFFER_MAX)));
     
-    // Connection state
+    let connection_phase = Arc::new(Mutex::new(zc_network::ConnectionPhase::Idle));
     let is_connected = Arc::new(AtomicBool::new(false));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
 
     // Clone for the QUIC task
     let input_buffer_for_quic = input_buffer.clone();
+    let phase_for_quic = connection_phase.clone();
     let is_connected_quic = is_connected.clone();
     
-    let pairing_pin = Arc::new(Mutex::new(None));
-    let pairing_pin_for_task = pairing_pin.clone();
-
     rt.spawn(async move {
         loop {
-            let pin_clone = pairing_pin_for_task.clone();
+            let phase_clone = phase_for_quic.clone();
             let frame_tx_loop = frame_tx.clone();
             let audio_sender_loop = audio_sender.clone();
             let input_buffer_loop = input_buffer_for_quic.clone();
             let is_connected_loop = is_connected_quic.clone();
 
-            match zc_network::connect(4433, move |pin| {
-                println!("PAIRING PIN GENERATED: {}", pin);
-                *pin_clone.lock().unwrap() = Some(pin);
+            match zc_network::connect(4433, move |phase| {
+                *phase_clone.lock().unwrap() = phase.clone();
+                if matches!(phase, zc_network::ConnectionPhase::Connected) {
+                    println!("ConnectionPhase updated to Connected");
+                }
             }).await {
                 Ok(conn) => {
-                    println!("Connected to mock server or host");
+                    println!("Connected to Android server");
                     is_connected_loop.store(true, Ordering::SeqCst);
 
                     let conn_media = conn.clone();
@@ -293,7 +303,6 @@ fn main() {
                         while let Ok(hybrid) = frame_rx.try_recv() {
                             match hybrid.payload {
                                 Some(hybrid_frame::Payload::Video(frame)) => {
-                                    println!("Received base frame, source: {}", frame.source);
                                     last_is_vm = frame.source == 1;
                                     
                                     tile_compositor.set_base_size(frame.width, frame.height);
@@ -312,7 +321,6 @@ fn main() {
                                     }
                                 }
                                 Some(hybrid_frame::Payload::Tile(tile)) => {
-                                    println!("Received tile at ({}, {}) {}x{}", tile.x, tile.y, tile.width, tile.height);
                                     tile_compositor.apply_tile(tile, renderer.device(), renderer.queue());
                                 }
                                 Some(hybrid_frame::Payload::Cursor(cursor)) => {
@@ -322,12 +330,12 @@ fn main() {
                             }
                         }
 
-                        let time = start_time.elapsed().as_secs_f32();
+                        let _time = start_time.elapsed().as_secs_f32();
                         let view_opt = video_decoder.as_ref().map(|d| &d.texture_view);
 
                         match renderer.get_target_view() {
                             Ok((frame, view)) => {
-                                let bind_group = view_opt.map(|v| renderer.create_bind_group(v));
+                                let _bind_group = view_opt.map(|v| renderer.create_bind_group(v));
 
                                 // 1. Render Video
                                 {
@@ -357,15 +365,15 @@ fn main() {
                                 // 2. Render Overlay on top
                                 {
                                     let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Overlay Encoder") });
+                                    let phase = connection_phase.lock().unwrap().clone();
                                     overlay_ui.render(
                                         &window,
                                         renderer.device(),
                                         renderer.queue(),
                                         &view,
                                         &mut encoder,
-                                        is_connected.load(Ordering::SeqCst),
+                                        &phase,
                                         mouse_pos,
-                                        pairing_pin.lock().unwrap().clone(),
                                         last_is_vm,
                                         is_kiosk,
                                     );
