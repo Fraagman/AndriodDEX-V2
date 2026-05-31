@@ -135,32 +135,47 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
 
             log::info!("QUIC server listening on 0.0.0.0:{}", port);
 
+            // Last IP for grace window
+            let mut last_auth_ip: Option<(std::net::IpAddr, std::time::Instant)> = None;
+
             loop {
                 CONNECTION_STATE.store(STATE_IDLE, Ordering::SeqCst);
                 
                 if let Some(incoming) = endpoint.accept().await {
                     match incoming.await {
                         Ok(connection) => {
-                            log::info!("QUIC connected to client");
+                            let ip = connection.remote_address().ip();
+                            log::info!("Connection established to {}", ip);
                             CONNECTION_STATE.store(STATE_PAIRING, Ordering::SeqCst);
+
+                            let mut auto_accept = false;
+                            if let Some((last_ip, time)) = last_auth_ip {
+                                if last_ip == ip && time.elapsed().as_secs() < 10 {
+                                    log::info!("Auto-accepted reconnect from {} within grace window", ip);
+                                    auto_accept = true;
+                                }
+                            }
 
                             let conn_clone = connection.clone();
                             let input_tx_clone = input_tx.clone();
                             let video_tx_clone = video_tx.clone();
                             
                             tokio::spawn(async move {
+                                let mut authenticated = false;
+
                                 if let Ok((mut send_stream, mut recv_stream)) = conn_clone.accept_bi().await {
                                     let mut prefix = [0u8; 1];
                                     if recv_stream.read_exact(&mut prefix).await.is_err() {
                                         CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
+                                        log::error!("Connection closed by peer: Failed to read prefix");
                                         return;
                                     }
 
                                     if prefix[0] == b'P' {
-                                        log::info!("Handling pairing connection...");
+                                        log::info!("Pairing stream opened");
                                         let mut pubkey = [0u8; 32];
                                         if recv_stream.read_exact(&mut pubkey).await.is_ok() {
-                                            log::warn!("Received pairing request. Waiting for Java to provide PIN.");
+                                            log::info!("PIN sent to user. Waiting for PIN from user...");
                                             
                                             let (tx, rx) = std::sync::mpsc::channel();
                                             if let Ok(mut waker) = PAIRING_WAKER.lock() {
@@ -169,6 +184,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                             
                                             if let Ok(pin) = tokio::task::spawn_blocking(move || rx.recv()).await {
                                                 if let Ok(pin) = pin {
+                                                    log::info!("PIN received from user: verifying...");
                                                     let psk = zc_security::pairing::derive_psk(&pin, &pubkey);
                                                     let client_id = [0u8; 32];
                                                     if let Err(e) = zc_security::storage::store_trust_data(&client_id, &psk) {
@@ -176,92 +192,118 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                                     }
                                                     let _ = send_stream.write_all(b"OK").await;
                                                     let _ = send_stream.finish();
-                                                }
-                                            }
-                                        }
-                                        CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
-                                        return;
-                                    } else if prefix[0] == b'A' {
-                                        log::info!("Handling auth connection...");
-                                        let mut token = [0u8; 32];
-                                        if recv_stream.read_exact(&mut token).await.is_err() {
-                                            CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
-                                            return; 
-                                        }
-                                        
-                                        let mut auth_ok = false;
-                                        if let Some((_, psk)) = zc_security::storage::load_trust_data() {
-                                            use sha2::{Sha256, Digest};
-                                            let mut hasher = Sha256::new();
-                                            hasher.update(&psk);
-                                            hasher.update(b"auth");
-                                            let expected: [u8; 32] = hasher.finalize().into();
-                                            auth_ok = token == expected;
-                                        }
-                                        
-                                        if !auth_ok {
-                                            log::error!("Authentication failed");
-                                            CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
-                                            return;
-                                        }
-                                        log::info!("Client authenticated successfully");
-                                        CONNECTION_STATE.store(STATE_AUTHENTICATED, Ordering::SeqCst);
-                                        
-                                        let _ = send_stream.write_all(b"OK").await;
-                                        let _ = send_stream.finish();
-
-                                        let mut video_rx = video_tx_clone.subscribe();
-                                        
-                                        let conn_video = conn_clone.clone();
-                                        tokio::spawn(async move {
-                                            loop {
-                                                if let Ok(frame_data) = video_rx.recv().await {
-                                                    if let Ok(mut stream) = conn_video.open_uni().await {
-                                                        let len = frame_data.len() as u32;
-                                                        if stream.write_all(&len.to_le_bytes()).await.is_err() { break; }
-                                                        if stream.write_all(&frame_data).await.is_err() { break; }
-                                                    } else {
-                                                        break;
-                                                    }
-                                                } else {
-                                                    // Broadcast channel lagged or closed
-                                                    // Continue waiting for next
-                                                }
-                                            }
-                                            CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
-                                        });
-
-                                        let conn_input = conn_clone.clone();
-                                        tokio::spawn(async move {
-                                            loop {
-                                                if let Ok(mut stream) = conn_input.accept_uni().await {
-                                                    let tx = input_tx_clone.clone();
-                                                    tokio::spawn(async move {
-                                                        loop {
-                                                            let mut len_buf = [0u8; 4];
-                                                            if stream.read_exact(&mut len_buf).await.is_err() { break; }
-                                                            let len = u32::from_le_bytes(len_buf) as usize;
-                                                            let mut buf = vec![0u8; len];
-                                                            if stream.read_exact(&mut buf).await.is_err() { break; }
-                                                            let _ = tx.send(buf);
+                                                    
+                                                    // Wait for the Auth packet on the NEXT bidirectional stream in this connection
+                                                    if let Ok((mut auth_send, mut auth_recv)) = conn_clone.accept_bi().await {
+                                                        let mut ap = [0u8; 1];
+                                                        if auth_recv.read_exact(&mut ap).await.is_ok() && ap[0] == b'A' {
+                                                            let mut token = [0u8; 32];
+                                                            if auth_recv.read_exact(&mut token).await.is_ok() {
+                                                                use sha2::{Sha256, Digest};
+                                                                let mut hasher = Sha256::new();
+                                                                hasher.update(&psk);
+                                                                hasher.update(b"auth");
+                                                                let expected: [u8; 32] = hasher.finalize().into();
+                                                                if token == expected {
+                                                                    authenticated = true;
+                                                                    let _ = auth_send.write_all(b"OK").await;
+                                                                    let _ = auth_send.finish();
+                                                                }
+                                                            }
                                                         }
-                                                    });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if prefix[0] == b'A' {
+                                        log::info!("Auth stream opened (reconnect)");
+                                        let mut token = [0u8; 32];
+                                        if recv_stream.read_exact(&mut token).await.is_ok() {
+                                            if auto_accept {
+                                                authenticated = true;
+                                            } else if let Some((_, psk)) = zc_security::storage::load_trust_data() {
+                                                use sha2::{Sha256, Digest};
+                                                let mut hasher = Sha256::new();
+                                                hasher.update(&psk);
+                                                hasher.update(b"auth");
+                                                let expected: [u8; 32] = hasher.finalize().into();
+                                                if token == expected {
+                                                    authenticated = true;
+                                                }
+                                            }
+                                        }
+                                        if authenticated {
+                                            let _ = send_stream.write_all(b"OK").await;
+                                            let _ = send_stream.finish();
+                                        } else {
+                                            let _ = send_stream.write_all(b"NO").await;
+                                            let _ = send_stream.finish();
+                                        }
+                                    }
+                                } else {
+                                    log::error!("Connection closed by peer: Failed to accept bi stream");
+                                }
+
+                                if authenticated {
+                                    log::info!("AuthSuccess received — keeping connection alive");
+                                    CONNECTION_STATE.store(STATE_AUTHENTICATED, Ordering::SeqCst);
+                                    
+                                    log::info!("Opening video open_uni stream (Android -> PC)...");
+                                    let mut video_rx = video_tx_clone.subscribe();
+                                    let conn_video = conn_clone.clone();
+                                    
+                                    tokio::spawn(async move {
+                                        loop {
+                                            if let Ok(frame_data) = video_rx.recv().await {
+                                                if let Ok(mut stream) = conn_video.open_uni().await {
+                                                    let len = frame_data.len() as u32;
+                                                    if stream.write_all(&len.to_le_bytes()).await.is_err() { break; }
+                                                    if stream.write_all(&frame_data).await.is_err() { break; }
                                                 } else {
                                                     break;
                                                 }
                                             }
-                                            CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
-                                        });
-                                    }
+                                        }
+                                    });
+
+                                    log::info!("Opening input accept_uni stream (PC -> Android)...");
+                                    let conn_input = conn_clone.clone();
+                                    tokio::spawn(async move {
+                                        loop {
+                                            if let Ok(mut stream) = conn_input.accept_uni().await {
+                                                let tx = input_tx_clone.clone();
+                                                tokio::spawn(async move {
+                                                    loop {
+                                                        let mut len_buf = [0u8; 4];
+                                                        if stream.read_exact(&mut len_buf).await.is_err() { break; }
+                                                        let len = u32::from_le_bytes(len_buf) as usize;
+                                                        let mut buf = vec![0u8; len];
+                                                        if stream.read_exact(&mut buf).await.is_err() { break; }
+                                                        let _ = tx.send(buf);
+                                                    }
+                                                });
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    });
+
+                                    // Wait for connection to drop
+                                    let reason = conn_clone.closed().await;
+                                    log::error!("Connection closed by peer: {:?}", reason);
                                 } else {
-                                    log::error!("Failed to accept bidirectional stream");
-                                    CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
+                                    log::error!("Authentication failed or pairing aborted");
                                 }
+                                
+                                CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
                             });
+                            
+                            if connection.remote_address().ip() != std::net::Ipv4Addr::new(127, 0, 0, 1) {
+                                last_auth_ip = Some((connection.remote_address().ip(), std::time::Instant::now()));
+                            }
                         }
                         Err(e) => {
-                            log::error!("Connection failed: {}", e);
-                            CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
+                            log::error!("Connection error: {} — will NOT reconnect automatically unless USB is replugged", e);
                         }
                     }
                 }

@@ -237,14 +237,21 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
         
         status_callback(ConnectionPhase::Handshaking);
         
-        let mut auth_stream = conn.open_uni().await?;
+        let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
         let mut hasher = Sha256::new();
         hasher.update(&psk);
         hasher.update(b"auth");
         let token: [u8; 32] = hasher.finalize().into();
-        auth_stream.write_all(b"A").await?;
-        auth_stream.write_all(&token).await?;
-        auth_stream.finish()?;
+        auth_send.write_all(b"A").await?;
+        auth_send.write_all(&token).await?;
+        auth_send.finish()?;
+
+        let mut ok_buf = [0u8; 2];
+        auth_recv.read_exact(&mut ok_buf).await?;
+        if &ok_buf != b"OK" {
+            status_callback(ConnectionPhase::Failed("Auth rejected".into()));
+            return Err("Auth rejected".into());
+        }
         
         status_callback(ConnectionPhase::Connected);
         return Ok(conn);
@@ -297,14 +304,21 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
     let psk = derive_psk(&pin, public.as_bytes());
     store_trust_data(&fp, &psk)?;
     
-    let mut auth_stream = conn.open_uni().await?;
+    let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
     let mut hasher = Sha256::new();
     hasher.update(&psk);
     hasher.update(b"auth");
     let token: [u8; 32] = hasher.finalize().into();
-    auth_stream.write_all(b"A").await?;
-    auth_stream.write_all(&token).await?;
-    auth_stream.finish()?;
+    auth_send.write_all(b"A").await?;
+    auth_send.write_all(&token).await?;
+    auth_send.finish()?;
+
+    let mut ok_buf = [0u8; 2];
+    auth_recv.read_exact(&mut ok_buf).await?;
+    if &ok_buf != b"OK" {
+        status_callback(ConnectionPhase::Failed("Auth rejected".into()));
+        return Err("Auth rejected".into());
+    }
     
     status_callback(ConnectionPhase::Connected);
     Ok(conn)
