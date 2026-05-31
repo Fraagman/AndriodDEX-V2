@@ -78,12 +78,22 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
 
             let _ = rustls::crypto::ring::default_provider().install_default();
 
-            let cert_res = generate_self_signed_cert();
-            if let Err(e) = cert_res {
-                log::error!("Failed to generate cert: {}", e);
-                return;
-            }
-            let (cert_der, key_der) = cert_res.unwrap_or_default();
+            let (cert_der, key_der) = if let Some((c, k)) = zc_security::storage::load_server_cert() {
+                log::info!("Loaded existing server certificate");
+                (c, k)
+            } else {
+                log::info!("Generating new server certificate");
+                let cert_res = generate_self_signed_cert();
+                if let Err(e) = cert_res {
+                    log::error!("Failed to generate cert: {}", e);
+                    return;
+                }
+                let (c, k) = cert_res.unwrap();
+                if let Err(e) = zc_security::storage::store_server_cert(&c, &k) {
+                    log::error!("Failed to store server cert: {}", e);
+                }
+                (c, k)
+            };
             
             let cert = CertificateDer::from(cert_der);
             let key_res = PrivateKeyDer::try_from(key_der);

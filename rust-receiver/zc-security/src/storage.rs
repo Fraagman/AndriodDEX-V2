@@ -46,3 +46,44 @@ pub fn load_trust_data() -> Option<(Fingerprint, Psk)> {
     file.read_exact(&mut psk).ok()?;
     Some((fp, psk))
 }
+
+fn get_server_cert_file_path() -> Option<PathBuf> {
+    let mut path = if let Some(p) = CUSTOM_DATA_PATH.lock().unwrap().clone() {
+        p
+    } else {
+        let appdata = std::env::var("APPDATA").ok()?;
+        let mut p = PathBuf::from(appdata);
+        p.push("AndroidDex");
+        p
+    };
+    
+    fs::create_dir_all(&path).ok()?;
+    path.push("server_cert.bin");
+    Some(path)
+}
+
+pub fn store_server_cert(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), io::Error> {
+    let path = get_server_cert_file_path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Storage path not found"))?;
+    let mut file = fs::File::create(path)?;
+    let cert_len = cert_pem.len() as u32;
+    file.write_all(&cert_len.to_le_bytes())?;
+    file.write_all(cert_pem)?;
+    file.write_all(key_pem)?;
+    Ok(())
+}
+
+pub fn load_server_cert() -> Option<(Vec<u8>, Vec<u8>)> {
+    let path = get_server_cert_file_path()?;
+    let mut file = fs::File::open(path).ok()?;
+    let mut len_buf = [0u8; 4];
+    file.read_exact(&mut len_buf).ok()?;
+    let cert_len = u32::from_le_bytes(len_buf) as usize;
+    
+    let mut cert_pem = vec![0u8; cert_len];
+    file.read_exact(&mut cert_pem).ok()?;
+    
+    let mut key_pem = Vec::new();
+    file.read_to_end(&mut key_pem).ok()?;
+    
+    Some((cert_pem, key_pem))
+}
