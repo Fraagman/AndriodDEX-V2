@@ -58,7 +58,7 @@ fun AnimatedWaveform(modifier: Modifier = Modifier) {
 
 @Composable
 fun Taskbar(
-    quicState: Int, // 0 = Disconnected, 1 = Connecting, 2 = Active
+    quicState: Int, // 0 = Idle, 1 = Pairing, 2 = Connected, 3 = Disconnected
     isAudioCapturing: Boolean,
     vmState: com.example.androidhost.service.VmState,
     isNative: Boolean,
@@ -122,9 +122,10 @@ fun Taskbar(
             }
 
             val statusText = when (quicState) {
-                2 -> "QUIC Active"
-                1 -> "QUIC Connecting"
-                else -> "Disconnected"
+                2 -> "QUIC: Connected"
+                1 -> "QUIC: Pairing"
+                3 -> "QUIC: Offline"
+                else -> "QUIC: Searching..."
             }
             Text(
                 text = statusText,
@@ -138,8 +139,9 @@ fun Taskbar(
                     .background(
                         color = when (quicState) {
                             2 -> Color.Green
-                            1 -> Color.Yellow
-                            else -> Color.Red
+                            1 -> Color(0xFFFF9800) // Orange
+                            3 -> Color.Red
+                            else -> Color.Yellow
                         },
                         shape = CircleShape
                     )

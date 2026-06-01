@@ -2,6 +2,7 @@ package com.example.androidhost.service
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.Presentation
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -9,15 +10,24 @@ import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import android.view.Display
 import android.view.Surface
+import androidx.activity.compose.setContent
+import androidx.compose.ui.platform.ComposeView
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 
 class DisplayService : Service() {
 
@@ -41,18 +51,21 @@ class DisplayService : Service() {
 
     private var imageReader: ImageReader? = null
     private var isRunning = false
-    private var drawThread: Thread? = null
+    private var captureThread: Thread? = null
     private var lastKeyframeTime = 0L
     private val regionDetector = RegionDetector()
+    private var desktopPresentation: DesktopPresentation? = null
 
     private fun createVirtualDisplay() {
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val width = 1920
         val height = 1080
         val dpi = 320
-        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+        // Use PRESENTATION flag so Activities/Presentations can render on this display
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
 
-        // Using ImageReader directly to satisfy the raw RGBA uncompressed requirement over TCP
+        // Using ImageReader to capture the VirtualDisplay framebuffer
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         surface = imageReader!!.surface
 
@@ -60,39 +73,40 @@ class DisplayService : Service() {
             virtualDisplay = displayManager.createVirtualDisplay("AndroidDex", width, height, dpi, surface, flags)
             if (virtualDisplay != null) {
                 com.example.androidhost.network.FrameSender.start()
-                startDrawThread(width, height)
+                launchDesktopPresentation()
+                startCaptureThread(width, height)
                 showNotification()
             }
         }
     }
 
-    private fun startDrawThread(width: Int, height: Int) {
-        val redPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.RED
-            style = android.graphics.Paint.Style.FILL
-        }
-        val bluePaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.BLUE
-            style = android.graphics.Paint.Style.FILL
-        }
+    /**
+     * Launch a Presentation on the VirtualDisplay that hosts the Compose DesktopShellContent.
+     * The Presentation renders directly onto the VirtualDisplay's Surface, so the ImageReader
+     * captures the real desktop UI instead of a test pattern.
+     */
+    private fun launchDesktopPresentation() {
+        val vd = virtualDisplay ?: return
+        val display = vd.display ?: return
 
+        try {
+            desktopPresentation = DesktopPresentation(this, display)
+            desktopPresentation?.show()
+            Log.d("DisplayService", "DesktopPresentation launched on VirtualDisplay")
+        } catch (e: Exception) {
+            Log.e("DisplayService", "Failed to launch DesktopPresentation", e)
+        }
+    }
+
+    /**
+     * Capture thread: reads frames from ImageReader (which captures what the Presentation
+     * renders on the VirtualDisplay) and sends them via FrameSender. No manual drawing.
+     */
+    private fun startCaptureThread(width: Int, height: Int) {
         isRunning = true
-        drawThread = Thread {
+        captureThread = Thread {
             while (isRunning) {
                 try {
-                    // Draw test pattern
-                    val canvas = try {
-                        surface?.lockHardwareCanvas()
-                    } catch (e: Exception) {
-                        surface?.lockCanvas(null)
-                    }
-                    if (canvas != null) {
-                        canvas.drawRect(0f, 0f, 960f, 1080f, redPaint)
-                        canvas.drawRect(960f, 0f, 1920f, 1080f, bluePaint)
-                        surface?.unlockCanvasAndPost(canvas)
-                    }
-
-                    // Extract frame and send
                     val image = imageReader?.acquireLatestImage()
                     if (image != null) {
                         val plane = image.planes[0]
@@ -133,7 +147,7 @@ class DisplayService : Service() {
                         image.close()
                     }
                 } catch (e: Exception) {
-                    Log.e("DisplayService", "Error in draw thread", e)
+                    Log.e("DisplayService", "Error in capture thread", e)
                     if (e is InterruptedException) {
                         break
                     }
@@ -145,7 +159,7 @@ class DisplayService : Service() {
                 }
             }
         }
-        drawThread?.start()
+        captureThread?.start()
     }
 
     private fun showNotification() {
@@ -169,10 +183,75 @@ class DisplayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
-        drawThread?.interrupt()
+        captureThread?.interrupt()
+        desktopPresentation?.dismiss()
+        desktopPresentation = null
         com.example.androidhost.network.FrameSender.stop()
         virtualDisplay?.release()
         surface?.release()
         imageReader?.close()
+    }
+}
+
+/**
+ * Presentation that hosts the Compose DesktopShellContent on the VirtualDisplay.
+ * This is what gets captured by the ImageReader and sent to the PC as video frames.
+ */
+class DesktopPresentation(
+    context: Context,
+    display: Display
+) : Presentation(context, display), LifecycleOwner, SavedStateRegistryOwner {
+
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    private val savedStateRegistryController = SavedStateRegistryController.create(this)
+
+    override val lifecycle: Lifecycle
+        get() = lifecycleRegistry
+
+    override val savedStateRegistry: SavedStateRegistry
+        get() = savedStateRegistryController.savedStateRegistry
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        savedStateRegistryController.performRestore(savedInstanceState)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+
+        val composeView = ComposeView(context).apply {
+            setContent {
+                com.example.androidhost.DesktopShellContent(
+                    isTetheringReady = true,
+                    surface = null,
+                    shellViewModel = null,
+                    onLockSession = {},
+                    onRequestAudioCapture = {}
+                )
+            }
+        }
+
+        // Wire up lifecycle and saved state for Compose
+        composeView.setViewTreeLifecycleOwner(this)
+        composeView.setViewTreeSavedStateRegistryOwner(this)
+
+        setContentView(composeView)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+    }
+
+    fun onResume() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+    }
+
+    override fun dismiss() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        super.dismiss()
     }
 }

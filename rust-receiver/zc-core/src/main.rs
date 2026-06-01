@@ -74,100 +74,124 @@ fn main() {
                     println!("Connected to Android server");
                     is_connected_loop.store(true, Ordering::SeqCst);
 
-                    let conn_media = conn.clone();
+                    // All three futures run as siblings inside tokio::select!
+                    // When ANY exits, we close the connection and loop back.
+                    let exit_reason = tokio::select! {
+                        biased;
 
-                    tokio::spawn(async move {
-                        loop {
-                            if let Ok(mut stream) = conn_media.accept_uni().await {
-                                let frame_tx_inner = frame_tx_loop.clone();
-                                let ap_inner = audio_sender_loop.clone();
-                                tokio::spawn(async move {
-                                    let mut len_buf = [0u8; 4];
-                                    if stream.read_exact(&mut len_buf).await.is_err() {
-                                        return;
+                        // Future 1: Connection closed by peer or QUIC timeout
+                        reason = conn.closed() => {
+                            format!("Connection closed by peer: {:?}", reason)
+                        }
+
+                        // Future 2: Video/audio receiver worker
+                        reason = async {
+                            let mut last_frame_time = std::time::Instant::now();
+                            loop {
+                                // Heartbeat: if no frame for 3 seconds, connection is dead
+                                let accept_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(3),
+                                    conn.accept_uni()
+                                ).await;
+
+                                match accept_result {
+                                    Err(_timeout) => {
+                                        let elapsed = last_frame_time.elapsed();
+                                        eprintln!("No frame received for {:.1}s — heartbeat timeout", elapsed.as_secs_f32());
+                                        return format!("Heartbeat timeout: no frame for {:.1}s", elapsed.as_secs_f32());
                                     }
-                                    let len = u32::from_le_bytes(len_buf) as usize;
-                                    let mut frame_buf = vec![0u8; len];
-                                    if stream.read_exact(&mut frame_buf).await.is_err() {
-                                        return;
+                                    Ok(Err(e)) => {
+                                        return format!("accept_uni failed: {}", e);
                                     }
+                                    Ok(Ok(mut stream)) => {
+                                        last_frame_time = std::time::Instant::now();
 
-                                    if frame_buf.is_empty() { return; }
+                                        let frame_tx_inner = frame_tx_loop.clone();
+                                        let ap_inner = audio_sender_loop.clone();
 
-                                    if frame_buf[0] != 0 {
-                                        if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
-                                            let _ = frame_tx_inner.send(frame);
-                                        } else {
-                                            eprintln!("Failed to decode HybridFrame");
+                                        // Process this stream inline (no detached spawn)
+                                        let mut len_buf = [0u8; 4];
+                                        if stream.read_exact(&mut len_buf).await.is_err() {
+                                            continue;
                                         }
-                                    } else if frame_buf[0] == 0 {
-                                        // Audio frame has 4-byte BE length prefix
-                                        if frame_buf.len() > 4 {
-                                            let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
-                                            if packet_len <= frame_buf.len() - 4 {
-                                                if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
-                                                    if let Some(player) = ap_inner {
-                                                        let pcm_bytes = &audio_packet.pcm_data;
-                                                        if pcm_bytes.len() % 2 == 0 {
-                                                            let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
-                                                            for chunk in pcm_bytes.chunks_exact(2) {
-                                                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                                                i16_samples.push(sample);
+                                        let len = u32::from_le_bytes(len_buf) as usize;
+                                        let mut frame_buf = vec![0u8; len];
+                                        if stream.read_exact(&mut frame_buf).await.is_err() {
+                                            continue;
+                                        }
+
+                                        if frame_buf.is_empty() { continue; }
+
+                                        if frame_buf[0] != 0 {
+                                            if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
+                                                let _ = frame_tx_inner.send(frame);
+                                            } else {
+                                                eprintln!("Failed to decode HybridFrame");
+                                            }
+                                        } else if frame_buf[0] == 0 {
+                                            // Audio frame has 4-byte BE length prefix
+                                            if frame_buf.len() > 4 {
+                                                let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
+                                                if packet_len <= frame_buf.len() - 4 {
+                                                    if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
+                                                        if let Some(player) = ap_inner {
+                                                            let pcm_bytes = &audio_packet.pcm_data;
+                                                            if pcm_bytes.len() % 2 == 0 {
+                                                                let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
+                                                                for chunk in pcm_bytes.chunks_exact(2) {
+                                                                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                                                    i16_samples.push(sample);
+                                                                }
+                                                                player.play_pcm(&i16_samples);
                                                             }
-                                                            player.play_pcm(&i16_samples);
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                });
-                            } else {
-                                break;
-                            }
-                        }
-                    });
-
-                    // Open a dedicated unidirectional stream for INPUT events (PC -> Android)
-                    match conn.open_uni().await {
-                        Ok(mut input_stream) => {
-                            println!("Opened input stream to server");
-
-                            // Drain the buffer and send input events continuously
-                            loop {
-                                let events: Vec<Vec<u8>> = {
-                                    let mut buf = input_buffer_loop.lock().unwrap();
-                                    buf.drain(..).collect()
-                                };
-
-                                if events.is_empty() {
-                                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-                                    continue;
-                                }
-
-                                for serialized in events {
-                                    let len = serialized.len() as u32;
-                                    if input_stream.write_all(&len.to_le_bytes()).await.is_err() {
-                                        eprintln!("Input stream write failed (length)");
-                                        is_connected_loop.store(false, Ordering::SeqCst);
-                                        break;
-                                    }
-                                    if input_stream.write_all(&serialized).await.is_err() {
-                                        eprintln!("Input stream write failed (data)");
-                                        is_connected_loop.store(false, Ordering::SeqCst);
-                                        break;
-                                    }
-                                }
-                                if !is_connected_loop.load(Ordering::SeqCst) {
-                                    break;
                                 }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to open input stream: {}", e);
-                            is_connected_loop.store(false, Ordering::SeqCst);
-                        }
-                    }
+                        } => { reason }
+
+                        // Future 3: Input sender worker
+                        reason = async {
+                            match conn.open_uni().await {
+                                Ok(mut input_stream) => {
+                                    println!("Opened input stream to server");
+                                    loop {
+                                        let events: Vec<Vec<u8>> = {
+                                            let mut buf = input_buffer_loop.lock().unwrap();
+                                            buf.drain(..).collect()
+                                        };
+
+                                        if events.is_empty() {
+                                            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                            continue;
+                                        }
+
+                                        for serialized in events {
+                                            let len = serialized.len() as u32;
+                                            if input_stream.write_all(&len.to_le_bytes()).await.is_err() {
+                                                return "Input stream write failed (length)".to_string();
+                                            }
+                                            if input_stream.write_all(&serialized).await.is_err() {
+                                                return "Input stream write failed (data)".to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    format!("Failed to open input stream: {}", e)
+                                }
+                            }
+                        } => { reason }
+                    };
+
+                    // One of the three futures exited. Tear down everything.
+                    eprintln!("Connection ended: {}", exit_reason);
+                    conn.close(0u32.into(), b"worker_exited");
+                    is_connected_loop.store(false, Ordering::SeqCst);
                 }
                 Err(e) => {
                     println!("Connection failed: {}. Falling back to mock 1kHz audio...", e);

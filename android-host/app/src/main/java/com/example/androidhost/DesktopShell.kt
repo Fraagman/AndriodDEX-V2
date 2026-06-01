@@ -86,10 +86,9 @@ fun DesktopShellContent(
 
     LaunchedEffect(Unit) {
         while (true) {
-            val handleStarted = com.example.androidhost.network.FrameSender.isConnected
-            val hasData = com.example.androidhost.service.DesktopAccessibilityService.hasReceivedData
-            
-            quicState = if (hasData) 2 else if (handleStarted) 1 else 0
+            // Poll real connection state from the Rust QUIC server via JNI
+            // 0 = Idle, 1 = Pairing, 2 = Authenticated, 3 = Disconnected
+            quicState = com.example.androidhost.quic.QuicServer.getConnectionState()
             framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
             delay(1000)
         }

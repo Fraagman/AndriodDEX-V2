@@ -10,7 +10,7 @@ zc-network = { path = "../zc-network" }
 zc-input = { path = "../zc-input" }
 zc-video = { path = "../zc-video" }
 prost = "0.13"
-tokio = { version = "1.37", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1.37", features = ["rt", "rt-multi-thread", "macros", "time"] }
 wgpu = { version = "0.19" }
 bytemuck = { version = "1.15", features = ["derive"] }
 pollster = "0.3"

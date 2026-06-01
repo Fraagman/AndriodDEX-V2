@@ -30,6 +30,21 @@ class QuicServer {
             }
         }
 
+        /**
+         * Returns the current connection state from the Rust QUIC server:
+         *   0 = STATE_IDLE (server waiting for connection)
+         *   1 = STATE_PAIRING (connection received, waiting for PIN)
+         *   2 = STATE_AUTHENTICATED (PIN verified, sending frames)
+         *   3 = STATE_DISCONNECTED (connection was lost)
+         */
+        fun getConnectionState(): Int {
+            return if (handle != 0L) {
+                connectionState(handle)
+            } else {
+                0
+            }
+        }
+
         @JvmStatic
         private external fun start(port: Int, dataPath: String): Long
 
@@ -38,5 +53,8 @@ class QuicServer {
 
         @JvmStatic
         private external fun send(handle: Long, data: ByteArray)
+
+        @JvmStatic
+        private external fun connectionState(handle: Long): Int
     }
 }

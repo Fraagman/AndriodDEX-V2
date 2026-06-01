@@ -111,8 +111,8 @@ impl OverlayUi {
                 painter.rect(
                     banner_rect,
                     Rounding::ZERO,
-                    Color32::from_rgba_premultiplied(0, 0, 0, 220),
-                    Stroke::NONE,
+                    Color32::from_rgb(10, 10, 10),
+                    Stroke::new(1.0, Color32::WHITE),
                 );
                 
                 let formatted_pin = pin.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
@@ -137,8 +137,8 @@ impl OverlayUi {
                 painter.rect(
                     banner_rect,
                     Rounding::ZERO,
-                    Color32::from_rgba_premultiplied(0, 0, 0, 200),
-                    Stroke::NONE,
+                    Color32::from_rgb(10, 10, 10),
+                    Stroke::new(1.0, Color32::WHITE),
                 );
                 
                 painter.text(
@@ -146,7 +146,7 @@ impl OverlayUi {
                     egui::Align2::CENTER_CENTER,
                     msg,
                     FontId::proportional(24.0),
-                    Color32::WHITE,
+                    Color32::from_rgb(245, 245, 245),
                 );
             }
         }
@@ -204,7 +204,7 @@ impl OverlayUi {
             painter.rect(
                 banner_rect,
                 Rounding::same(4.0),
-                Color32::from_rgba_premultiplied(0, 0, 0, 150),
+                Color32::from_rgb(10, 10, 10),
                 Stroke::new(1.0, Color32::WHITE),
             );
             
