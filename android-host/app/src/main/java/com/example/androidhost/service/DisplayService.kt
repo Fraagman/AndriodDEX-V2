@@ -23,13 +23,21 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 
 class DisplayService : Service() {
+
+    companion object {
+        private const val NOTIFICATION_ID = 1001
+        private const val CHANNEL_ID = "display_service_channel"
+    }
 
     private val binder = LocalBinder()
     private var virtualDisplay: VirtualDisplay? = null
@@ -75,7 +83,7 @@ class DisplayService : Service() {
                 com.example.androidhost.network.FrameSender.start()
                 launchDesktopPresentation()
                 startCaptureThread(width, height)
-                showNotification()
+                startForegroundWithNotification()
             }
         }
     }
@@ -92,6 +100,7 @@ class DisplayService : Service() {
         try {
             desktopPresentation = DesktopPresentation(this, display)
             desktopPresentation?.show()
+            desktopPresentation?.onResume()
             Log.d("DisplayService", "DesktopPresentation launched on VirtualDisplay")
         } catch (e: Exception) {
             Log.e("DisplayService", "Failed to launch DesktopPresentation", e)
@@ -162,22 +171,29 @@ class DisplayService : Service() {
         captureThread?.start()
     }
 
-    private fun showNotification() {
-        val channelId = "display_service_channel"
+    /**
+     * FIX 4: Use startForeground() instead of notificationManager.notify() so Android O+
+     * does not kill this service, which would release the VirtualDisplay/ImageReader.
+     */
+    private fun startForegroundWithNotification() {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Display Service", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "Display Service", NotificationManager.IMPORTANCE_LOW)
             notificationManager.createNotificationChannel(channel)
         }
 
-        val notification = NotificationCompat.Builder(this, channelId)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Display active")
             .setContentText("VirtualDisplay is running")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
 
-        notificationManager.notify(1001, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onDestroy() {
@@ -196,20 +212,27 @@ class DisplayService : Service() {
 /**
  * Presentation that hosts the Compose DesktopShellContent on the VirtualDisplay.
  * This is what gets captured by the ImageReader and sent to the PC as video frames.
+ *
+ * Implements LifecycleOwner, SavedStateRegistryOwner, and ViewModelStoreOwner
+ * so Compose can fully function inside this Presentation window.
  */
 class DesktopPresentation(
     context: Context,
     display: Display
-) : Presentation(context, display), LifecycleOwner, SavedStateRegistryOwner {
+) : Presentation(context, display), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
 
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
+    private val store = ViewModelStore()
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
 
     override val savedStateRegistry: SavedStateRegistry
         get() = savedStateRegistryController.savedStateRegistry
+
+    override val viewModelStore: ViewModelStore
+        get() = store
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -221,16 +244,17 @@ class DesktopPresentation(
             setContent {
                 com.example.androidhost.DesktopShellContent(
                     isTetheringReady = true,
-                    surface = null,
-                    shellViewModel = null,
-                    onLockSession = {},
-                    onRequestAudioCapture = {}
+                    surface = null,                                          // VirtualDisplay does NOT embed a surface
+                    shellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel,  // REAL shared view model
+                    onLockSession = { /* trigger lock via service */ },
+                    onRequestAudioCapture = { /* forward to audio capture flow */ }
                 )
             }
         }
 
-        // Wire up lifecycle and saved state for Compose
+        // Wire up lifecycle, view model store, and saved state for Compose
         composeView.setViewTreeLifecycleOwner(this)
+        composeView.setViewTreeViewModelStoreOwner(this)
         composeView.setViewTreeSavedStateRegistryOwner(this)
 
         setContentView(composeView)
@@ -252,6 +276,7 @@ class DesktopPresentation(
 
     override fun dismiss() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        store.clear()
         super.dismiss()
     }
 }

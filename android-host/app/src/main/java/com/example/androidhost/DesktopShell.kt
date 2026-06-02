@@ -97,46 +97,15 @@ fun DesktopShellContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color(0xFF1A1A2E))  // Dark wallpaper background
     ) {
-        if (surface != null) {
-            AndroidView(
-                factory = { context ->
-                    android.view.SurfaceView(context)
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Column(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "Initializing display...",
-                    color = Color.White,
-                    fontSize = 14.sp
-                )
-                
-                if (com.example.androidhost.BuildConfig.DEBUG) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(onClick = {
-                        val service = com.example.androidhost.service.DesktopAccessibilityService.instance
-                        if (service != null) {
-                            service.injectClick(500f, 500f)
-                        } else {
-                            android.util.Log.e("A11y", "Service not connected")
-                        }
-                    }) {
-                        Text("Inject Test Click")
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { onLockSession() }) {
-                        Text("Lock Session")
-                    }
-                }
-            }
-        }
+        // The desktop content ALWAYS renders the real desktop:
+        // 1. Background (dark wallpaper color, already set on the Box)
+        // 2. Windows layer
+        // 3. Launcher overlay (when toggled)
+        // 4. Taskbar at the bottom
 
+        // Debug overlay — QUIC stats (top-right)
         val regionStats by com.example.androidhost.vm.DisplayViewModel.regionStats.collectAsState()
 
         if (quicState > 0 || framesSent > 0) {
@@ -279,4 +248,3 @@ fun DesktopShellContent(
         }
     }
 }
-

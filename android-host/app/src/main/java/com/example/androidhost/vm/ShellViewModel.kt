@@ -1,6 +1,7 @@
 package com.example.androidhost.vm
 
 import android.graphics.Rect
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +16,14 @@ data class WindowState(
     val isMinimized: Boolean = false,
     val isMaximized: Boolean = false
 )
+
+/**
+ * Singleton holder so that both the Presentation (VirtualDisplay) and
+ * the Activity/input path share the SAME ShellViewModel instance.
+ */
+object ShellHolder {
+    val shellViewModel = ShellViewModel()
+}
 
 class ShellViewModel : ViewModel() {
 
@@ -38,6 +47,7 @@ class ShellViewModel : ViewModel() {
         )
         
         _windows.value = _windows.value + newWindow
+        Log.d("ShellViewModel", "openApp: $packageName, windows size: ${_windows.value.size}")
     }
 
     fun closeWindow(id: String) {

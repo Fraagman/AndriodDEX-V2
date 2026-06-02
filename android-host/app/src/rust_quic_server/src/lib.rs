@@ -124,10 +124,10 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
             let mut server_config = ServerConfig::with_crypto(Arc::new(quic_config_res.unwrap()));
             let mut transport_config = quinn::TransportConfig::default();
             
-            if let Ok(timeout) = std::time::Duration::from_secs(5).try_into() {
+            if let Ok(timeout) = std::time::Duration::from_secs(30).try_into() {
                 transport_config.max_idle_timeout(Some(timeout));
             }
-            transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+            transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
             server_config.transport_config(Arc::new(transport_config));
 
             let bind_addr_res = format!("0.0.0.0:{}", port).parse();

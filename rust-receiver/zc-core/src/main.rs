@@ -9,10 +9,9 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
 };
 use zc_protocol::protocol::Ping;
-use zc_protocol::video::{VideoFrame, HybridFrame, hybrid_frame};
+use zc_protocol::video::{HybridFrame, hybrid_frame};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::time::Instant;
 use prost::Message;
 
 const INPUT_BUFFER_MAX: usize = 1000;
@@ -86,25 +85,12 @@ fn main() {
 
                         // Future 2: Video/audio receiver worker
                         reason = async {
-                            let mut last_frame_time = std::time::Instant::now();
                             loop {
-                                // Heartbeat: if no frame for 3 seconds, connection is dead
-                                let accept_result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(3),
-                                    conn.accept_uni()
-                                ).await;
-
-                                match accept_result {
-                                    Err(_timeout) => {
-                                        let elapsed = last_frame_time.elapsed();
-                                        eprintln!("No frame received for {:.1}s — heartbeat timeout", elapsed.as_secs_f32());
-                                        return format!("Heartbeat timeout: no frame for {:.1}s", elapsed.as_secs_f32());
-                                    }
-                                    Ok(Err(e)) => {
+                                match conn.accept_uni().await {
+                                    Err(e) => {
                                         return format!("accept_uni failed: {}", e);
                                     }
-                                    Ok(Ok(mut stream)) => {
-                                        last_frame_time = std::time::Instant::now();
+                                    Ok(mut stream) => {
 
                                         let frame_tx_inner = frame_tx_loop.clone();
                                         let ap_inner = audio_sender_loop.clone();
@@ -274,7 +260,6 @@ fn main() {
     );
 
     let mut video_decoder: Option<zc_video::VideoDecoder> = None;
-    let start_time = Instant::now();
     let mut mouse_pos = (0.0, 0.0);
     let mut last_is_vm = false;
     let is_kiosk = kiosk::is_kiosk_mode();
@@ -354,13 +339,8 @@ fn main() {
                             }
                         }
 
-                        let _time = start_time.elapsed().as_secs_f32();
-                        let view_opt = video_decoder.as_ref().map(|d| &d.texture_view);
-
                         match renderer.get_target_view() {
                             Ok((frame, view)) => {
-                                let _bind_group = view_opt.map(|v| renderer.create_bind_group(v));
-
                                 // 1. Render Video
                                 {
                                     let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });

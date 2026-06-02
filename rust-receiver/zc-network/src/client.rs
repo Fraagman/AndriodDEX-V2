@@ -226,8 +226,11 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
 
         let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(5).try_into().unwrap()));
-        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+        match std::time::Duration::from_secs(30).try_into() {
+            Ok(timeout) => { transport_config.max_idle_timeout(Some(timeout)); }
+            Err(e) => { eprintln!("Failed to set idle timeout: {}", e); }
+        }
+        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
         client_config.transport_config(Arc::new(transport_config));
         
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
@@ -271,8 +274,11 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
 
     let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(5).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+    match std::time::Duration::from_secs(30).try_into() {
+        Ok(timeout) => { transport_config.max_idle_timeout(Some(timeout)); }
+        Err(e) => { eprintln!("Failed to set idle timeout: {}", e); }
+    }
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
     client_config.transport_config(Arc::new(transport_config));
     
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
