@@ -11,6 +11,7 @@ class RegionDetector {
     private val TILE_SIZE = 64
     private var previousHashes: LongArray? = null
     private var previousData: ByteArray? = null
+    private var zstdAvailable = true
 
     var tilesSentLastFrame = 0
     var videoDetectedLastFrame = false
@@ -27,6 +28,12 @@ class RegionDetector {
 
         var tilesSent = 0
         var videoDetected = false
+
+        if (!zstdAvailable) {
+            tilesSentLastFrame = 0
+            videoDetectedLastFrame = false
+            return
+        }
 
         val crc32 = CRC32()
 
@@ -107,17 +114,25 @@ class RegionDetector {
                     }
 
                     // Compress the raw RGBA tile bytes with Zstd
-                    val compressed = Zstd.compress(tileData, 3) // Level 3 is fast enough
-                    
-                    if (compressed.size < 4096) {
-                        Log.d(TAG, "TileUpdate sent: x=${c * TILE_SIZE}, y=${r * TILE_SIZE}, size=${compressed.size} bytes")
-                    } else {
-                        Log.d(TAG, "TileUpdate sent: x=${c * TILE_SIZE}, y=${r * TILE_SIZE}, size=${compressed.size} bytes (large)")
-                    }
+                    try {
+                        val compressed = Zstd.compress(tileData, 3) // Level 3 is fast enough
+                        
+                        if (compressed.size < 4096) {
+                            Log.d(TAG, "TileUpdate sent: x=${c * TILE_SIZE}, y=${r * TILE_SIZE}, size=${compressed.size} bytes")
+                        } else {
+                            Log.d(TAG, "TileUpdate sent: x=${c * TILE_SIZE}, y=${r * TILE_SIZE}, size=${compressed.size} bytes (large)")
+                        }
 
-                    // Send TileUpdate
-                    FrameSender.sendTileUpdate(c * TILE_SIZE, r * TILE_SIZE, tileW, tileH, compressed)
-                    tilesSent++
+                        // Send TileUpdate
+                        FrameSender.sendTileUpdate(c * TILE_SIZE, r * TILE_SIZE, tileW, tileH, compressed)
+                        tilesSent++
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "zstd unavailable, keyframe-only mode", e)
+                        zstdAvailable = false
+                        tilesSentLastFrame = 0
+                        videoDetectedLastFrame = false
+                        return
+                    }
 
                     previousHashes!![tileIndex] = hash
                 }

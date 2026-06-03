@@ -7,7 +7,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,8 +20,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,6 +42,82 @@ import androidx.compose.material3.Switch
 import androidx.compose.ui.text.font.FontWeight
 import com.example.androidhost.vm.ShellViewModel
 import kotlinx.coroutines.delay
+
+/**
+ * Forces continuous Compose redraws on every frame by reading withFrameNanos
+ * and using drawBehind to invalidate the render layer. This is used ONLY inside
+ * the VirtualDisplay Presentation so the ImageReader always has fresh frames.
+ *
+ * How it works:
+ * - LaunchedEffect loops forever calling withFrameNanos, which suspends until
+ *   the next choreographer VSYNC and returns the frame time.
+ * - Each iteration updates 'tick', which triggers recomposition.
+ * - The drawBehind modifier reads 'tick', which invalidates the draw layer,
+ *   causing the VirtualDisplay Surface to be re-rendered even when nothing
+ *   in the actual content has changed.
+ */
+@Composable
+fun KeepAliveRedraw(content: @Composable () -> Unit) {
+    var tick by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        var lastTime = 0L
+        while (true) { 
+            withFrameNanos { 
+                if (it - lastTime >= 33_000_000L) { // ~30fps throttle
+                    tick = it
+                    lastTime = it
+                }
+            } 
+        }
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .drawBehind {
+                // read 'tick' so this layer is invalidated at 30fps
+                @Suppress("UNUSED_EXPRESSION")
+                tick
+            }
+    ) { content() }
+}
+
+/**
+ * Temporary proof-of-life indicator: a small orange rectangle that oscillates
+ * horizontally plus a "LIVE Xs" counter. Visible on the VirtualDisplay capture
+ * to confirm frames are flowing to the PC receiver.
+ * Remove this composable once frame flow is verified stable.
+ */
+@Composable
+fun ProofOfLifeIndicator() {
+    var elapsed by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        val start = System.currentTimeMillis()
+        while (true) {
+            elapsed = System.currentTimeMillis() - start
+            delay(16) // ~60fps update
+        }
+    }
+    // Oscillate 0..200dp over a 3-second period
+    val period = 3000f
+    val phase = (elapsed % period.toLong()) / period
+    val offsetX = phase * 200f
+
+    Box(
+        modifier = Modifier
+            .offset(x = offsetX.dp, y = 40.dp)
+            .size(30.dp)
+            .background(Color(0xFFFF6B35), RoundedCornerShape(6.dp))
+    )
+    Text(
+        text = "LIVE ${elapsed / 1000}s",
+        color = Color.White,
+        fontSize = 10.sp,
+        modifier = Modifier
+            .offset(x = offsetX.dp, y = 74.dp)
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+    )
+}
 
 @Composable
 fun DesktopShell(
@@ -77,12 +158,7 @@ fun DesktopShellContent(
 
     val isNative by com.example.androidhost.service.VmService.isNative.collectAsState()
 
-    LaunchedEffect(Unit) {
-        delay(2000)
-        if (!isAudioCapturing) {
-            onRequestAudioCapture(true)
-        }
-    }
+
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -124,6 +200,9 @@ fun DesktopShellContent(
                 }
             }
         }
+
+        // Proof-of-life moving indicator (temporary — confirms frames are flowing)
+        ProofOfLifeIndicator()
 
         // Windows
         windows.forEach { window ->

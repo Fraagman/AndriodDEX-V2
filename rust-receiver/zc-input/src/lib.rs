@@ -31,10 +31,12 @@ impl InputCapturer {
         })
     }
 
-    pub fn poll_mouse(&mut self) -> Result<MouseEvent, InputError> {
+    pub fn poll_mouse(&mut self) -> Result<Option<MouseEvent>, InputError> {
         let mut point = POINT { x: 0, y: 0 };
         unsafe {
-            GetCursorPos(&mut point)?;
+            if GetCursorPos(&mut point).is_err() {
+                return Ok(None);
+            }
         }
 
         // Scale real screen coordinates to 1920x1080 virtual display
@@ -58,12 +60,12 @@ impl InputCapturer {
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
-        Ok(MouseEvent {
+        Ok(Some(MouseEvent {
             x: vx,
             y: vy,
             buttons,
             timestamp,
-        })
+        }))
     }
 
     pub fn poll_keyboard(&mut self) -> Result<Option<KeyboardEvent>, InputError> {
@@ -96,11 +98,12 @@ impl InputCapturer {
     pub fn poll_all(&mut self) -> Result<Vec<InputEvent>, InputError> {
         let mut events = Vec::new();
 
-        // Always poll mouse position
-        let mouse = self.poll_mouse()?;
-        events.push(InputEvent {
-            event: Some(input_event::Event::Mouse(mouse)),
-        });
+        // Always poll mouse position if available
+        if let Some(mouse) = self.poll_mouse()? {
+            events.push(InputEvent {
+                event: Some(input_event::Event::Mouse(mouse)),
+            });
+        }
 
         // Poll keyboard for any state changes
         if let Some(kb) = self.poll_keyboard()? {

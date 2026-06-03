@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -76,6 +77,14 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(Screen.PIN) 
             }
 
+            val ctx = LocalContext.current
+            LaunchedEffect(currentScreen.value) {
+                if (currentScreen.value == Screen.DESKTOP) {
+                    val intent = Intent(ctx, com.example.androidhost.service.DisplayService::class.java)
+                    ContextCompat.startForegroundService(ctx, intent)
+                }
+            }
+
             when (currentScreen.value) {
                 Screen.PIN -> com.example.androidhost.screens.PinEntryScreen(
                     onPinSuccess = { currentScreen.value = Screen.DESKTOP }
@@ -84,7 +93,10 @@ class MainActivity : ComponentActivity() {
                     onUnlockSuccess = { currentScreen.value = Screen.DESKTOP }
                 )
                 Screen.DESKTOP -> ControlPanel(
-                    onLockSession = { currentScreen.value = Screen.LOCK },
+                    onLockSession = { 
+                        ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
+                        currentScreen.value = Screen.LOCK 
+                    },
                     onRequestAudioCapture = { enabled ->
                         if (enabled) {
                             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -131,12 +143,22 @@ fun ControlPanel(
 ) {
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
+    var wasConnected by remember { mutableStateOf(false) }
     val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
+    val ctx = LocalContext.current
 
     LaunchedEffect(Unit) {
         while (true) {
             quicState = com.example.androidhost.quic.QuicServer.getConnectionState()
             framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
+            
+            if (quicState == 2) {
+                wasConnected = true
+            } else if (wasConnected && quicState != 2) {
+                ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
+                wasConnected = false
+            }
+            
             delay(1000)
         }
     }

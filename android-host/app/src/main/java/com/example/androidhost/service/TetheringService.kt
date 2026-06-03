@@ -53,6 +53,11 @@ class TetheringService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val notification = NotificationCompat.Builder(this, "tethering_channel")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Tethering Service Active")
+            .build()
+        startForeground(2, notification)
         checkTethering(this)
         return START_STICKY
     }

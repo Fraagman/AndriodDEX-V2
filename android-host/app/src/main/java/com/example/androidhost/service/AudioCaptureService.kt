@@ -179,16 +179,14 @@ class AudioCaptureService : Service() {
                     // Manually serialize AudioPacket protobuf message
                     val audioPacketBytes = encodeAudioPacket(pcmBytes, now)
 
-                    // Prepend a 4-byte length prefix (big-endian) before the protobuf packet
-                    val finalBuffer = ByteBuffer.allocate(4 + audioPacketBytes.size)
-                    finalBuffer.order(ByteOrder.BIG_ENDIAN)
-                    finalBuffer.putInt(audioPacketBytes.size)
+                    val finalBuffer = ByteBuffer.allocate(1 + audioPacketBytes.size)
+                    finalBuffer.put(0x02.toByte()) // Audio type
                     finalBuffer.put(audioPacketBytes)
 
                     val dataToSend = finalBuffer.array()
 
-                    // Send over QUIC via JNI sendFrame (utilizes the same UDP channel)
-                    QuicServer.sendFrame(dataToSend)
+                    // Send over QUIC via JNI sendAudioFrame (utilizes separate channel)
+                    QuicServer.sendAudioFrame(dataToSend)
                 } else if (readResult < 0) {
                     Log.e(TAG, "AudioRecord read error: $readResult")
                     break

@@ -22,6 +22,12 @@ class QuicServer {
             }
         }
 
+        fun sendAudioFrame(data: ByteArray) {
+            if (handle != 0L) {
+                sendAudio(handle, data)
+            }
+        }
+
         fun pollInput(buffer: ByteArray): Int {
             return if (handle != 0L) {
                 pollData(handle, buffer)
@@ -53,6 +59,9 @@ class QuicServer {
 
         @JvmStatic
         private external fun send(handle: Long, data: ByteArray)
+
+        @JvmStatic
+        private external fun sendAudio(handle: Long, data: ByteArray)
 
         @JvmStatic
         private external fun connectionState(handle: Long): Int

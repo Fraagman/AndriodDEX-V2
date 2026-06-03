@@ -96,40 +96,44 @@ fn main() {
                                         let ap_inner = audio_sender_loop.clone();
 
                                         // Process this stream inline (no detached spawn)
-                                        let mut len_buf = [0u8; 4];
-                                        if stream.read_exact(&mut len_buf).await.is_err() {
-                                            continue;
-                                        }
-                                        let len = u32::from_le_bytes(len_buf) as usize;
-                                        let mut frame_buf = vec![0u8; len];
-                                        if stream.read_exact(&mut frame_buf).await.is_err() {
-                                            continue;
-                                        }
-
-                                        if frame_buf.is_empty() { continue; }
-
-                                        if frame_buf[0] != 0 {
-                                            if let Ok(frame) = HybridFrame::decode(&frame_buf[..]) {
-                                                let _ = frame_tx_inner.send(frame);
-                                            } else {
-                                                eprintln!("Failed to decode HybridFrame");
+                                        // Loop on this stream as long as sender keeps it open
+                                        loop {
+                                            let mut len_buf = [0u8; 4];
+                                            if stream.read_exact(&mut len_buf).await.is_err() {
+                                                break; // Stream closed or error, break inner loop to accept next stream
                                             }
-                                        } else if frame_buf[0] == 0 {
-                                            // Audio frame has 4-byte BE length prefix
-                                            if frame_buf.len() > 4 {
-                                                let packet_len = u32::from_be_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
-                                                if packet_len <= frame_buf.len() - 4 {
-                                                    if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(&frame_buf[4..4+packet_len]) {
-                                                        if let Some(player) = ap_inner {
-                                                            let pcm_bytes = &audio_packet.pcm_data;
-                                                            if pcm_bytes.len() % 2 == 0 {
-                                                                let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
-                                                                for chunk in pcm_bytes.chunks_exact(2) {
-                                                                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                                                    i16_samples.push(sample);
-                                                                }
-                                                                player.play_pcm(&i16_samples);
+                                            let len = u32::from_le_bytes(len_buf) as usize;
+                                            if len == 0 { continue; }
+                                            
+                                            let mut frame_buf = vec![0u8; len];
+                                            if stream.read_exact(&mut frame_buf).await.is_err() {
+                                                break; // Stream closed midway
+                                            }
+
+                                            if frame_buf.is_empty() { continue; }
+
+                                            let msg_type = frame_buf[0];
+                                            let payload = &frame_buf[1..];
+
+                                            if msg_type == 0x01 {
+                                                // Video / Tile / Cursor
+                                                if let Ok(frame) = HybridFrame::decode(payload) {
+                                                    let _ = frame_tx_inner.send(frame);
+                                                } else {
+                                                    eprintln!("Failed to decode HybridFrame");
+                                                }
+                                            } else if msg_type == 0x02 {
+                                                // Audio
+                                                if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(payload) {
+                                                    if let Some(player) = ap_inner.as_ref() {
+                                                        let pcm_bytes = &audio_packet.pcm_data;
+                                                        if pcm_bytes.len() % 2 == 0 {
+                                                            let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
+                                                            for chunk in pcm_bytes.chunks_exact(2) {
+                                                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                                                i16_samples.push(sample);
                                                             }
+                                                            player.play_pcm(&i16_samples);
                                                         }
                                                     }
                                                 }
@@ -267,8 +271,8 @@ fn main() {
     let mut tile_compositor = zc_video::TileCompositor::new(
         renderer.device(),
         renderer.config().format,
-        0,
-        0,
+        1920,
+        1080,
     );
 
     let window_id = window.id();

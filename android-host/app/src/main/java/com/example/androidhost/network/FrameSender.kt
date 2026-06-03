@@ -58,7 +58,12 @@ object FrameSender {
             writeVarint(vfBytes.size.toLong(), hfBaos)
             hfBaos.write(vfBytes)
 
-            QuicServer.sendFrame(hfBaos.toByteArray())
+            val hfBytes = hfBaos.toByteArray()
+            val finalBuffer = ByteBuffer.allocate(1 + hfBytes.size)
+            finalBuffer.put(0x01.toByte())
+            finalBuffer.put(hfBytes)
+
+            QuicServer.sendFrame(finalBuffer.array())
             val count = framesSent.incrementAndGet()
             Log.d(TAG, "Video frame sent via QUIC: $count")
         } catch (e: Exception) {
@@ -88,7 +93,12 @@ object FrameSender {
             writeVarint(tuBytes.size.toLong(), hfBaos)
             hfBaos.write(tuBytes)
 
-            QuicServer.sendFrame(hfBaos.toByteArray())
+            val hfBytes = hfBaos.toByteArray()
+            val finalBuffer = ByteBuffer.allocate(1 + hfBytes.size)
+            finalBuffer.put(0x01.toByte())
+            finalBuffer.put(hfBytes)
+
+            QuicServer.sendFrame(finalBuffer.array())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send tile", e)
         }
@@ -116,7 +126,12 @@ object FrameSender {
             writeVarint(cuBytes.size.toLong(), hfBaos)
             hfBaos.write(cuBytes)
 
-            QuicServer.sendFrame(hfBaos.toByteArray())
+            val hfBytes = hfBaos.toByteArray()
+            val finalBuffer = ByteBuffer.allocate(1 + hfBytes.size)
+            finalBuffer.put(0x01.toByte())
+            finalBuffer.put(hfBytes)
+
+            QuicServer.sendFrame(finalBuffer.array())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send cursor", e)
         }

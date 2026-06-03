@@ -14,6 +14,10 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("x86_64")
+        }
     }
 
     sourceSets {
@@ -115,5 +119,5 @@ dependencies {
   implementation(libs.androidx.biometric)
 
   // Zstd compression for tiles
-  implementation("com.github.luben:zstd-jni:1.5.5-11@aar")
+  implementation("com.github.luben:zstd-jni:1.5.6-3")
 }

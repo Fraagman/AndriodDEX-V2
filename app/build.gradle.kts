@@ -6,11 +6,11 @@ plugins {
 
 android {
     namespace = "com.example.andrioddex_v2"
-    compileSdk = 34
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.example.andrioddex_v2"
         minSdk = 29
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
     }

@@ -16,6 +16,7 @@ const STATE_DISCONNECTED: jint = 3;
 lazy_static::lazy_static! {
     static ref CONNECTION_STATE: AtomicI32 = AtomicI32::new(STATE_IDLE);
     static ref VIDEO_BROADCAST: Mutex<Option<broadcast::Sender<Vec<u8>>>> = Mutex::new(None);
+    static ref AUDIO_BROADCAST: Mutex<Option<broadcast::Sender<Vec<u8>>>> = Mutex::new(None);
     static ref INPUT_QUEUE: Mutex<Option<std::sync::mpsc::Receiver<Vec<u8>>>> = Mutex::new(None);
     static ref PAIRING_WAKER: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
 }
@@ -36,9 +37,13 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
 ) -> jlong {
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let (video_tx, _) = broadcast::channel::<Vec<u8>>(4); // Capacity 4 for video frames
+    let (audio_tx, _) = broadcast::channel::<Vec<u8>>(16); // Capacity 16 for audio frames
     
     if let Ok(mut vb) = VIDEO_BROADCAST.lock() {
         *vb = Some(video_tx.clone());
+    }
+    if let Ok(mut ab) = AUDIO_BROADCAST.lock() {
+        *ab = Some(audio_tx.clone());
     }
     if let Ok(mut iq) = INPUT_QUEUE.lock() {
         *iq = Some(input_rx);
@@ -169,6 +174,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                             let conn_clone = connection.clone();
                             let input_tx_clone = input_tx.clone();
                             let video_tx_clone = video_tx.clone();
+                            let audio_tx_clone = audio_tx.clone();
                             
                             tokio::spawn(async move {
                                 let mut authenticated = false;
@@ -263,13 +269,62 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                     let conn_video = conn_clone.clone();
                                     
                                     tokio::spawn(async move {
+                                        let mut stream_opt = None;
                                         loop {
-                                            if let Ok(frame_data) = video_rx.recv().await {
-                                                if let Ok(mut stream) = conn_video.open_uni().await {
+                                            match video_rx.recv().await {
+                                                Ok(frame_data) => {
+                                                    let mut stream = match stream_opt.take() {
+                                                        Some(s) => s,
+                                                        None => match conn_video.open_uni().await {
+                                                            Ok(s) => s,
+                                                            Err(_) => break,
+                                                        }
+                                                    };
+                                                    
                                                     let len = frame_data.len() as u32;
-                                                    if stream.write_all(&len.to_le_bytes()).await.is_err() { break; }
-                                                    if stream.write_all(&frame_data).await.is_err() { break; }
-                                                } else {
+                                                    if stream.write_all(&len.to_le_bytes()).await.is_err() || stream.write_all(&frame_data).await.is_err() {
+                                                        // If it fails, we will try to open a new one on the next frame
+                                                        continue;
+                                                    }
+                                                    stream_opt = Some(stream);
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                                    log::warn!("Video broadcast lagged by {} frames", n);
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    log::info!("Opening audio open_uni stream (Android -> PC)...");
+                                    let mut audio_rx = audio_tx_clone.subscribe();
+                                    let conn_audio = conn_clone.clone();
+                                    
+                                    tokio::spawn(async move {
+                                        let mut stream_opt = None;
+                                        loop {
+                                            match audio_rx.recv().await {
+                                                Ok(frame_data) => {
+                                                    let mut stream = match stream_opt.take() {
+                                                        Some(s) => s,
+                                                        None => match conn_audio.open_uni().await {
+                                                            Ok(s) => s,
+                                                            Err(_) => break,
+                                                        }
+                                                    };
+                                                    
+                                                    let len = frame_data.len() as u32;
+                                                    if stream.write_all(&len.to_le_bytes()).await.is_err() || stream.write_all(&frame_data).await.is_err() {
+                                                        continue;
+                                                    }
+                                                    stream_opt = Some(stream);
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                                    log::warn!("Audio broadcast lagged by {} frames", n);
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                                     break;
                                                 }
                                             }
@@ -389,6 +444,25 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_send(
     data: JByteArray,
 ) -> jint {
     if let Ok(broadcast_lock) = VIDEO_BROADCAST.lock() {
+        if let Some(tx) = broadcast_lock.as_ref() {
+            if let Ok(elements) = env.convert_byte_array(&data) {
+                let len = elements.len() as jint;
+                let _ = tx.send(elements.to_vec());
+                return len;
+            }
+        }
+    }
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_sendAudio(
+    mut env: JNIEnv,
+    _class: JClass,
+    _handle: jlong,
+    data: JByteArray,
+) -> jint {
+    if let Ok(broadcast_lock) = AUDIO_BROADCAST.lock() {
         if let Some(tx) = broadcast_lock.as_ref() {
             if let Ok(elements) = env.convert_byte_array(&data) {
                 let len = elements.len() as jint;
