@@ -58,7 +58,10 @@ fun AppLauncher(
                 AppIconCell(app = app, onClick = {
                     val intent = context.packageManager.getLaunchIntentForPackage(app.packageName)
                     if (intent != null) {
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or 
+                                      Intent.FLAG_ACTIVITY_MULTIPLE_TASK or 
+                                      Intent.FLAG_ACTIVITY_NEW_DOCUMENT or 
+                                      Intent.FLAG_ACTIVITY_CLEAR_TOP)
                         val options = android.app.ActivityOptions.makeBasic()
                         options.setLaunchDisplayId(displayId)
                         try {

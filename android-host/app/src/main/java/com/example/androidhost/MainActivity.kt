@@ -282,45 +282,7 @@ fun ControlPanel(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Onboarding Card
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF161B22), shape = RoundedCornerShape(12.dp))
-                    .padding(20.dp)
-            ) {
-                Text(text = "Input Setup", color = Color(0xFF8B949E), fontSize = 12.sp)
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Button(
-                    onClick = {
-                        val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        ctx.startActivity(intent)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
-                ) {
-                    Text("Enable Mouse Clicks (Accessibility)", color = Color.White)
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Button(
-                    onClick = {
-                        val intent = Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS)
-                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        ctx.startActivity(intent)
-                        
-                        // Show the picker immediately after sending them to settings
-                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                        imm.showInputMethodPicker()
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
-                ) {
-                    Text("Enable Keyboard (IME)", color = Color.White)
-                }
-            }
+            com.example.androidhost.ui.components.InputSetupPanel()
 
             Spacer(modifier = Modifier.height(16.dp))
         }

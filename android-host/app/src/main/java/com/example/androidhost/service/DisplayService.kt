@@ -230,7 +230,15 @@ class DisplayService : Service() {
             if (!firstFrameLogged) {
                 firstFrameLogged = true
                 val firstBytes = data.take(16).joinToString(" ") { String.format("0x%02X", it) }
-                Log.d(TAG, "FIRST FRAME captured: first 16 bytes = [$firstBytes], rowStride=$rowStride, pixelStride=$pixelStride")
+                
+                var nonZeroAlpha = 0
+                for (i in 3 until data.size step 4) {
+                    if (data[i] != 0.toByte()) {
+                        nonZeroAlpha++
+                    }
+                }
+                
+                Log.d(TAG, "FIRST FRAME captured: first 16 bytes = [$firstBytes], rowStride=$rowStride, pixelStride=$pixelStride, nonZeroAlphaPixels=$nonZeroAlpha / ${width*height}")
             }
 
             val currentTime = System.currentTimeMillis()
