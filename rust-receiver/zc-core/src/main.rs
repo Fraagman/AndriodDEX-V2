@@ -224,38 +224,7 @@ fn main() {
         }
     });
 
-    // Spawn the input polling thread: reads real mouse/keyboard and pushes to the buffer
     let input_buffer_for_poll = input_buffer.clone();
-    std::thread::spawn(move || {
-        let mut capturer = match zc_input::InputCapturer::new() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to create InputCapturer: {}", e);
-                return;
-            }
-        };
-
-        loop {
-            match capturer.poll_all() {
-                Ok(events) => {
-                    let mut buf = input_buffer_for_poll.lock().unwrap();
-                    for event in events {
-                        let mut serialized = Vec::new();
-                        if event.encode(&mut serialized).is_ok() {
-                            if buf.len() >= INPUT_BUFFER_MAX {
-                                buf.pop_front(); // drop oldest event
-                            }
-                            buf.push_back(serialized);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Input poll error: {}", e);
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(8)); // ~120Hz polling
-        }
-    });
 
     let event_loop = EventLoop::new().unwrap();
 
@@ -280,6 +249,8 @@ fn main() {
     let mut mouse_pos = (0.0, 0.0);
     let mut last_is_vm = false;
     let is_kiosk = kiosk::is_kiosk_mode();
+    let mut is_focused = true;
+    let mut mouse_buttons = 0u32;
 
     let mut tile_compositor = zc_video::TileCompositor::new(
         renderer.device(),
@@ -304,6 +275,32 @@ fn main() {
                             elwt.exit();
                         }
                     }
+                    WindowEvent::Focused(focused) => {
+                        is_focused = *focused;
+                    }
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        if is_focused {
+                            let bit = match button {
+                                winit::event::MouseButton::Left => 1,
+                                winit::event::MouseButton::Right => 2,
+                                winit::event::MouseButton::Middle => 4,
+                                _ => 0,
+                            };
+                            if *state == ElementState::Pressed {
+                                mouse_buttons |= bit;
+                            } else {
+                                mouse_buttons &= !bit;
+                            }
+                            let inner_size = window.inner_size();
+                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons);
+                            let mut serialized = Vec::new();
+                            if ev.encode(&mut serialized).is_ok() {
+                                let mut buf = input_buffer_for_poll.lock().unwrap();
+                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                buf.push_back(serialized);
+                            }
+                        }
+                    }
                     WindowEvent::KeyboardInput {
                         event: key_event,
                         ..
@@ -314,9 +311,32 @@ fn main() {
                                 elwt.exit();
                             }
                         }
+                        if is_focused {
+                            let mut keycode = 0u32;
+                            if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
+                                keycode = code as u32;
+                            }
+                            let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed);
+                            let mut serialized = Vec::new();
+                            if ev.encode(&mut serialized).is_ok() {
+                                let mut buf = input_buffer_for_poll.lock().unwrap();
+                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                buf.push_back(serialized);
+                            }
+                        }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         mouse_pos = (position.x, position.y);
+                        if is_focused {
+                            let inner_size = window.inner_size();
+                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons);
+                            let mut serialized = Vec::new();
+                            if ev.encode(&mut serialized).is_ok() {
+                                let mut buf = input_buffer_for_poll.lock().unwrap();
+                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                buf.push_back(serialized);
+                            }
+                        }
                     }
                     WindowEvent::Resized(physical_size) => {
                         renderer.resize(*physical_size);

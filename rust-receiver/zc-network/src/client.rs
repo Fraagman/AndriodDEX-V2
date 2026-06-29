@@ -9,7 +9,7 @@ use rand_core::OsRng;
 use sha2::{Sha256, Digest};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use get_if_addrs::get_if_addrs;
+
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 
@@ -126,110 +126,91 @@ async fn scan_rndis_subnet(
     port: u16,
     status_callback: &(impl Fn(ConnectionPhase) + Send + Sync + Clone + 'static),
 ) -> Result<Connection, QuinnError> {
-    let interfaces = get_if_addrs().unwrap_or_default();
-    let mut private_subnets = Vec::new();
-    
-    for iface in interfaces {
-        if let std::net::IpAddr::V4(ipv4) = iface.ip() {
-            if !ipv4.is_loopback() && (ipv4.is_private() || ipv4.octets()[0] == 100) {
-                let octets = ipv4.octets();
-                let subnet_base = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
-                private_subnets.push((subnet_base, ipv4));
-            }
-        }
-    }
-    
-    if private_subnets.is_empty() {
-        status_callback(ConnectionPhase::Idle);
-        return Err("No private subnets found. Connect USB cable and enable USB tethering.".into());
-    }
-
     let mut attempt = 1;
     loop {
-        for (subnet_base, local_ip) in &private_subnets {
+        // Hardware Check: Find RNDIS adapters
+        let adapters = ipconfig::get_adapters().unwrap_or_default();
+        let rndis_adapters: Vec<_> = adapters.into_iter()
+            .filter(|a| {
+                let desc = a.description().to_lowercase();
+                let f_name = a.friendly_name().to_lowercase();
+                desc.contains("ndis") || desc.contains("rndis") || f_name.contains("ndis") || f_name.contains("rndis")
+            })
+            .collect();
+
+        if rndis_adapters.is_empty() {
+            status_callback(ConnectionPhase::Failed("Connect your phone via USB.".to_string()));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        // Hardware exists, check for valid IPv4
+        let mut target_subnets = Vec::new();
+        for adapter in rndis_adapters {
+            for ip in adapter.ip_addresses() {
+                if let IpAddr::V4(ipv4) = ip {
+                    if !ipv4.is_loopback() && ipv4.octets()[0] != 169 {
+                        let octets = ipv4.octets();
+                        let subnet_base = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
+                        target_subnets.push((subnet_base, *ipv4));
+                    }
+                }
+            }
+        }
+
+        if target_subnets.is_empty() {
+            status_callback(ConnectionPhase::Failed("Enable USB Tethering in Android settings.".to_string()));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        // We have a valid RNDIS subnet. Dispatch concurrent scans.
+        for (subnet_base, local_ip) in target_subnets {
             let subnet_str = format!("{}/24", subnet_base);
             status_callback(ConnectionPhase::Scanning(subnet_str, attempt));
             
             let octets = subnet_base.octets();
+            let mut futures = FuturesUnordered::new();
             
-            let mut fast_targets = vec![
-                Ipv4Addr::new(octets[0], octets[1], octets[2], 1),
-                Ipv4Addr::new(octets[0], octets[1], octets[2], 254),
-                Ipv4Addr::new(octets[0], octets[1], octets[2], 211),
-                Ipv4Addr::new(octets[0], octets[1], octets[2], 129),
-            ];
-            
-            // Second fast path if local IP ends in .207 etc
-            if octets[3] > 0 {
-                fast_targets.push(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3].wrapping_add(4)));
-            }
-            
-            for ip in &fast_targets {
-                let addr = SocketAddr::new(IpAddr::V4(*ip), port);
-                if let Ok(connecting) = endpoint.connect(addr, "localhost") {
-                    if let Ok(res) = tokio::time::timeout(Duration::from_millis(200), connecting).await {
-                        match res {
-                            Ok(conn) => {
-                                status_callback(ConnectionPhase::Found(ip.to_string()));
-                                return Ok(conn);
-                            }
-                            Err(e) => {
-                                let e_str = e.to_string();
-                                if e_str.contains("mismatch") || e_str.contains("ertificate") {
-                                    return Err(e.into());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            let mut all_ips = Vec::new();
             for i in 1..255 {
                 let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], i);
-                if !fast_targets.contains(&ip) && ip != *local_ip {
-                    all_ips.push(ip);
+                if ip == local_ip {
+                    continue;
                 }
-            }
-            
-            // Full scan of the /24 subnet concurrently
-            for chunk in all_ips.chunks(8) {
-                let mut futures = FuturesUnordered::new();
-                for &ip in chunk {
-                    let ep = endpoint.clone();
-                    futures.push(async move {
-                        let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                        if let Ok(connecting) = ep.connect(addr, "localhost") {
-                            if let Ok(res) = tokio::time::timeout(Duration::from_millis(1000), connecting).await {
-                                match res {
-                                    Ok(conn) => return Some(Ok((ip, conn))),
-                                    Err(e) => {
-                                        let e_str = e.to_string();
-                                        if e_str.contains("mismatch") || e_str.contains("ertificate") {
-                                            return Some(Err(e.into()));
-                                        }
+                
+                let ep = endpoint.clone();
+                futures.push(async move {
+                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                    if let Ok(connecting) = ep.connect(addr, "localhost") {
+                        if let Ok(res) = tokio::time::timeout(Duration::from_millis(100), connecting).await {
+                            match res {
+                                Ok(conn) => return Some(Ok((ip, conn))),
+                                Err(e) => {
+                                    let e_str = e.to_string();
+                                    if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                                        return Some(Err(e.into()));
                                     }
                                 }
                             }
                         }
-                        None
-                    });
-                }
-                
-                while let Some(res) = futures.next().await {
-                    match res {
-                        Some(Ok((ip, conn))) => {
-                            status_callback(ConnectionPhase::Found(ip.to_string()));
-                            return Ok(conn);
-                        }
-                        Some(Err(e)) => return Err(e),
-                        None => {}
                     }
+                    None
+                });
+            }
+            
+            while let Some(res) = futures.next().await {
+                match res {
+                    Some(Ok((ip, conn))) => {
+                        status_callback(ConnectionPhase::Found(ip.to_string()));
+                        return Ok(conn);
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => {}
                 }
             }
         }
         
-        status_callback(ConnectionPhase::Failed("Scanning for AndroidDex server. Ensure USB tethering is enabled...".to_string()));
+        status_callback(ConnectionPhase::Failed("Open the AndroidDex app on your phone.".to_string()));
         tokio::time::sleep(Duration::from_secs(3)).await;
         attempt += 1;
     }
