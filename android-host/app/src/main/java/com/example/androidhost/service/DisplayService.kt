@@ -99,7 +99,8 @@ class DisplayService : Service() {
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         // Use PRESENTATION flag so Activities/Presentations can render on this display
         val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION or
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
 
         // ImageReader with maxImages=4 to allow a buffer and prevent stalls.
         // RGBA_8888 matches the protobuf rgba_data layout expected by the PC receiver.
@@ -227,14 +228,9 @@ class DisplayService : Service() {
 
             // Log the first frame's pixel data for debugging
             if (!firstFrameLogged) {
-                val allZero = data.take(64).all { it == 0.toByte() }
-                if (allZero) {
-                    Log.w(TAG, "WARNING: First frame pixels are all zero — skipping send to wait for render")
-                    return
-                }
                 firstFrameLogged = true
                 val firstBytes = data.take(16).joinToString(" ") { String.format("0x%02X", it) }
-                Log.d(TAG, "FIRST FRAME captured: first 16 bytes = [$firstBytes], all-zero(64)=false, rowStride=$rowStride, pixelStride=$pixelStride")
+                Log.d(TAG, "FIRST FRAME captured: first 16 bytes = [$firstBytes], rowStride=$rowStride, pixelStride=$pixelStride")
             }
 
             val currentTime = System.currentTimeMillis()
@@ -298,83 +294,5 @@ class DisplayService : Service() {
         virtualDisplay?.release()
         surface?.release()
         imageReader?.close()
-    }
-}
-
-/**
- * Presentation that hosts the Compose DesktopShellContent on the VirtualDisplay,
- * wrapped in KeepAliveRedraw to force continuous surface invalidation.
- * This is what gets captured by the ImageReader and sent to the PC as video frames.
- *
- * Implements LifecycleOwner, SavedStateRegistryOwner, and ViewModelStoreOwner
- * so Compose can fully function inside this Presentation window.
- */
-class DesktopPresentation(
-    context: Context,
-    display: Display
-) : Presentation(context, display), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
-
-    private val lifecycleRegistry = LifecycleRegistry(this)
-    private val savedStateRegistryController = SavedStateRegistryController.create(this)
-    private val store = ViewModelStore()
-
-    override val lifecycle: Lifecycle
-        get() = lifecycleRegistry
-
-    override val savedStateRegistry: SavedStateRegistry
-        get() = savedStateRegistryController.savedStateRegistry
-
-    override val viewModelStore: ViewModelStore
-        get() = store
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        savedStateRegistryController.performRestore(savedInstanceState)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-
-        val composeView = ComposeView(context).apply {
-            setContent {
-                // KeepAliveRedraw wraps the desktop content to force continuous
-                // VirtualDisplay surface invalidation. This ensures ImageReader
-                // always has a fresh frame to deliver, even when the UI is static.
-                com.example.androidhost.KeepAliveRedraw {
-                    com.example.androidhost.DesktopShellContent(
-                        isTetheringReady = true,
-                        surface = null,                                          // VirtualDisplay does NOT embed a surface
-                        shellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel,  // REAL shared view model
-                        onLockSession = { /* trigger lock via service */ },
-                        onRequestAudioCapture = { /* forward to audio capture flow */ }
-                    )
-                }
-            }
-        }
-
-        // Wire up lifecycle, view model store, and saved state for Compose
-        composeView.setViewTreeLifecycleOwner(this)
-        composeView.setViewTreeViewModelStoreOwner(this)
-        composeView.setViewTreeSavedStateRegistryOwner(this)
-
-        setContentView(composeView)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-    }
-
-    fun onResume() {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-    }
-
-    override fun dismiss() {
-        super.dismiss()
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-        store.clear()
     }
 }

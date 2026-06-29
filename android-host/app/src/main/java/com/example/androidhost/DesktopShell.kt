@@ -125,7 +125,8 @@ fun DesktopShell(
     displayViewModel: DisplayViewModel = viewModel(),
     shellViewModel: ShellViewModel = viewModel(),
     onLockSession: () -> Unit = {},
-    onRequestAudioCapture: (Boolean) -> Unit = {}
+    onRequestAudioCapture: (Boolean) -> Unit = {},
+    displayId: Int = android.view.Display.DEFAULT_DISPLAY
 ) {
     val isReady by viewModel.isTetheringReady.collectAsState()
     val surface by displayViewModel.virtualDisplaySurface.collectAsState()
@@ -135,7 +136,8 @@ fun DesktopShell(
         surface = surface,
         shellViewModel = shellViewModel,
         onLockSession = onLockSession,
-        onRequestAudioCapture = onRequestAudioCapture
+        onRequestAudioCapture = onRequestAudioCapture,
+        displayId = displayId
     )
 }
 
@@ -145,7 +147,8 @@ fun DesktopShellContent(
     surface: Surface? = null,
     shellViewModel: ShellViewModel? = null,
     onLockSession: () -> Unit = {},
-    onRequestAudioCapture: (Boolean) -> Unit = {}
+    onRequestAudioCapture: (Boolean) -> Unit = {},
+    displayId: Int = android.view.Display.DEFAULT_DISPLAY
 ) {
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
@@ -173,7 +176,7 @@ fun DesktopShellContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF1A1A2E))  // Dark wallpaper background
+            .background(Color.Transparent)  // Transparent so native apps behind it are visible
     ) {
         // The desktop content ALWAYS renders the real desktop:
         // 1. Background (dark wallpaper color, already set on the Box)
@@ -238,7 +241,8 @@ fun DesktopShellContent(
                 onDismiss = { showLauncher = false },
                 onAppSelected = { packageName ->
                     shellViewModel?.openApp(packageName)
-                }
+                },
+                displayId = displayId
             )
         }
 

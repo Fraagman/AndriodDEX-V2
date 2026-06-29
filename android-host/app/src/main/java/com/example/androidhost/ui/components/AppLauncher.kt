@@ -33,7 +33,8 @@ data class AppInfo(
 @Composable
 fun AppLauncher(
     onDismiss: () -> Unit,
-    onAppSelected: (String) -> Unit
+    onAppSelected: (String) -> Unit,
+    displayId: Int = android.view.Display.DEFAULT_DISPLAY
 ) {
     val context = LocalContext.current
     var apps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
@@ -58,7 +59,15 @@ fun AppLauncher(
                     val intent = context.packageManager.getLaunchIntentForPackage(app.packageName)
                     if (intent != null) {
                         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(intent)
+                        val options = android.app.ActivityOptions.makeBasic()
+                        options.setLaunchDisplayId(displayId)
+                        try {
+                            context.startActivity(intent, options.toBundle())
+                        } catch (e: Exception) {
+                            android.widget.Toast.makeText(context, "Failed to launch app: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    } else {
+                        android.widget.Toast.makeText(context, "App not installed or cannot be launched directly", android.widget.Toast.LENGTH_SHORT).show()
                     }
                     onAppSelected(app.packageName)
                     onDismiss()
