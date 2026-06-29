@@ -146,7 +146,13 @@ async fn scan_rndis_subnet(
 
         // Hardware exists, check for valid IPv4
         let mut target_subnets = Vec::new();
+        let mut gateways = Vec::new();
         for adapter in rndis_adapters {
+            for gw in adapter.gateways() {
+                if let IpAddr::V4(ipv4) = gw {
+                    gateways.push(*ipv4);
+                }
+            }
             for ip in adapter.ip_addresses() {
                 if let IpAddr::V4(ipv4) = ip {
                     if !ipv4.is_loopback() && ipv4.octets()[0] != 169 {
@@ -162,6 +168,26 @@ async fn scan_rndis_subnet(
             status_callback(ConnectionPhase::Failed("Enable USB Tethering in Android settings.".to_string()));
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
+        }
+
+        for gw in gateways {
+            let addr = SocketAddr::new(IpAddr::V4(gw), port);
+            if let Ok(connecting) = endpoint.connect(addr, "localhost") {
+                if let Ok(res) = tokio::time::timeout(Duration::from_millis(400), connecting).await {
+                    match res {
+                        Ok(conn) => {
+                            status_callback(ConnectionPhase::Found(gw.to_string()));
+                            return Ok(conn);
+                        }
+                        Err(e) => {
+                            let e_str = e.to_string();
+                            if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // We have a valid RNDIS subnet. Dispatch concurrent scans.
@@ -182,7 +208,7 @@ async fn scan_rndis_subnet(
                 futures.push(async move {
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
                     if let Ok(connecting) = ep.connect(addr, "localhost") {
-                        if let Ok(res) = tokio::time::timeout(Duration::from_millis(100), connecting).await {
+                        if let Ok(res) = tokio::time::timeout(Duration::from_millis(400), connecting).await {
                             match res {
                                 Ok(conn) => return Some(Ok((ip, conn))),
                                 Err(e) => {
