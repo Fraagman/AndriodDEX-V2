@@ -35,6 +35,15 @@
         <service android:name=".service.VmService" android:exported="false" />
         <service android:name=".service.NativeComputeService" android:exported="false" />
         
+        <service android:name=".service.AndroidDexIME"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data android:name="android.view.im" android:resource="@xml/method" />
+        </service>
+        
         <service
             android:name=".service.DesktopAccessibilityService"
             android:exported="false"

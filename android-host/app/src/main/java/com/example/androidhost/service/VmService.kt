@@ -132,6 +132,27 @@ class VmService : Service() {
                                     "onPayloadStarted" -> {
                                         _vmState.value = VmState.RUNNING
                                         Log.i(TAG, "VM state: RUNNING")
+                                        
+                                        // Attempt to connect to vsock port 5000 for input forwarding
+                                        java.util.concurrent.Executors.newSingleThreadExecutor().submit {
+                                            var connected = false
+                                            for (i in 1..10) {
+                                                try {
+                                                    Thread.sleep(1000)
+                                                    val connectVsockMethod = virtualMachineClass?.getMethod("connectVsock", Int::class.java)
+                                                    val pfd = connectVsockMethod?.invoke(virtualMachineInstance, 5000) as? android.os.ParcelFileDescriptor
+                                                    if (pfd != null) {
+                                                        Log.i(TAG, "Successfully connected to VM vsock port 5000")
+                                                        com.example.androidhost.service.InputManager.vmOutputStream = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)
+                                                        connected = true
+                                                        break
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.e(TAG, "Failed to connect to vsock (attempt $i)", e)
+                                                }
+                                            }
+                                            if (!connected) Log.e(TAG, "Could not establish vsock input pipeline to VM")
+                                        }
                                     }
                                     "onPayloadReady" -> {
                                         Log.i(TAG, "VM payload ready")

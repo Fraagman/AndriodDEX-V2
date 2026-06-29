@@ -11,6 +11,9 @@ import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.widget.FrameLayout
+import android.widget.ImageView
+import kotlinx.coroutines.launch
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -31,8 +34,6 @@ class DesktopAccessibilityService : AccessibilityService() {
             private set
     }
 
-    private var inputServerThread: Thread? = null
-    private var serverSocket: ServerSocket? = null
     private var cursorView: CursorView? = null
     private var windowManager: WindowManager? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -45,13 +46,20 @@ class DesktopAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.d(TAG, "Service connected")
-        startInputServer()
+        
+        // Start collecting from InputManager using the service's lifecycle
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            InputManager.mouseEvents.collect { onMouseEvent(it) }
+        }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            InputManager.keyboardEvents.collect { onKeyboardEvent(it) }
+        }
+        
         showCursorOverlay()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
-        stopInputServer()
         removeCursorOverlay()
         return super.onUnbind(intent)
     }
@@ -164,174 +172,13 @@ class DesktopAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---- Input Server (via QUIC polling) ----
-
-    private fun startInputServer() {
-        com.example.androidhost.quic.QuicServer.startServer(4433, filesDir.absolutePath)
-        
-        inputServerThread = Thread {
-            val buffer = ByteArray(1024 * 1024)
-            while (!Thread.currentThread().isInterrupted) {
-                try {
-                    val bytesRead = com.example.androidhost.quic.QuicServer.pollInput(buffer)
-                    if (bytesRead > 0) {
-                        hasReceivedData = true
-                        Log.d(TAG, "Input event received via QUIC")
-                        val data = buffer.copyOf(bytesRead)
-                        handleInputEvent(data)
-                    } else {
-                        Thread.sleep(10) // Small delay if no data
-                    }
-                } catch (e: InterruptedException) {
-                    break
-                } catch (e: Exception) {
-                    Log.e(TAG, "Input polling error", e)
-                }
-            }
-        }.apply {
-            name = "InputPollingThread"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun stopInputServer() {
-        inputServerThread?.interrupt()
-        inputServerThread = null
-    }
-
-    // ---- Protobuf Decoding (wire-format compatible with input.proto InputEvent) ----
-    //
-    // InputEvent { oneof event { MouseEvent mouse = 1; KeyboardEvent keyboard = 2; } }
-    // MouseEvent { uint32 x=1; uint32 y=2; uint32 buttons=3; uint64 timestamp=4; }
-    // KeyboardEvent { uint32 keycode=1; bool pressed=2; uint32 modifiers=3; uint64 timestamp=4; }
-    //
-    // Wire format for InputEvent:
-    //   field 1 (mouse):    tag = (1 << 3) | 2 = 0x0A, then varint length, then MouseEvent bytes
-    //   field 2 (keyboard): tag = (2 << 3) | 2 = 0x12, then varint length, then KeyboardEvent bytes
-
-    private fun handleInputEvent(data: ByteArray) {
-        var pos = 0
-
-        while (pos < data.size) {
-            val tagResult = readVarint(data, pos) ?: return
-            pos = tagResult.second
-            val tag = tagResult.first.toInt()
-
-            val fieldNumber = tag ushr 3
-            val wireType = tag and 0x07
-
-            if (wireType != 2) {
-                // Not a length-delimited field, skip
-                return
-            }
-
-            val lengthResult = readVarint(data, pos) ?: return
-            pos = lengthResult.second
-            val fieldLen = lengthResult.first.toInt()
-
-            if (pos + fieldLen > data.size) return
-
-            val fieldData = data.copyOfRange(pos, pos + fieldLen)
-            pos += fieldLen
-
-            when (fieldNumber) {
-                1 -> { // MouseEvent
-                    val mouse = decodeMouseEvent(fieldData)
-                    if (mouse != null) {
-                        onMouseEvent(mouse)
-                    }
-                }
-                2 -> { // KeyboardEvent
-                    val kb = decodeKeyboardEvent(fieldData)
-                    if (kb != null) {
-                        onKeyboardEvent(kb)
-                    }
-                }
-            }
-        }
-    }
-
-    data class ParsedMouseEvent(val x: Int, val y: Int, val buttons: Int, val timestamp: Long)
-    data class ParsedKeyboardEvent(val keycode: Int, val pressed: Boolean, val modifiers: Int, val timestamp: Long)
-
-    private fun decodeMouseEvent(data: ByteArray): ParsedMouseEvent? {
-        var pos = 0
-        var x = 0; var y = 0; var buttons = 0; var timestamp = 0L
-
-        while (pos < data.size) {
-            val tagResult = readVarint(data, pos) ?: break
-            pos = tagResult.second
-            val tag = tagResult.first.toInt()
-            val fieldNumber = tag ushr 3
-            val wireType = tag and 0x07
-
-            if (wireType != 0) {
-                // Skip unknown wire types for robustness
-                break
-            }
-
-            val valResult = readVarint(data, pos) ?: break
-            pos = valResult.second
-
-            when (fieldNumber) {
-                1 -> x = valResult.first.toInt()
-                2 -> y = valResult.first.toInt()
-                3 -> buttons = valResult.first.toInt()
-                4 -> timestamp = valResult.first
-            }
-        }
-        return ParsedMouseEvent(x, y, buttons, timestamp)
-    }
-
-    private fun decodeKeyboardEvent(data: ByteArray): ParsedKeyboardEvent? {
-        var pos = 0
-        var keycode = 0; var pressed = false; var modifiers = 0; var timestamp = 0L
-
-        while (pos < data.size) {
-            val tagResult = readVarint(data, pos) ?: break
-            pos = tagResult.second
-            val tag = tagResult.first.toInt()
-            val fieldNumber = tag ushr 3
-            val wireType = tag and 0x07
-
-            if (wireType != 0) break
-
-            val valResult = readVarint(data, pos) ?: break
-            pos = valResult.second
-
-            when (fieldNumber) {
-                1 -> keycode = valResult.first.toInt()
-                2 -> pressed = valResult.first != 0L
-                3 -> modifiers = valResult.first.toInt()
-                4 -> timestamp = valResult.first
-            }
-        }
-        return ParsedKeyboardEvent(keycode, pressed, modifiers, timestamp)
-    }
-
-    private fun readVarint(data: ByteArray, startPos: Int): Pair<Long, Int>? {
-        var result = 0L
-        var shift = 0
-        var pos = startPos
-        while (pos < data.size) {
-            val b = data[pos].toInt() and 0xFF
-            result = result or ((b.toLong() and 0x7F) shl shift)
-            pos++
-            if (b and 0x80 == 0) {
-                return Pair(result, pos)
-            }
-            shift += 7
-            if (shift >= 64) return null
-        }
-        return null
-    }
+    // Input polling moved to InputManager
 
     // ---- Event Handlers ----
 
     private var lastButtons = 0
 
-    private fun onMouseEvent(event: ParsedMouseEvent) {
+    private fun onMouseEvent(event: InputManager.ParsedMouseEvent) {
         val x = event.x.toFloat()
         val y = event.y.toFloat()
 
@@ -350,7 +197,7 @@ class DesktopAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun onKeyboardEvent(event: ParsedKeyboardEvent) {
+    private fun onKeyboardEvent(event: InputManager.ParsedKeyboardEvent) {
         Log.d(TAG, "Keyboard event: keycode=${event.keycode}, pressed=${event.pressed}")
         // Keyboard injection will be implemented when we add IME support
     }
