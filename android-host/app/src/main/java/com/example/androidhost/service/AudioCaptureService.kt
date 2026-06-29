@@ -53,7 +53,7 @@ class AudioCaptureService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", -1) ?: -1
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
-        if (resultCode != -1 && data != null) {
+        if (resultCode == android.app.Activity.RESULT_OK && data != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIFICATION_ID, createNotification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             } else {
