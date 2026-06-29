@@ -124,10 +124,18 @@ class MainActivity : ComponentActivity() {
             requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
 
-        startService(Intent(this, TetheringService::class.java))
+        try {
+            startService(Intent(this, TetheringService::class.java))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         
-        com.example.androidhost.network.LocalInputServer.start()
-        com.example.androidhost.quic.QuicServer.startServer(4433, filesDir.absolutePath)
+        try {
+            com.example.androidhost.network.LocalInputServer.start()
+            com.example.androidhost.quic.QuicServer.startServer(4433, filesDir.absolutePath)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
 

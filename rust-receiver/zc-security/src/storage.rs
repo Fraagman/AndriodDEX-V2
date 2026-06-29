@@ -47,6 +47,12 @@ pub fn load_trust_data() -> Option<(Fingerprint, Psk)> {
     Some((fp, psk))
 }
 
+pub fn delete_trust_data() {
+    if let Some(path) = get_trust_file_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn get_server_cert_file_path() -> Option<PathBuf> {
     let mut path = if let Some(p) = CUSTOM_DATA_PATH.lock().unwrap().clone() {
         p

@@ -22,9 +22,13 @@ fn main() {
         let exe_str = exe_path.to_str().unwrap_or("AndroidDex.exe");
         let command_str = format!("netsh advfirewall firewall add rule name=\"AndroidDex QUIC\" dir=out action=allow protocol=udp localport=any remoteport=4433 program=\"{}\" enable=yes", exe_str);
         
-        let _ = std::process::Command::new("powershell")
+        if let Ok(output) = std::process::Command::new("powershell")
             .args(&["-Command", &command_str])
-            .spawn();
+            .output() {
+            if !output.status.success() {
+                eprintln!("Failed to add firewall rule. Please run as administrator if connection fails.");
+            }
+        }
     }
 
     let ping = Ping { timestamp: 0 };
@@ -50,10 +54,13 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
 
+    let window_for_callback: Arc<Mutex<Option<Arc<winit::window::Window>>>> = Arc::new(Mutex::new(None));
+
     // Clone for the QUIC task
     let input_buffer_for_quic = input_buffer.clone();
     let phase_for_quic = connection_phase.clone();
     let is_connected_quic = is_connected.clone();
+    let window_for_quic = window_for_callback.clone();
     
     rt.spawn(async move {
         loop {
@@ -62,9 +69,13 @@ fn main() {
             let audio_sender_loop = audio_sender.clone();
             let input_buffer_loop = input_buffer_for_quic.clone();
             let is_connected_loop = is_connected_quic.clone();
+            let window_for_callback_loop = window_for_quic.clone();
 
             match zc_network::connect(4433, move |phase| {
                 *phase_clone.lock().unwrap() = phase.clone();
+                if let Some(w) = window_for_callback_loop.lock().unwrap().as_ref() {
+                    w.request_redraw();
+                }
                 if matches!(phase, zc_network::ConnectionPhase::Connected) {
                     println!("ConnectionPhase updated to Connected");
                 }
@@ -254,6 +265,8 @@ fn main() {
         .build(&event_loop)
         .unwrap());
 
+    *window_for_callback.lock().unwrap() = Some(window.clone());
+
     let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()));
     
     // Initialize egui overlay
@@ -390,9 +403,15 @@ fn main() {
                                 
                                 frame.present();
                             }
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => renderer.resize(window.inner_size()),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                            Err(e) => eprintln!("{:?}", e),
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                eprintln!("SurfaceError: Lost or Outdated, resizing...");
+                                renderer.resize(window.inner_size());
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                eprintln!("SurfaceError: OutOfMemory, exiting...");
+                                elwt.exit();
+                            }
+                            Err(e) => eprintln!("SurfaceError: {:?}", e),
                         }
                     }
                     _ => (),

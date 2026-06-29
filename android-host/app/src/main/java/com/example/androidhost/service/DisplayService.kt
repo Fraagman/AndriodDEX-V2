@@ -373,8 +373,8 @@ class DesktopPresentation(
     }
 
     override fun dismiss() {
+        super.dismiss()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         store.clear()
-        super.dismiss()
     }
 }

@@ -22,10 +22,10 @@ lazy_static::lazy_static! {
 }
 
 fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    let key = cert.serialize_private_key_der();
-    let cert = cert.serialize_der()?;
-    Ok((cert, key))
+    let keypair = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
+    let params = rcgen::CertificateParams::new(vec!["localhost".into()]).map_err(|e| e.to_string())?;
+    let cert = params.self_signed(&keypair)?;
+    Ok((cert.der().to_vec(), keypair.serialize_der()))
 }
 
 #[no_mangle]
@@ -151,7 +151,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
             log::info!("QUIC server listening on 0.0.0.0:{}", port);
 
             // Last IP for grace window
-            let mut last_auth_ip: Option<(std::net::IpAddr, std::time::Instant)> = None;
+            let last_auth_ip: Arc<Mutex<Option<(std::net::IpAddr, std::time::Instant)>>> = Arc::new(Mutex::new(None));
 
             loop {
                 CONNECTION_STATE.store(STATE_IDLE, Ordering::SeqCst);
@@ -164,7 +164,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                             CONNECTION_STATE.store(STATE_PAIRING, Ordering::SeqCst);
 
                             let mut auto_accept = false;
-                            if let Some((last_ip, time)) = last_auth_ip {
+                            if let Some((last_ip, time)) = *last_auth_ip.lock().unwrap() {
                                 if last_ip == ip && time.elapsed().as_secs() < 10 {
                                     log::info!("Auto-accepted reconnect from {} within grace window", ip);
                                     auto_accept = true;
@@ -175,6 +175,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                             let input_tx_clone = input_tx.clone();
                             let video_tx_clone = video_tx.clone();
                             let audio_tx_clone = audio_tx.clone();
+                            let last_auth_ip_clone = last_auth_ip.clone();
                             
                             tokio::spawn(async move {
                                 let mut authenticated = false;
@@ -202,8 +203,7 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                                 if let Ok(pin) = pin {
                                                     log::info!("PIN received from user: verifying...");
                                                     let psk = zc_security::pairing::derive_psk(&pin, &pubkey);
-                                                    let client_id = [0u8; 32];
-                                                    if let Err(e) = zc_security::storage::store_trust_data(&client_id, &psk) {
+                                                    if let Err(e) = zc_security::storage::store_trust_data(&pubkey, &psk) {
                                                         log::error!("Failed to store trust data: {:?}", e);
                                                     }
                                                     let _ = send_stream.write_all(b"OK").await;
@@ -263,6 +263,10 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                 if authenticated {
                                     log::info!("AuthSuccess received — keeping connection alive");
                                     CONNECTION_STATE.store(STATE_AUTHENTICATED, Ordering::SeqCst);
+                                    
+                                    if conn_clone.remote_address().ip() != std::net::Ipv4Addr::new(127, 0, 0, 1) {
+                                        *last_auth_ip_clone.lock().unwrap() = Some((conn_clone.remote_address().ip(), std::time::Instant::now()));
+                                    }
                                     
                                     log::info!("Opening video open_uni stream (Android -> PC)...");
                                     let mut video_rx = video_tx_clone.subscribe();
@@ -360,12 +364,12 @@ pub extern "C" fn Java_com_example_androidhost_quic_QuicServer_start(
                                     log::error!("Authentication failed or pairing aborted");
                                 }
                                 
-                                CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
+                                if authenticated {
+                                    CONNECTION_STATE.store(STATE_DISCONNECTED, Ordering::SeqCst);
+                                }
                             });
                             
-                            if connection.remote_address().ip() != std::net::Ipv4Addr::new(127, 0, 0, 1) {
-                                last_auth_ip = Some((connection.remote_address().ip(), std::time::Instant::now()));
-                            }
+                            // Assignment moved inside authenticated block
                         }
                         Err(e) => {
                             log::error!("Connection error: {} — will NOT reconnect automatically unless USB is replugged", e);

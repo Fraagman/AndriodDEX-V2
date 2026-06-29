@@ -167,9 +167,19 @@ async fn scan_rndis_subnet(
             for ip in &fast_targets {
                 let addr = SocketAddr::new(IpAddr::V4(*ip), port);
                 if let Ok(connecting) = endpoint.connect(addr, "localhost") {
-                    if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(200), connecting).await {
-                        status_callback(ConnectionPhase::Found(ip.to_string()));
-                        return Ok(conn);
+                    if let Ok(res) = tokio::time::timeout(Duration::from_millis(200), connecting).await {
+                        match res {
+                            Ok(conn) => {
+                                status_callback(ConnectionPhase::Found(ip.to_string()));
+                                return Ok(conn);
+                            }
+                            Err(e) => {
+                                let e_str = e.to_string();
+                                if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                                    return Err(e.into());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -190,8 +200,16 @@ async fn scan_rndis_subnet(
                     futures.push(async move {
                         let addr = SocketAddr::new(IpAddr::V4(ip), port);
                         if let Ok(connecting) = ep.connect(addr, "localhost") {
-                            if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_millis(150), connecting).await {
-                                return Some((ip, conn));
+                            if let Ok(res) = tokio::time::timeout(Duration::from_millis(1000), connecting).await {
+                                match res {
+                                    Ok(conn) => return Some(Ok((ip, conn))),
+                                    Err(e) => {
+                                        let e_str = e.to_string();
+                                        if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                                            return Some(Err(e.into()));
+                                        }
+                                    }
+                                }
                             }
                         }
                         None
@@ -199,15 +217,19 @@ async fn scan_rndis_subnet(
                 }
                 
                 while let Some(res) = futures.next().await {
-                    if let Some((ip, conn)) = res {
-                        status_callback(ConnectionPhase::Found(ip.to_string()));
-                        return Ok(conn);
+                    match res {
+                        Some(Ok((ip, conn))) => {
+                            status_callback(ConnectionPhase::Found(ip.to_string()));
+                            return Ok(conn);
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => {}
                     }
                 }
             }
         }
         
-        status_callback(ConnectionPhase::Failed("USB tethering detected, but phone is not responding. Retrying...".to_string()));
+        status_callback(ConnectionPhase::Failed("Scanning for AndroidDex server. Ensure USB tethering is enabled...".to_string()));
         tokio::time::sleep(Duration::from_secs(3)).await;
         attempt += 1;
     }
@@ -236,28 +258,48 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
         
-        let conn = scan_rndis_subnet(&endpoint, port, &status_callback).await?;
-        
-        status_callback(ConnectionPhase::Handshaking);
-        
-        let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
-        let mut hasher = Sha256::new();
-        hasher.update(&psk);
-        hasher.update(b"auth");
-        let token: [u8; 32] = hasher.finalize().into();
-        auth_send.write_all(b"A").await?;
-        auth_send.write_all(&token).await?;
-        auth_send.finish()?;
-
-        let mut ok_buf = [0u8; 2];
-        auth_recv.read_exact(&mut ok_buf).await?;
-        if &ok_buf != b"OK" {
-            status_callback(ConnectionPhase::Failed("Auth rejected".into()));
-            return Err("Auth rejected".into());
+        match scan_rndis_subnet(&endpoint, port, &status_callback).await {
+            Ok(conn) => {
+                status_callback(ConnectionPhase::Handshaking);
+                
+                let mut auth_ok = false;
+                if let Ok((mut auth_send, mut auth_recv)) = conn.open_bi().await {
+                    let mut hasher = Sha256::new();
+                    hasher.update(&psk);
+                    hasher.update(b"auth");
+                    let token: [u8; 32] = hasher.finalize().into();
+                    
+                    if auth_send.write_all(b"A").await.is_ok() 
+                        && auth_send.write_all(&token).await.is_ok() 
+                        && auth_send.finish().is_ok() {
+                            
+                        let mut ok_buf = [0u8; 2];
+                        if auth_recv.read_exact(&mut ok_buf).await.is_ok() && &ok_buf == b"OK" {
+                            auth_ok = true;
+                        }
+                    }
+                }
+                
+                if auth_ok {
+                    status_callback(ConnectionPhase::Connected);
+                    return Ok(conn);
+                } else {
+                    status_callback(ConnectionPhase::Failed("Auth rejected. Re-pairing...".into()));
+                    zc_security::storage::delete_trust_data();
+                    // Fall through to pairing
+                }
+            }
+            Err(e) => {
+                let e_str = e.to_string();
+                if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                    status_callback(ConnectionPhase::Failed("Certificate changed. Re-pairing...".into()));
+                    zc_security::storage::delete_trust_data();
+                    // Fall through to pairing
+                } else {
+                    return Err(e);
+                }
+            }
         }
-        
-        status_callback(ConnectionPhase::Connected);
-        return Ok(conn);
     }
     
     let fingerprint = Arc::new(Mutex::new(None));

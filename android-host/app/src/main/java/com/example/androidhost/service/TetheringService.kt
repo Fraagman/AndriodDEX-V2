@@ -40,7 +40,7 @@ class TetheringService : Service() {
             addAction(ConnectivityManager.CONNECTIVITY_ACTION)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
         } else {
             registerReceiver(receiver, filter)
         }
@@ -57,7 +57,11 @@ class TetheringService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Tethering Service Active")
             .build()
-        startForeground(2, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(2, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(2, notification)
+        }
         checkTethering(this)
         return START_STICKY
     }
