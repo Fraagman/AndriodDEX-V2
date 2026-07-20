@@ -13,9 +13,13 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.example.androidhost.MainActivity
 import com.example.androidhost.quic.QuicServer
@@ -39,6 +43,9 @@ class AudioCaptureService : Service() {
     private var audioRecord: AudioRecord? = null
     private var captureThread: Thread? = null
     @Volatile private var isCapturing = false
+    
+    private var audioManager: AudioManager? = null
+    private var originalVolume: Int = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -82,6 +89,20 @@ class AudioCaptureService : Service() {
     private fun startAudioCapture(resultCode: Int, data: Intent) {
         if (isCapturing) return
         isCapturing = true
+
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        originalVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: -1
+        if (originalVolume != -1) {
+            audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+        }
+
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(
+                this,
+                "Note: DRM-protected apps (like Netflix) actively block audio capture by OS design.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
 
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
@@ -210,6 +231,11 @@ class AudioCaptureService : Service() {
         isCapturing = false
         captureThread?.interrupt()
         captureThread = null
+
+        if (originalVolume != -1) {
+            audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0)
+            originalVolume = -1
+        }
 
         try {
             audioRecord?.stop()

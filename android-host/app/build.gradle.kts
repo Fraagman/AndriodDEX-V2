@@ -119,5 +119,7 @@ dependencies {
   implementation(libs.androidx.biometric)
 
   // Zstd compression for tiles
-  implementation("com.github.luben:zstd-jni:1.5.6-3")
+  // Shizuku
+  implementation("dev.rikka.shizuku:api:13.1.5")
+  implementation("dev.rikka.shizuku:provider:13.1.5")
 }
