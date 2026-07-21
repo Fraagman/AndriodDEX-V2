@@ -54,28 +54,7 @@ kotlin {
     jvmToolchain(17)
 }
 
-tasks.register<Exec>("cargoNdkBuild") {
-    workingDir = file("src/rust_quic_server")
-    environment("ANDROID_NDK_HOME", "C:/Users/Asus/AppData/Local/Android/Sdk/ndk/26.1.10909125")
-    commandLine(
-        "cargo", "ndk",
-        "-t", "aarch64-linux-android",
-        "-P", "29",
-        "build"
-    )
-    
-    val srcFile = file("src/rust_quic_server/target/aarch64-linux-android/debug/librust_quic_server.so")
-    val dstDir = file("src/main/jniLibs/arm64-v8a")
-    
-    doLast {
-        dstDir.mkdirs()
-        srcFile.copyTo(File(dstDir, "librust_quic_server.so"), overwrite = true)
-    }
-}
 
-tasks.named("preBuild") {
-    dependsOn("cargoNdkBuild")
-}
 
 dependencies {
   val composeBom = platform(libs.androidx.compose.bom)
@@ -118,8 +97,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
 
-  // Zstd compression for tiles
-  implementation("com.github.luben:zstd-jni:1.5.5-11@aar")
   // Shizuku
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")

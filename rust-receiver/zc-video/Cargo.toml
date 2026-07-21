@@ -6,5 +6,4 @@ edition = "2024"
 [dependencies]
 wgpu = "0.19"
 zc-protocol = { path = "../zc-protocol" }
-zstd = "0.13"
 bytemuck = { version = "1.14", features = ["derive"] }

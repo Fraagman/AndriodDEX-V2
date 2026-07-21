@@ -1,9 +1,0 @@
-C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\debug\deps\android_logger-67b73e1e4370ca3e.d: C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\lib.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\arrays.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\config.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\id.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\platform_log_writer.rs
-
-C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\android-host\app\src\rust_quic_server\target\debug\deps\libandroid_logger-67b73e1e4370ca3e.rmeta: C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\lib.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\arrays.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\config.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\id.rs C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\platform_log_writer.rs
-
-C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\lib.rs:
-C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\arrays.rs:
-C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\config.rs:
-C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\id.rs:
-C:\Users\Asus\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\android_logger-0.15.1\src\platform_log_writer.rs:
