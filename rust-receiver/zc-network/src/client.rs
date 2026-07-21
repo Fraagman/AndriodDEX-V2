@@ -181,7 +181,8 @@ async fn scan_rndis_subnet(
                         }
                         Err(e) => {
                             let e_str = e.to_string();
-                            if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                            println!("Conn error to {}: {}", gw, e_str);
+                            if e_str.contains("mismatch") || e_str.contains("ertificate") || e_str.contains("nvalid") || e_str.contains("ccept") || e_str.contains("eneral") || e_str.contains("error") {
                                 return Err(e.into());
                             }
                         }
@@ -213,7 +214,8 @@ async fn scan_rndis_subnet(
                                 Ok(conn) => return Some(Ok((ip, conn))),
                                 Err(e) => {
                                     let e_str = e.to_string();
-                                    if e_str.contains("mismatch") || e_str.contains("ertificate") {
+                                    println!("Conn error to {}: {}", ip, e_str);
+                                    if e_str.contains("mismatch") || e_str.contains("ertificate") || e_str.contains("nvalid") {
                                         return Some(Err(e.into()));
                                     }
                                 }
@@ -298,13 +300,10 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
             }
             Err(e) => {
                 let e_str = e.to_string();
-                if e_str.contains("mismatch") || e_str.contains("ertificate") {
-                    status_callback(ConnectionPhase::Failed("Certificate changed. Re-pairing...".into()));
-                    zc_security::storage::delete_trust_data();
-                    // Fall through to pairing
-                } else {
-                    return Err(e);
-                }
+                println!("Outer conn error: {}", e_str);
+                status_callback(ConnectionPhase::Failed("Certificate changed or error. Re-pairing...".into()));
+                zc_security::storage::delete_trust_data();
+                // Fall through to pairing
             }
         }
     }
