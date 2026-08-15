@@ -96,8 +96,4 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
-
-  // zstd for dirty-tile compression (RegionDetector). The @aar variant carries the
-  // arm64-v8a / x86_64 native libraries; the plain jar does not.
-  implementation(variantOf(libs.zstd.jni) { artifactType("aar") })
 }

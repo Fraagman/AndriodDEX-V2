@@ -2,7 +2,6 @@ package com.example.androidhost.service
 
 import android.util.Log
 import com.example.androidhost.network.FrameSender
-import com.github.luben.zstd.Zstd
 
 /**
  * Dirty-tile detector for the VirtualDisplay capture loop.
@@ -33,9 +32,6 @@ class RegionDetector {
 
         /** Bytes per pixel in the RGBA_8888 capture buffer. */
         private const val BYTES_PER_PIXEL = 4
-
-        /** zstd level 1: the capture loop has a 33ms budget, so favour speed over ratio. */
-        private const val ZSTD_LEVEL = 1
 
         /**
          * Above this many dirty tiles, fall back to a keyframe. 96 tiles of 64x64 is
@@ -210,14 +206,12 @@ class RegionDetector {
         }
 
         return try {
-            // Zstd.compress takes the whole array, so hand it an exact-length copy when
-            // the tile is smaller than the full-size scratch buffer (right/bottom edges).
+            // Send exact-length copy when the tile is smaller than the full-size scratch buffer (right/bottom edges).
             val payload = if (tileBytes == tileBuffer.size) tileBuffer else tileBuffer.copyOf(tileBytes)
-            val compressed = Zstd.compress(payload, ZSTD_LEVEL)
-            FrameSender.sendTileUpdate(tileX, tileY, tileW, tileH, compressed)
+            FrameSender.sendTileUpdate(tileX, tileY, tileW, tileH, payload)
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to compress tile at $tileX,$tileY", e)
+            Log.e(TAG, "Failed to send tile at $tileX,$tileY", e)
             false
         }
     }
