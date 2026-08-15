@@ -42,19 +42,19 @@ class NativeComputeService : Service() {
     }
 
     fun startNcl() {
-        if (_nclState.value == VmState.RUNNING || _nclState.value == VmState.STARTING) {
+        if (_nclState.value == ComputeState.RUNNING || _nclState.value == ComputeState.STARTING) {
             return
         }
-        _nclState.value = VmState.STARTING
+        _nclState.value = ComputeState.STARTING
         
         serviceScope.launch {
             try {
                 setupTermuxEnvironment(applicationContext)
                 spawnCodeServer(applicationContext)
-                _nclState.value = VmState.RUNNING
+                _nclState.value = ComputeState.RUNNING
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start NCL", e)
-                _nclState.value = VmState.STOPPED
+                _nclState.value = ComputeState.STOPPED
             }
         }
     }
@@ -62,7 +62,7 @@ class NativeComputeService : Service() {
     fun stopNcl() {
         codeServerProcess?.destroy()
         codeServerProcess = null
-        _nclState.value = VmState.STOPPED
+        _nclState.value = ComputeState.STOPPED
     }
 
     override fun onDestroy() {
@@ -151,7 +151,7 @@ class NativeComputeService : Service() {
     
     companion object {
         private const val TAG = "NativeComputeService"
-        private val _nclState = MutableStateFlow(VmState.OFF)
-        val nclState: StateFlow<VmState> = _nclState.asStateFlow()
+        private val _nclState = MutableStateFlow(ComputeState.OFF)
+        val nclState: StateFlow<ComputeState> = _nclState.asStateFlow()
     }
 }

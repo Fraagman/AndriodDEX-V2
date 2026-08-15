@@ -1,7 +1,7 @@
 package com.example.androidhost.network
 
 import android.util.Log
-import com.example.androidhost.service.DesktopAccessibilityService
+import com.example.androidhost.input.LocalInputDispatcher
 import java.io.DataInputStream
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -24,11 +24,10 @@ object LocalInputServer {
                                 val x = dis.readInt()
                                 val y = dis.readInt()
                                 val buttons = dis.readInt()
-                                
-                                if (buttons > 0) {
-                                    Log.d("Input", "Received click at $x, $y")
-                                    DesktopAccessibilityService.instance?.injectClick(x.toFloat(), y.toFloat())
-                                }
+
+                                // Same level-triggered (x, y, buttonMask) shape as the
+                                // QUIC path, so it goes through the same dispatcher.
+                                LocalInputDispatcher.onMouse(x, y, buttons)
                             }
                         } catch (e: Exception) {
                             Log.d("Input", "Client disconnected")

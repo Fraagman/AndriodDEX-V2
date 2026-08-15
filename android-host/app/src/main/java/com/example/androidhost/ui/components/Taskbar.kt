@@ -5,6 +5,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -60,10 +64,20 @@ fun AnimatedWaveform(modifier: Modifier = Modifier) {
 fun Taskbar(
     quicState: Int, // 0 = Idle, 1 = Pairing, 2 = Connected, 3 = Disconnected
     isAudioCapturing: Boolean,
-    vmState: com.example.androidhost.service.VmState,
-    isNative: Boolean,
+    computeState: com.example.androidhost.service.ComputeState,
     onLauncherClick: () -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    /**
+     * Whether the optional accessibility service is enabled. When false the
+     * back/home/recents buttons are hidden entirely — no nag, no disabled state.
+     */
+    showNavButtons: Boolean = false,
+    onBackClick: () -> Unit = {},
+    onHomeClick: () -> Unit = {},
+    onRecentsClick: () -> Unit = {},
+    /** Whether to offer the keyboard picker, i.e. our IME is not the selected one. */
+    showKeyboardPrompt: Boolean = false,
+    onKeyboardPromptClick: () -> Unit = {}
 ) {
     var currentTime by remember { mutableStateOf(getCurrentTime()) }
 
@@ -92,6 +106,38 @@ fun Taskbar(
                 .clickable { onLauncherClick() }
         )
 
+        // Global navigation. Present only while the optional accessibility service is
+        // enabled — the shell is fully usable without these.
+        if (showNavButtons) {
+            Spacer(modifier = Modifier.width(16.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = Color.White,
+                modifier = Modifier
+                    .size(22.dp)
+                    .clickable { onBackClick() }
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Icon(
+                imageVector = Icons.Default.Home,
+                contentDescription = "Home",
+                tint = Color.White,
+                modifier = Modifier
+                    .size(22.dp)
+                    .clickable { onHomeClick() }
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Icon(
+                imageVector = Icons.Default.Layers,
+                contentDescription = "Recents",
+                tint = Color.White,
+                modifier = Modifier
+                    .size(22.dp)
+                    .clickable { onRecentsClick() }
+            )
+        }
+
         Spacer(modifier = Modifier.weight(1f))
 
         // Center: Ticking Time
@@ -106,6 +152,20 @@ fun Taskbar(
 
         // Right: Connection Status & Waveform & Settings
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Offered only until the AndroidDex keyboard is selected. The picker is a
+            // system dialog and appears on the phone's own screen, not here.
+            if (showKeyboardPrompt) {
+                Icon(
+                    imageVector = Icons.Default.Keyboard,
+                    contentDescription = "Enable AndroidDex keyboard",
+                    tint = Color(0xFF8B949E),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable { onKeyboardPromptClick() }
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+            }
+
             if (isAudioCapturing) {
                 Text(
                     text = "LIVE",
@@ -150,16 +210,14 @@ fun Taskbar(
             Spacer(modifier = Modifier.width(16.dp))
 
             // Compute Engine Status
-            val typePrefix = if (isNative) "Native" else "Virtualized"
-            val vmStatusText = when (vmState) {
-                com.example.androidhost.service.VmState.RUNNING -> "$typePrefix: Running"
-                com.example.androidhost.service.VmState.STARTING -> "$typePrefix: Starting"
-                com.example.androidhost.service.VmState.UNSUPPORTED -> "$typePrefix: Ready"
-                else -> "$typePrefix: Ready"
+            val computeStatusText = when (computeState) {
+                com.example.androidhost.service.ComputeState.RUNNING -> "Compute: Running"
+                com.example.androidhost.service.ComputeState.STARTING -> "Compute: Starting"
+                else -> "Compute: Ready"
             }
-            
+
             Text(
-                text = vmStatusText,
+                text = computeStatusText,
                 color = Color.White,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(end = 8.dp)
@@ -168,9 +226,9 @@ fun Taskbar(
                 modifier = Modifier
                     .size(8.dp)
                     .background(
-                        color = when (vmState) {
-                            com.example.androidhost.service.VmState.RUNNING -> Color.Green
-                            com.example.androidhost.service.VmState.STARTING -> Color.Yellow
+                        color = when (computeState) {
+                            com.example.androidhost.service.ComputeState.RUNNING -> Color.Green
+                            com.example.androidhost.service.ComputeState.STARTING -> Color.Yellow
                             else -> Color.Gray
                         },
                         shape = CircleShape

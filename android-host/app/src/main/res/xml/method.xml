@@ -1,3 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    The AndroidDex keyboard has no on-screen key layout: every keystroke arrives from the
+    PC's physical keyboard over QUIC. A subtype is still declared so the IME shows up
+    correctly in Settings > Languages & input and in the keyboard picker.
+-->
 <input-method xmlns:android="http://schemas.android.com/apk/res/android"
-    android:isDefault="false" />
+    android:isDefault="false"
+    android:supportsSwitchingToNextInputMethod="true">
+    <subtype
+        android:label="@string/ime_subtype_label"
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeLocale="en_US"
+        android:isAsciiCapable="true" />
+</input-method>

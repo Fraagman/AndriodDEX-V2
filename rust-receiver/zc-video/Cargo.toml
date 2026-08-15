@@ -7,3 +7,4 @@ edition = "2024"
 wgpu = "0.19"
 zc-protocol = { path = "../zc-protocol" }
 bytemuck = { version = "1.14", features = ["derive"] }
+zstd = "0.13"

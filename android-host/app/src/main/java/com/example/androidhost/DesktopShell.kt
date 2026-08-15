@@ -156,11 +156,26 @@ fun DesktopShellContent(
     var showSettings by remember { mutableStateOf(false) }
 
     val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
-    val vmState by com.example.androidhost.service.VmService.vmState.collectAsState()
+    val computeState by com.example.androidhost.service.NativeComputeService.nclState.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
 
-    val isNative by com.example.androidhost.service.VmService.isNative.collectAsState()
+    // Both are optional capabilities. When off, the shell hides the buttons they power
+    // rather than blocking or nagging — desktop control works either way.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val a11yEnabled by com.example.androidhost.service.DesktopAccessibilityService.isConnected.collectAsState()
+    var imeSelected by remember {
+        mutableStateOf(com.example.androidhost.service.AndroidDexIME.isSelectedIme(context))
+    }
 
+    LaunchedEffect(Unit) {
+        // Both settings are toggled in system UI on the phone, out of band from this
+        // Presentation, so poll rather than wait for a lifecycle event we never get.
+        while (true) {
+            com.example.androidhost.service.DesktopAccessibilityService.refresh(context)
+            imeSelected = com.example.androidhost.service.AndroidDexIME.isSelectedIme(context)
+            delay(2000)
+        }
+    }
 
 
     LaunchedEffect(Unit) {
@@ -301,17 +316,14 @@ fun DesktopShellContent(
                         val context = androidx.compose.ui.platform.LocalContext.current
                         Button(
                             onClick = {
-                                val intent = android.content.Intent(context, com.example.androidhost.service.VmService::class.java)
-                                if (vmState == com.example.androidhost.service.VmState.RUNNING) {
-                                    intent.action = "STOP_VM"
-                                    context.startService(intent)
-                                } else {
-                                    intent.action = "START_VM"
-                                    context.startService(intent)
-                                }
+                                val intent = android.content.Intent(context, com.example.androidhost.service.NativeComputeService::class.java)
+                                intent.action =
+                                    if (computeState == com.example.androidhost.service.ComputeState.RUNNING) "STOP_NCL"
+                                    else "START_NCL"
+                                context.startService(intent)
                             }
                         ) {
-                            Text(if (vmState == com.example.androidhost.service.VmState.RUNNING) "Stop" else "Start")
+                            Text(if (computeState == com.example.androidhost.service.ComputeState.RUNNING) "Stop" else "Start")
                         }
                     }
                 }
@@ -323,10 +335,17 @@ fun DesktopShellContent(
             Taskbar(
                 quicState = quicState,
                 isAudioCapturing = isAudioCapturing,
-                vmState = vmState,
-                isNative = isNative,
+                computeState = computeState,
                 onLauncherClick = { showLauncher = !showLauncher },
-                onSettingsClick = { showSettings = !showSettings }
+                onSettingsClick = { showSettings = !showSettings },
+                showNavButtons = a11yEnabled,
+                onBackClick = { com.example.androidhost.service.DesktopAccessibilityService.performBack() },
+                onHomeClick = { com.example.androidhost.service.DesktopAccessibilityService.performHome() },
+                onRecentsClick = { com.example.androidhost.service.DesktopAccessibilityService.performRecents() },
+                showKeyboardPrompt = !imeSelected,
+                onKeyboardPromptClick = {
+                    com.example.androidhost.service.AndroidDexIME.showImePicker(context)
+                }
             )
         }
     }

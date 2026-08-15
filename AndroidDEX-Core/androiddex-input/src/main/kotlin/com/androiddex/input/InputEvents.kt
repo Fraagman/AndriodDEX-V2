@@ -29,6 +29,5 @@ enum class InputMode {
     DISCONNECTED,
     DESKTOP_MODE,
     MIRROR_MODE,
-    ADVANCED_MODE,
     PAUSED
 }

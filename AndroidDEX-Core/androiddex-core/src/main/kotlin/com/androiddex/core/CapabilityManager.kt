@@ -18,8 +18,6 @@ interface CapabilityManager {
     /** Checks if USB Tethering / RNDIS is currently active and available. */
     fun supportsUsbTransport(): Boolean
 
-    /** Checks if Shizuku is currently running and permission is granted. */
-    fun supportsShizukuInput(): Boolean
 
     /** Checks if the Accessibility Service is enabled for the app. */
     fun supportsAccessibilityInput(): Boolean

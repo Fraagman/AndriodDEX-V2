@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AndroidHost</string>
-    <string name="accessibility_service_description">AndroidDex Input Service</string>
+    <string name="accessibility_service_description">Optional. Adds back, home and recents buttons to the AndroidDex desktop taskbar. AndroidDex works without this — mouse and keyboard control of the desktop need no permissions.</string>
+    <string name="ime_label">AndroidDex Keyboard</string>
+    <string name="ime_subtype_label">AndroidDex</string>
 </resources>

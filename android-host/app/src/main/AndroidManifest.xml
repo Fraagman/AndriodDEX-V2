@@ -32,10 +32,10 @@
         <service android:name=".service.TetheringService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service android:name=".service.DisplayService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service android:name=".service.AudioCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
-        <service android:name=".service.VmService" android:exported="false" />
         <service android:name=".service.NativeComputeService" android:exported="false" />
         
         <service android:name=".service.AndroidDexIME"
+            android:label="@string/ime_label"
             android:permission="android.permission.BIND_INPUT_METHOD"
             android:exported="true">
             <intent-filter>
@@ -43,15 +43,22 @@
             </intent-filter>
             <meta-data android:name="android.view.im" android:resource="@xml/method" />
         </service>
-        
-        <!-- Shizuku Provider -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!--
+            Optional. Provides back / home / recents only. The app is fully functional
+            with this service disabled; the shell hides those three buttons instead.
+        -->
+        <service
+            android:name=".service.DesktopAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
     </application>
 
 </manifest>

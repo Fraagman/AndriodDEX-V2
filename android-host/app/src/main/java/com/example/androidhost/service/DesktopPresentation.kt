@@ -23,6 +23,7 @@ import androidx.lifecycle.viewmodel.MutableCreationExtras
 import android.app.Application
 import com.example.androidhost.DesktopShell
 import com.example.androidhost.KeepAliveRedraw
+import com.example.androidhost.input.LocalInputDispatcher
 
 class DesktopPresentation(
     context: Context,
@@ -32,6 +33,9 @@ class DesktopPresentation(
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
     private val store = ViewModelStore()
+
+    /** The Compose view that receives input from the PC. */
+    private var contentView: ComposeView? = null
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -73,10 +77,17 @@ class DesktopPresentation(
         composeView.setViewTreeSavedStateRegistryOwner(this)
 
         setContentView(composeView)
+        contentView = composeView
+
+        // Input from the PC is dispatched straight into this view hierarchy.
+        LocalInputDispatcher.attach(composeView)
     }
 
     override fun onStart() {
         super.onStart()
+        // onCreate only runs once; re-attach here so a stop/start cycle does not
+        // silently leave the desktop unresponsive to the PC.
+        contentView?.let { LocalInputDispatcher.attach(it) }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
     }
 
@@ -86,11 +97,14 @@ class DesktopPresentation(
 
     override fun onStop() {
         super.onStop()
+        LocalInputDispatcher.detach()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
     }
 
     override fun dismiss() {
         super.dismiss()
+        LocalInputDispatcher.detach()
+        contentView = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         store.clear()
     }

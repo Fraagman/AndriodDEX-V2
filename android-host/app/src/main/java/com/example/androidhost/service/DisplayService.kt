@@ -39,8 +39,13 @@ class DisplayService : Service() {
         private const val TAG = "DisplayService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "display_service_channel"
-        private const val CAPTURE_WIDTH = 1920
-        private const val CAPTURE_HEIGHT = 1080
+        /**
+         * Dimensions of the VirtualDisplay the desktop is rendered into. Public because
+         * LocalInputDispatcher scales incoming PC coordinates into this space — there
+         * must be exactly one definition of the desktop's resolution.
+         */
+        const val CAPTURE_WIDTH = 1920
+        const val CAPTURE_HEIGHT = 1080
         private const val CAPTURE_DPI = 320
         /** Target frame interval in milliseconds (~30 fps) */
         private const val FRAME_INTERVAL_MS = 33L

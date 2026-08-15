@@ -97,7 +97,7 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
 
-  // Shizuku
-  implementation("dev.rikka.shizuku:api:13.1.5")
-  implementation("dev.rikka.shizuku:provider:13.1.5")
+  // zstd for dirty-tile compression (RegionDetector). The @aar variant carries the
+  // arm64-v8a / x86_64 native libraries; the plain jar does not.
+  implementation(variantOf(libs.zstd.jni) { artifactType("aar") })
 }

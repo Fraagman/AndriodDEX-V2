@@ -1,27 +1,19 @@
 package com.example.androidhost.service
 
 import android.util.Log
+import com.example.androidhost.input.LocalInputDispatcher
 import com.example.androidhost.quic.QuicServer
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import java.io.OutputStream
 
 object InputManager {
     private const val TAG = "InputManager"
-    
+
     private var inputServerThread: Thread? = null
     var isPolling = false
         private set
 
     data class ParsedMouseEvent(val x: Int, val y: Int, val buttons: Int, val timestamp: Long)
     data class ParsedKeyboardEvent(val keycode: Int, val pressed: Boolean, val modifiers: Int, val timestamp: Long)
-
-    // Shared flow to emit parsed mouse and keyboard events to listeners (e.g. AccessibilityService, IME)
-    private val _mouseEvents = MutableSharedFlow<ParsedMouseEvent>(extraBufferCapacity = 64)
-    val mouseEvents = _mouseEvents.asSharedFlow()
-
-    private val _keyboardEvents = MutableSharedFlow<ParsedKeyboardEvent>(extraBufferCapacity = 64)
-    val keyboardEvents = _keyboardEvents.asSharedFlow()
 
     // Dedicated vsock stream for AVF Linux VM
     @Volatile var vmOutputStream: OutputStream? = null
@@ -78,7 +70,9 @@ object InputManager {
             }
         }
 
-        // 2. Fallback: Parse protobuf for Android Consumer UI (Accessibility/IME)
+        // 2. Parse the protobuf InputEvent and dispatch it into the desktop's own
+        //    Compose view tree via LocalInputDispatcher. No OS-level injection and no
+        //    special permission is involved — the view hierarchy is ours.
         var pos = 0
         while (pos < data.size) {
             val tagResult = readVarint(data, pos) ?: return
@@ -100,8 +94,12 @@ object InputManager {
             pos += fieldLen
 
             when (fieldNumber) {
-                1 -> decodeMouseEvent(fieldData)?.let { _mouseEvents.tryEmit(it) }
-                2 -> decodeKeyboardEvent(fieldData)?.let { _keyboardEvents.tryEmit(it) }
+                1 -> decodeMouseEvent(fieldData)?.let {
+                    LocalInputDispatcher.onMouse(it.x, it.y, it.buttons)
+                }
+                2 -> decodeKeyboardEvent(fieldData)?.let {
+                    LocalInputDispatcher.onKey(it.keycode, it.pressed)
+                }
             }
         }
     }

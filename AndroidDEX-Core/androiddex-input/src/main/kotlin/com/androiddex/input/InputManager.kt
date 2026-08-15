@@ -30,10 +30,6 @@ class InputManager(
 
         if (targetBackend == null || !targetBackend.validate(capabilityManager)) {
             eventBus.publish(BackendUnavailableEvent(requestedMode.name, "Capabilities not met or Backend missing."))
-            // Degrade to Mirror (View-Only) if Advanced Mode fails
-            if (requestedMode == InputMode.ADVANCED_MODE) {
-                setMode(InputMode.MIRROR_MODE)
-            }
             return
         }
 

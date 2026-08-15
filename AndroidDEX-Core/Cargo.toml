@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "shared-protocol",
+    "androiddex-video/receiver"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+tokio = { version = "1.35.1", features = ["full"] }
+quinn = "0.10.2"
+wgpu = "0.19.1"
+prost = "0.12.3"
+prost-build = "0.12.3"
+windows = { version = "0.52.0", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D11"
+] }

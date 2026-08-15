@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Minimal capability set: this service exists only to perform GLOBAL_ACTION_BACK,
+    GLOBAL_ACTION_HOME and GLOBAL_ACTION_RECENTS.
+
+    It deliberately does NOT request canRetrieveWindowContent or canPerformGestures.
+    Pointer input is dispatched into our own Compose view tree by LocalInputDispatcher,
+    so this service never needs to read the screen or synthesise touches.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:canPerformGestures="true"
-    android:canRetrieveWindowContent="true"
-    android:canRequestTouchExplorationMode="true"
-    android:accessibilityEventTypes="typeAllMask"
+    android:canPerformGestures="false"
+    android:canRetrieveWindowContent="false"
+    android:canRequestTouchExplorationMode="false"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:notificationTimeout="100"

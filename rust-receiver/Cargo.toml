@@ -8,5 +8,5 @@ members = [
     "zc-input",
     "zc-security",
     "zc-audio"
-]
+, "hello"]
 default-members = ["zc-core"]

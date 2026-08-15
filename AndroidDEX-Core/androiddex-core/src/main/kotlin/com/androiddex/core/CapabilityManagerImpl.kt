@@ -30,11 +30,6 @@ class CapabilityManagerImpl(private val context: Context) : CapabilityManager {
         return true
     }
 
-    override fun supportsShizukuInput(): Boolean {
-        // Mock implementation for validation: assumes false until bound
-        return false
-    }
-
     override fun supportsAccessibilityInput(): Boolean {
         return true // Can always request it
     }

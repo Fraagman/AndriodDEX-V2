@@ -18,7 +18,7 @@ data class DexConfig(
         )
 
         val QUALITY_MODE = DexConfig(
-            video = VideoConfig(1920, 1080, 30, 12_000_000, CodecType.HEVC),
+            video = VideoConfig(1920, 1080, 30, 12_000_000, PerformancePreset.HIGH_QUALITY, CodecType.HEVC),
             audio = AudioConfig(48000, AudioCodec.OPUS),
             network = NetworkConfig(TransportType.QUIC_DATAGRAM, 5000),
             security = SecurityConfig(AuthMode.TOFU)
@@ -26,11 +26,16 @@ data class DexConfig(
     }
 }
 
+enum class PerformancePreset {
+    LOW_LATENCY, BALANCED, HIGH_QUALITY
+}
+
 data class VideoConfig(
     val width: Int,
     val height: Int,
     val fps: Int,
     val bitrate: Int,
+    val preset: PerformancePreset = PerformancePreset.BALANCED,
     val codec: CodecType
 )
 
