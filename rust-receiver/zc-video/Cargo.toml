@@ -1,10 +1,9 @@
 [package]
 name = "zc-video"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 wgpu = "0.19"
 zc-protocol = { path = "../zc-protocol" }
-bytemuck = { version = "1.14", features = ["derive"] }
-zstd = "0.13"
+openh264 = "0.6.2"

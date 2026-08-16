@@ -142,7 +142,7 @@ class MainActivity : ComponentActivity() {
 /**
  * Control Panel shown on the phone's physical screen.
  * The phone screen is NOT a mirror of the desktop — it's a control surface.
- * The real desktop is rendered on the VirtualDisplay (captured by ImageReader and streamed to the PC).
+ * The real desktop is rendered on the VirtualDisplay, which feeds the H.264 encoder directly.
  */
 @Composable
 fun ControlPanel(

@@ -2,43 +2,40 @@ package com.example.androidhost.service
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Presentation
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
 import android.os.Binder
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
-import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import android.view.Display
 import android.view.Surface
-import androidx.compose.ui.platform.ComposeView
 import androidx.core.app.NotificationCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.ViewModelStore
-import androidx.lifecycle.ViewModelStoreOwner
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.lifecycle.setViewTreeViewModelStoreOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.example.androidhost.quic.QuicServer
+import com.example.androidhost.video.EncoderStats
+import com.example.androidhost.video.ScreenEncoder
+import java.nio.ByteBuffer
 
+/**
+ * Owns the VirtualDisplay the desktop shell is rendered into, and the hardware H.264
+ * encoder that consumes it.
+ *
+ * The display's surface *is* the encoder's input surface, so composited frames go from
+ * SurfaceFlinger straight into the encoder without ever being read back into application
+ * memory. There is no capture loop, no ImageReader and no per-frame buffer: the encoder
+ * produces output whenever the shell draws, driven by MediaCodec's async callback.
+ */
 class DisplayService : Service() {
 
     companion object {
         private const val TAG = "DisplayService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "display_service_channel"
+
         /**
          * Dimensions of the VirtualDisplay the desktop is rendered into. Public because
          * LocalInputDispatcher scales incoming PC coordinates into this space — there
@@ -47,235 +44,180 @@ class DisplayService : Service() {
         const val CAPTURE_WIDTH = 1920
         const val CAPTURE_HEIGHT = 1080
         private const val CAPTURE_DPI = 320
-        /** Target frame interval in milliseconds (~30 fps) */
-        private const val FRAME_INTERVAL_MS = 33L
-        /** Delay after presentation.show() before capturing the first frame */
-        private const val PRESENTATION_SETTLE_MS = 150L
-        /** How often (ms) to force a full keyframe regardless of tile changes */
-        private const val KEYFRAME_INTERVAL_MS = 1000L
+
+        /**
+         * How often the QUIC connection state is sampled so a freshly paired client can
+         * be handed a keyframe. QuicServer exposes no pairing callback, only a polled
+         * state, so this is the available mechanism. It is not a per-frame path.
+         */
+        private const val CLIENT_WATCH_INTERVAL_MS = 500L
+
+        /** QuicServer connection state meaning "PIN verified, ready for frames". */
+        private const val QUIC_STATE_AUTHENTICATED = 2
+
+        /**
+         * Sustained encoder throughput, updated once per second. Held here rather than
+         * per-instance so the desktop shell can display it without binding to the
+         * service, which it cannot do from inside the Presentation.
+         */
+        val encoderStats = EncoderStats()
     }
 
     private val binder = LocalBinder()
     private var virtualDisplay: VirtualDisplay? = null
+    private var screenEncoder: ScreenEncoder? = null
+    private var desktopPresentation: DesktopPresentation? = null
+
+    /**
+     * The encoder's input surface. Exposed for DisplayViewModel, which surfaces it to
+     * the UI layer.
+     */
     var surface: Surface? = null
         private set
+
+    /** Watches for a client completing pairing so it can be sent a keyframe. */
+    private val clientWatchHandler = Handler(Looper.getMainLooper())
+    private var lastQuicState = -1
 
     inner class LocalBinder : Binder() {
         fun getService(): DisplayService = this@DisplayService
     }
 
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
-    }
+    override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
-        createVirtualDisplay()
+        startEncodingPipeline()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundWithNotification()
-        createVirtualDisplay()
+        startEncodingPipeline()
         return START_STICKY
     }
 
-    private var imageReader: ImageReader? = null
-    @Volatile private var isRunning = false
-    private var lastKeyframeTime = 0L
-    private val regionDetector = RegionDetector()
-    private var desktopPresentation: DesktopPresentation? = null
-
-    /** HandlerThread + Handler that drives frame capture at a steady cadence */
-    private var captureHandlerThread: HandlerThread? = null
-    private var captureHandler: Handler? = null
-
     /**
-     * Set to true after the Presentation has been shown and a settle delay has
-     * elapsed. The capture loop skips frames until this is true, guaranteeing
-     * the first captured frame contains the rendered desktop, not an empty surface.
+     * Brings up the encoder, then the VirtualDisplay that feeds it, then the Presentation
+     * that draws into the display. Order matters: the encoder's input surface must exist
+     * before the display can be created against it.
      */
-    @Volatile private var presentationReady = false
-
-    /** Used to log pixel data of the very first captured frame for debugging */
-    @Volatile private var firstFrameLogged = false
-
-    private fun createVirtualDisplay() {
+    private fun startEncodingPipeline() {
         if (virtualDisplay != null) return
+
+        val encoder = ScreenEncoder(CAPTURE_WIDTH, CAPTURE_HEIGHT, encoderListener)
+        try {
+            encoder.prepare()
+        } catch (e: Exception) {
+            Log.e(TAG, "No usable H.264 encoder on this device; display not started", e)
+            return
+        }
+
+        screenEncoder = encoder
+        surface = encoder.inputSurface
+
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        // Use PRESENTATION flag so Activities/Presentations can render on this display
+        // PRESENTATION so a Presentation can target this display; OWN_CONTENT_ONLY so it
+        // shows only our shell; PUBLIC so the Presentation is allowed to attach.
         val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
 
-        // ImageReader with maxImages=4 to allow a buffer and prevent stalls.
-        // RGBA_8888 matches the protobuf rgba_data layout expected by the PC receiver.
-        imageReader = ImageReader.newInstance(CAPTURE_WIDTH, CAPTURE_HEIGHT, PixelFormat.RGBA_8888, 4)
-        surface = imageReader!!.surface
-
-        if (surface != null) {
-            virtualDisplay = displayManager.createVirtualDisplay(
-                "AndroidDex", CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_DPI, surface, flags
-            )
-            if (virtualDisplay != null) {
-                com.example.androidhost.network.FrameSender.start()
-                launchDesktopPresentation()
-                startCaptureLoop()
-            }
+        val display = displayManager.createVirtualDisplay(
+            "AndroidDex", CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_DPI, surface, flags
+        )
+        if (display == null) {
+            Log.e(TAG, "createVirtualDisplay returned null; tearing encoder back down")
+            encoder.release()
+            screenEncoder = null
+            surface = null
+            return
         }
+        virtualDisplay = display
+
+        encoderStats.reset()
+        encoder.start()
+        com.example.androidhost.network.FrameSender.start()
+        launchDesktopPresentation()
+        startClientWatch()
     }
 
     /**
-     * Launch a Presentation on the VirtualDisplay that hosts the Compose DesktopShellContent
-     * wrapped in KeepAliveRedraw so it continuously invalidates the surface.
-     * The Presentation renders directly onto the VirtualDisplay's Surface, so the ImageReader
-     * captures the real desktop UI instead of a test pattern.
+     * Shows the Compose desktop on the VirtualDisplay. Because the display renders into
+     * the encoder's input surface, everything this Presentation draws is encoded.
      */
     private fun launchDesktopPresentation() {
-        val vd = virtualDisplay ?: return
-        val display = vd.display ?: return
-
+        val display = virtualDisplay?.display ?: return
         try {
-            desktopPresentation = DesktopPresentation(this, display)
-            desktopPresentation?.show()
-            desktopPresentation?.onResume()
+            desktopPresentation = DesktopPresentation(this, display).apply {
+                show()
+                onResume()
+            }
             Log.d(TAG, "DesktopPresentation launched on VirtualDisplay")
-
-            // Wait for the Presentation to render its first frame before we start capturing.
-            // This avoids capturing an empty/black surface as the "first frame".
-            val mainHandler = Handler(mainLooper)
-            mainHandler.postDelayed({
-                presentationReady = true
-                Log.d(TAG, "Presentation settled — capture enabled after ${PRESENTATION_SETTLE_MS}ms delay")
-            }, PRESENTATION_SETTLE_MS)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch DesktopPresentation", e)
-            // If presentation fails, still allow capture (will show whatever the surface has)
-            presentationReady = true
         }
     }
 
     /**
-     * Drives frame capture from a steady ~30fps HandlerThread loop.
-     *
-     * On each tick:
-     *  1. acquireLatestImage() — returns the most recent rendered frame (or null if
-     *     ImageReader has nothing new). KeepAliveRedraw ensures every VSYNC produces
-     *     a new frame, so this should almost never return null in steady state.
-     *  2. Copy pixel data respecting rowStride (may differ from width*4).
-     *  3. Run through RegionDetector for tile diffs.
-     *  4. If RegionDetector sent zero tiles (static desktop), send a full keyframe
-     *     so the PC always has something to display.
-     *  5. Periodically send a full keyframe regardless (every KEYFRAME_INTERVAL_MS).
-     *  6. Always close() the Image to free the buffer slot.
-     *
-     * This replaces the old Thread.sleep()-based loop. HandlerThread + postDelayed
-     * gives more precise scheduling without thread-sleep drift.
+     * Polls the QUIC connection state and asks for a keyframe on each transition into
+     * the authenticated state, so a newly paired client gets a decodable picture
+     * immediately instead of waiting for the next scheduled IDR.
      */
-    private fun startCaptureLoop() {
-        isRunning = true
-        captureHandlerThread = HandlerThread("DisplayCapture").also { it.start() }
-        captureHandler = Handler(captureHandlerThread!!.looper)
-
-        val captureRunnable = object : Runnable {
+    private fun startClientWatch() {
+        clientWatchHandler.post(object : Runnable {
             override fun run() {
-                if (!isRunning) return
+                if (virtualDisplay == null) return
 
-                try {
-                    captureOneFrame()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in capture loop", e)
+                val state = QuicServer.getConnectionState()
+                if (state == QUIC_STATE_AUTHENTICATED && lastQuicState != QUIC_STATE_AUTHENTICATED) {
+                    Log.i(TAG, "Client authenticated — requesting keyframe")
+                    screenEncoder?.requestKeyframe()
                 }
+                lastQuicState = state
 
-                // Schedule next frame
-                if (isRunning) {
-                    captureHandler?.postDelayed(this, FRAME_INTERVAL_MS)
-                }
+                clientWatchHandler.postDelayed(this, CLIENT_WATCH_INTERVAL_MS)
             }
-        }
-
-        // Start the loop
-        captureHandler?.postDelayed(captureRunnable, FRAME_INTERVAL_MS)
+        })
     }
 
     /**
-     * Captures a single frame from the ImageReader, copies pixel data respecting
-     * rowStride, runs region detection, and sends frames via FrameSender.
+     * Puts each encoded access unit on the wire and measures sustained throughput.
+     *
+     * Runs on MediaCodec's callback thread. The NAL is serialized straight out of the
+     * codec's own buffer, so the captured pixels are never copied into a frame-sized
+     * application buffer at any point in the pipeline.
      */
-    private fun captureOneFrame() {
-        // Don't capture until presentation has rendered at least once
-        if (!presentationReady) return
-
-        val reader = imageReader ?: return
-        val image = reader.acquireLatestImage() ?: return
-
-        try {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-
-            val width = CAPTURE_WIDTH
-            val height = CAPTURE_HEIGHT
-            val data = ByteArray(width * height * 4)
-
-            if (rowStride == width * 4 && pixelStride == 4) {
-                // Fast path: no padding, direct copy
-                buffer.get(data)
-            } else {
-                // Slow path: must copy row-by-row to account for rowStride padding.
-                // Without this, the image would be garbled or shifted because the
-                // ImageReader's internal buffer rows may be wider than width*4.
-                for (y in 0 until height) {
-                    buffer.position(y * rowStride)
-                    buffer.get(data, y * width * 4, width * pixelStride)
-                }
-            }
-
-            // Log the first frame's pixel data for debugging
-            if (!firstFrameLogged) {
-                firstFrameLogged = true
-                val firstBytes = data.take(16).joinToString(" ") { String.format("0x%02X", it) }
-                
-                var nonZeroAlpha = 0
-                for (i in 3 until data.size step 4) {
-                    if (data[i] != 0.toByte()) {
-                        nonZeroAlpha++
-                    }
-                }
-                
-                Log.d(TAG, "FIRST FRAME captured: first 16 bytes = [$firstBytes], rowStride=$rowStride, pixelStride=$pixelStride, nonZeroAlphaPixels=$nonZeroAlpha / ${width*height}")
-            }
-
-            val currentTime = System.currentTimeMillis()
-            val isKeyframeTime = (currentTime - lastKeyframeTime >= KEYFRAME_INTERVAL_MS)
-
-            // Always process through region detector for tile diffs
-            regionDetector.processFrame(width, height, data)
-            com.example.androidhost.vm.DisplayViewModel.updateRegionStats(
-                regionDetector.tilesSentLastFrame, regionDetector.videoDetectedLastFrame
+    private val encoderListener = object : ScreenEncoder.Listener {
+        override fun onEncodedFrame(csd: ByteArray?, nal: ByteBuffer, isKeyframe: Boolean, ptsUs: Long) {
+            val size = nal.remaining()
+            com.example.androidhost.network.FrameSender.sendEncodedFrame(
+                nal, csd, isKeyframe, ptsUs, CAPTURE_WIDTH, CAPTURE_HEIGHT
             )
 
-            // Send a full keyframe if:
-            // - It's been >= 1 second since the last keyframe, OR
-            // - RegionDetector sent zero tiles (static desktop — PC has nothing to display otherwise)
-            if (isKeyframeTime || regionDetector.tilesSentLastFrame == 0) {
-                com.example.androidhost.network.FrameSender.sendVideoFrame(width, height, data)
-                lastKeyframeTime = currentTime
-            }
-        } finally {
-            // ALWAYS close the image to free the buffer slot.
-            // Failing to close causes "maxImages (3) has already been acquired" stalls.
-            image.close()
+            val closed = encoderStats.record(size, isKeyframe) ?: return
+            Log.i(
+                TAG,
+                "encode ${closed.fps} fps, ${closed.kilobitsPerSecond} kbps, " +
+                    "${closed.keyframes} keyframes, ${closed.totalFrames} total"
+            )
+        }
+
+        override fun onEncoderError(cause: Exception) {
+            Log.e(TAG, "Encoder failed; stopping capture pipeline", cause)
+            // This runs on MediaCodec's callback thread. Tearing down from here would
+            // dismiss the Presentation off the main thread and stop the codec from
+            // inside its own callback, so hop to the main looper first.
+            clientWatchHandler.post { stopEncodingPipeline() }
         }
     }
 
     /**
      * Use startForeground() instead of notificationManager.notify() so Android O+
-     * does not kill this service, which would release the VirtualDisplay/ImageReader.
+     * does not kill this service, which would release the VirtualDisplay and encoder.
      */
     private fun startForegroundWithNotification() {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(CHANNEL_ID, "Display Service", NotificationManager.IMPORTANCE_LOW)
             notificationManager.createNotificationChannel(channel)
@@ -294,18 +236,30 @@ class DisplayService : Service() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        isRunning = false
-        captureHandler?.removeCallbacksAndMessages(null)
-        captureHandlerThread?.quitSafely()
-        captureHandler = null
-        captureHandlerThread = null
+    /**
+     * Tears down in the reverse order of construction: stop drawing, stop the frame
+     * producer, then release the consumer that owns the surface.
+     */
+    private fun stopEncodingPipeline() {
+        clientWatchHandler.removeCallbacksAndMessages(null)
+
         desktopPresentation?.dismiss()
         desktopPresentation = null
-        com.example.androidhost.network.FrameSender.stop()
+
         virtualDisplay?.release()
-        surface?.release()
-        imageReader?.close()
+        virtualDisplay = null
+
+        com.example.androidhost.network.FrameSender.stop()
+
+        // ScreenEncoder.release() releases the input surface it created, so this must
+        // not be released separately.
+        screenEncoder?.release()
+        screenEncoder = null
+        surface = null
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopEncodingPipeline()
     }
 }

@@ -58,7 +58,11 @@ class DesktopPresentation(
         super.onCreate(savedInstanceState)
         
         window?.setBackgroundDrawableResource(android.R.color.transparent)
-        window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        window?.clearFlags(
+            android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND or
+            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+        )
 
         savedStateRegistryController.performRestore(savedInstanceState)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)

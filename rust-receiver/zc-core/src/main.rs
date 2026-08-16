@@ -3,7 +3,7 @@ mod ui;
 mod kiosk;
 
 use winit::{
-    event::{Event, WindowEvent, ElementState},
+    event::{Event, WindowEvent, ElementState, MouseScrollDelta},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
     keyboard::{KeyCode, PhysicalKey},
@@ -127,7 +127,7 @@ fn main() {
                                             let payload = &frame_buf[1..];
 
                                             if msg_type == 0x01 {
-                                                // Video / Tile / Cursor
+                                                // Video
                                                 if let Ok(frame) = HybridFrame::decode(payload) {
                                                     let _ = frame_tx_inner.send(frame);
                                                 } else {
@@ -167,7 +167,8 @@ fn main() {
                                         };
 
                                         if events.is_empty() {
-                                            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                            // Phase 4: reduced from 8ms to 1ms for lower input latency
+                                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                                             continue;
                                         }
 
@@ -245,19 +246,151 @@ fn main() {
         &window,
     );
 
-    let mut video_decoder: Option<zc_video::VideoDecoder> = None;
+    // --- H.264 decoder and YUV render pipeline ---
+    let mut h264_decoder = match zc_video::Decoder::new() {
+        Ok(d) => Some(d),
+        Err(e) => {
+            eprintln!("Failed to initialize H.264 decoder: {}", e);
+            None
+        }
+    };
+
+    // YUV texture state — created on first decoded frame
+    struct YuvTextures {
+        y_texture: wgpu::Texture,
+        u_texture: wgpu::Texture,
+        v_texture: wgpu::Texture,
+        bind_group: wgpu::BindGroup,
+        width: u32,
+        height: u32,
+    }
+    let mut yuv_textures: Option<YuvTextures> = None;
+
+    // Create the YUV shader pipeline
+    let yuv_shader = renderer.device().create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("YUV Shader"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
+    });
+
+    let yuv_bind_group_layout = renderer.device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("YUV Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let yuv_pipeline_layout = renderer.device().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("YUV Pipeline Layout"),
+        bind_group_layouts: &[&yuv_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let yuv_pipeline = renderer.device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("YUV Render Pipeline"),
+        layout: Some(&yuv_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &yuv_shader,
+            entry_point: "vs_main",
+            buffers: &[], // Full-screen triangle from vertex_index, no buffer needed
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &yuv_shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: renderer.config().format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    });
+
+    let yuv_sampler = renderer.device().create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    // Helper to create a R8Unorm texture of the given size
+    let create_r8_texture = |device: &wgpu::Device, label: &str, w: u32, h: u32| -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+
     let mut mouse_pos = (0.0, 0.0);
-    let mut last_is_vm = false;
     let is_kiosk = kiosk::is_kiosk_mode();
     let mut is_focused = true;
     let mut mouse_buttons = 0u32;
+    let mut current_modifiers = winit::keyboard::ModifiersState::empty();
 
-    let mut tile_compositor = zc_video::TileCompositor::new(
-        renderer.device(),
-        renderer.config().format,
-        1920,
-        1080,
-    );
+    // Stats for the overlay
+    let mut decode_fps_counter = 0u32;
+    let mut decode_fps_last_time = std::time::Instant::now();
+    let mut decode_fps_display = 0u32;
+    let mut last_decode_us = 0u64;
+    let mut has_video = false;
 
     let window_id = window.id();
     event_loop.run(move |event, elwt| {
@@ -278,6 +411,9 @@ fn main() {
                     WindowEvent::Focused(focused) => {
                         is_focused = *focused;
                     }
+                    WindowEvent::ModifiersChanged(modifiers) => {
+                        current_modifiers = modifiers.state();
+                    }
                     WindowEvent::MouseInput { state, button, .. } => {
                         if is_focused {
                             let bit = match button {
@@ -292,7 +428,32 @@ fn main() {
                                 mouse_buttons &= !bit;
                             }
                             let inner_size = window.inner_size();
-                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons);
+                            let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
+                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons, wire_mods);
+                            let mut serialized = Vec::new();
+                            if ev.encode(&mut serialized).is_ok() {
+                                let mut buf = input_buffer_for_poll.lock().unwrap();
+                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                buf.push_back(serialized);
+                            }
+                        }
+                    }
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        if is_focused {
+                            let (v_scroll, h_scroll) = match delta {
+                                MouseScrollDelta::LineDelta(h, v) => (*v, *h),
+                                MouseScrollDelta::PixelDelta(pos) => {
+                                    // Convert pixel delta to line delta (approximate)
+                                    (pos.y as f32 / 120.0, pos.x as f32 / 120.0)
+                                }
+                            };
+                            let inner_size = window.inner_size();
+                            let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
+                            let ev = zc_input::create_scroll_event(
+                                mouse_pos.0, mouse_pos.1,
+                                inner_size.width, inner_size.height,
+                                v_scroll, h_scroll, wire_mods,
+                            );
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
                                 let mut buf = input_buffer_for_poll.lock().unwrap();
@@ -316,7 +477,8 @@ fn main() {
                             if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
                                 keycode = code as u32;
                             }
-                            let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed);
+                            let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
+                            let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
                                 let mut buf = input_buffer_for_poll.lock().unwrap();
@@ -329,7 +491,8 @@ fn main() {
                         mouse_pos = (position.x, position.y);
                         if is_focused {
                             let inner_size = window.inner_size();
-                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons);
+                            let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
+                            let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
                                 let mut buf = input_buffer_for_poll.lock().unwrap();
@@ -346,39 +509,137 @@ fn main() {
                         if inner_size.width == 0 || inner_size.height == 0 {
                             return;
                         }
+
+                        // Drain all pending frames, decode and upload the latest
                         while let Ok(hybrid) = frame_rx.try_recv() {
                             match hybrid.payload {
                                 Some(hybrid_frame::Payload::Video(frame)) => {
-                                    last_is_vm = frame.source == 1;
-                                    
-                                    tile_compositor.set_base_size(frame.width, frame.height);
+                                    if let Some(ref mut decoder) = h264_decoder {
+                                        let decode_start = std::time::Instant::now();
+                                        match decoder.decode(&frame.nal_data) {
+                                            Ok(Some(decoded)) => {
+                                                last_decode_us = decode_start.elapsed().as_micros() as u64;
+                                                has_video = true;
 
-                                    let recreate = match video_decoder.as_ref() {
-                                        Some(decoder) => decoder.width() != frame.width || decoder.height() != frame.height,
-                                        None => true,
-                                    };
-                                    
-                                    if recreate {
-                                        video_decoder = Some(zc_video::VideoDecoder::new(renderer.device(), renderer.queue(), frame.width, frame.height));
+                                                let w = decoded.width;
+                                                let h = decoded.height;
+                                                let cw = (w + 1) / 2; // chroma width
+                                                let ch = (h + 1) / 2; // chroma height
+
+                                                // Recreate textures if size changed
+                                                let needs_recreate = match &yuv_textures {
+                                                    Some(t) => t.width != w || t.height != h,
+                                                    None => true,
+                                                };
+
+                                                if needs_recreate {
+                                                    let y_tex = create_r8_texture(renderer.device(), "Y Plane", w, h);
+                                                    let u_tex = create_r8_texture(renderer.device(), "U Plane", cw, ch);
+                                                    let v_tex = create_r8_texture(renderer.device(), "V Plane", cw, ch);
+
+                                                    let y_view = y_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                                                    let u_view = u_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                                                    let v_view = v_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                                                    let bind_group = renderer.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                                                        label: Some("YUV Bind Group"),
+                                                        layout: &yuv_bind_group_layout,
+                                                        entries: &[
+                                                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&y_view) },
+                                                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&u_view) },
+                                                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v_view) },
+                                                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&yuv_sampler) },
+                                                        ],
+                                                    });
+
+                                                    yuv_textures = Some(YuvTextures {
+                                                        y_texture: y_tex,
+                                                        u_texture: u_tex,
+                                                        v_texture: v_tex,
+                                                        bind_group,
+                                                        width: w,
+                                                        height: h,
+                                                    });
+                                                }
+
+                                                // Upload YUV planes
+                                                if let Some(ref textures) = yuv_textures {
+                                                    // Y plane
+                                                    renderer.queue().write_texture(
+                                                        wgpu::ImageCopyTexture {
+                                                            texture: &textures.y_texture,
+                                                            mip_level: 0,
+                                                            origin: wgpu::Origin3d::ZERO,
+                                                            aspect: wgpu::TextureAspect::All,
+                                                        },
+                                                        &decoded.y,
+                                                        wgpu::ImageDataLayout {
+                                                            offset: 0,
+                                                            bytes_per_row: Some(w),
+                                                            rows_per_image: Some(h),
+                                                        },
+                                                        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                                                    );
+                                                    // U plane
+                                                    renderer.queue().write_texture(
+                                                        wgpu::ImageCopyTexture {
+                                                            texture: &textures.u_texture,
+                                                            mip_level: 0,
+                                                            origin: wgpu::Origin3d::ZERO,
+                                                            aspect: wgpu::TextureAspect::All,
+                                                        },
+                                                        &decoded.u,
+                                                        wgpu::ImageDataLayout {
+                                                            offset: 0,
+                                                            bytes_per_row: Some(cw),
+                                                            rows_per_image: Some(ch),
+                                                        },
+                                                        wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
+                                                    );
+                                                    // V plane
+                                                    renderer.queue().write_texture(
+                                                        wgpu::ImageCopyTexture {
+                                                            texture: &textures.v_texture,
+                                                            mip_level: 0,
+                                                            origin: wgpu::Origin3d::ZERO,
+                                                            aspect: wgpu::TextureAspect::All,
+                                                        },
+                                                        &decoded.v,
+                                                        wgpu::ImageDataLayout {
+                                                            offset: 0,
+                                                            bytes_per_row: Some(cw),
+                                                            rows_per_image: Some(ch),
+                                                        },
+                                                        wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
+                                                    );
+                                                }
+
+                                                // FPS counter
+                                                decode_fps_counter += 1;
+                                                let now = std::time::Instant::now();
+                                                if now.duration_since(decode_fps_last_time).as_secs() >= 1 {
+                                                    decode_fps_display = decode_fps_counter;
+                                                    decode_fps_counter = 0;
+                                                    decode_fps_last_time = now;
+                                                }
+                                            }
+                                            Ok(None) => { /* NAL consumed, no picture */ }
+                                            Err(e) => {
+                                                eprintln!("H.264 decode error: {}", e);
+                                                // TODO: request keyframe from phone
+                                            }
+                                        }
                                     }
-                                    
-                                    if let Some(decoder) = video_decoder.as_mut() {
-                                        decoder.decode_and_upload(renderer.queue(), frame);
-                                    }
                                 }
-                                Some(hybrid_frame::Payload::Tile(tile)) => {
-                                    tile_compositor.apply_tile(tile, renderer.device(), renderer.queue());
-                                }
-                                Some(hybrid_frame::Payload::Cursor(cursor)) => {
-                                    tile_compositor.update_cursor(cursor, renderer.device(), renderer.queue());
-                                }
-                                None => {}
+                                // Tile and Cursor variants no longer exist in the proto,
+                                // but handle gracefully if they ever appear.
+                                _ => {}
                             }
                         }
 
                         match renderer.get_target_view() {
                             Ok((frame, view)) => {
-                                // 1. Render Video
+                                // 1. Render decoded video (YUV→RGB via shader)
                                 {
                                     let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
                                     {
@@ -396,8 +657,10 @@ fn main() {
                                             timestamp_writes: None,
                                             occlusion_query_set: None,
                                         });
-                                        if let Some(decoder) = video_decoder.as_ref() {
-                                            tile_compositor.composite(&decoder.texture, &mut rpass, renderer.device(), renderer.queue());
+                                        if let Some(ref textures) = yuv_textures {
+                                            rpass.set_pipeline(&yuv_pipeline);
+                                            rpass.set_bind_group(0, &textures.bind_group, &[]);
+                                            rpass.draw(0..3, 0..1); // Full-screen triangle
                                         }
                                     }
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
@@ -415,8 +678,10 @@ fn main() {
                                         &mut encoder,
                                         &phase,
                                         mouse_pos,
-                                        last_is_vm,
+                                        has_video,
                                         is_kiosk,
+                                        decode_fps_display,
+                                        last_decode_us,
                                     );
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
                                 }

@@ -1,39 +1,25 @@
 syntax = "proto3";
 package zc_protocol;
 
-enum SourceType {
-    ANDROID_NATIVE = 0;
-    VM_WAYLAND = 1;
-}
+option java_package = "com.androiddex.protocol";
+option java_outer_classname = "VideoProto";
+option java_multiple_files = true;
 
+// One H.264 access unit, produced by the phone's hardware encoder.
+//
+// nal_data is Annex-B byte-stream format. On keyframes the cached SPS/PPS is
+// prepended, so a client that joins mid-session can start decoding at the first
+// keyframe it receives without any out-of-band configuration.
 message VideoFrame {
-    uint32 width = 1;
-    uint32 height = 2;
-    uint64 timestamp = 3;
-    bytes rgba_data = 4;
-    SourceType source = 5;
-}
-
-message TileUpdate {
-    uint32 x = 1;
-    uint32 y = 2;
-    uint32 width = 3;
-    uint32 height = 4;
-    bytes zstd_data = 5;
-}
-
-message CursorUpdate {
-    uint32 x = 1;
-    uint32 y = 2;
-    bytes bitmap = 3;
-    uint32 width = 4;
-    uint32 height = 5;
+    bytes nal_data = 1;
+    bool is_keyframe = 2;
+    int64 pts_us = 3;
+    int32 width = 4;
+    int32 height = 5;
 }
 
 message HybridFrame {
     oneof payload {
         VideoFrame video = 1;
-        TileUpdate tile = 2;
-        CursorUpdate cursor = 3;
     }
 }

@@ -47,15 +47,26 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
+        // Prefer Immediate (no vsync, lowest latency), fall back to Mailbox
+        // (non-blocking vsync, ~1 frame latency), last resort Fifo (vsync, up
+        // to 16ms added). Fifo is always supported per the spec.
+        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: surface_caps.present_modes[0],
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 

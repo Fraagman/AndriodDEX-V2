@@ -20,12 +20,6 @@ android {
         }
     }
 
-    sourceSets {
-        getByName("main") {
-            jniLibs.srcDir("src/main/jniLibs")
-        }
-    }
-
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -96,4 +90,118 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
+
+  // Generated protobuf message classes. javalite is the Android-sized runtime.
+  implementation(libs.protobuf.javalite)
+}
+
+// ---------------------------------------------------------------------------
+// Protobuf generation
+//
+// protobuf-gradle-plugin is not used: 0.9.5 casts the Android extension to AGP's
+// removed BaseExtension and fails outright under AGP 9, and 0.10.0 applies but no
+// longer offers a way to point an Android source set at .proto files living outside
+// the module. protoc is therefore invoked directly. The compiler is pinned to the
+// same version as the protobuf-javalite runtime, so generated code and runtime can
+// never drift apart.
+//
+// The .proto files are read from rust-receiver/zc-protocol/proto, which is the single
+// canonical copy shared with the Rust receiver. They are never duplicated here.
+// ---------------------------------------------------------------------------
+
+/** Maven classifier for the protoc binary matching the machine running the build. */
+val protocClassifier: String = run {
+    val os = System.getProperty("os.name").lowercase()
+    val arch = System.getProperty("os.arch").lowercase()
+    val osPart = when {
+        os.contains("win") -> "windows"
+        os.contains("mac") || os.contains("darwin") -> "osx"
+        else -> "linux"
+    }
+    val archPart = when {
+        arch.contains("aarch64") || arch.contains("arm64") -> "aarch_64"
+        arch.contains("64") -> "x86_64"
+        else -> "x86_32"
+    }
+    "$osPart-$archPart"
+}
+
+val protocTool: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+
+dependencies {
+    protocTool("com.google.protobuf:protoc:${libs.versions.protobuf.get()}:$protocClassifier@exe")
+}
+
+/**
+ * Runs protoc over every .proto in [protoDir], emitting protobuf-lite Java sources.
+ *
+ * Uses injected ExecOperations rather than Project.exec so the task stays compatible
+ * with Gradle's configuration cache, which this build has enabled.
+ */
+abstract class GenerateProtoJava : DefaultTask() {
+
+    @get:InputDirectory
+    abstract val protoDir: DirectoryProperty
+
+    @get:InputFiles
+    abstract val protocBinary: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Inject
+    abstract val execOps: org.gradle.process.ExecOperations
+
+    @TaskAction
+    fun generate() {
+        val root = protoDir.get().asFile
+        val protos = root.listFiles { f: java.io.File -> f.isFile && f.extension == "proto" }
+            ?.sortedBy { it.name }
+            .orEmpty()
+        if (protos.isEmpty()) {
+            throw GradleException("No .proto files found in $root")
+        }
+
+        val out = outputDir.get().asFile
+        // Wipe first so a renamed or deleted message cannot leave a stale .java behind.
+        out.deleteRecursively()
+        out.mkdirs()
+
+        val protoc = protocBinary.singleFile
+        protoc.setExecutable(true)
+
+        execOps.exec {
+            commandLine(
+                buildList {
+                    add(protoc.absolutePath)
+                    add("--proto_path=${root.absolutePath}")
+                    add("--java_out=lite:${out.absolutePath}")
+                    addAll(protos.map { it.absolutePath })
+                }
+            )
+        }
+        logger.lifecycle("protoc generated lite sources for ${protos.size} proto files")
+    }
+}
+
+val generateProtoJava = tasks.register<GenerateProtoJava>("generateProtoJava") {
+    protoDir.set(layout.projectDirectory.dir("../../rust-receiver/zc-protocol/proto"))
+    protocBinary.from(protocTool)
+    outputDir.set(layout.buildDirectory.dir("generated/source/proto/java"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        // The modern AGP source API: registers the directory and the task that fills
+        // it, so ordering and up-to-date checks are wired automatically. The older
+        // sourceSets.java.srcDir(...) route is deprecated in AGP 9.
+        variant.sources.java?.addGeneratedSourceDirectory(
+            generateProtoJava,
+            GenerateProtoJava::outputDir
+        )
+    }
 }

@@ -46,7 +46,7 @@ import kotlinx.coroutines.delay
 /**
  * Forces continuous Compose redraws on every frame by reading withFrameNanos
  * and using drawBehind to invalidate the render layer. This is used ONLY inside
- * the VirtualDisplay Presentation so the ImageReader always has fresh frames.
+ * the VirtualDisplay Presentation so the H.264 encoder always has fresh frames to consume.
  *
  * How it works:
  * - LaunchedEffect loops forever calling withFrameNanos, which suspends until
@@ -199,9 +199,7 @@ fun DesktopShellContent(
         // 3. Launcher overlay (when toggled)
         // 4. Taskbar at the bottom
 
-        // Debug overlay — QUIC stats (top-right)
-        val regionStats by com.example.androidhost.vm.DisplayViewModel.regionStats.collectAsState()
-
+        // Debug overlay — encoder + QUIC stats (top-right)
         if (quicState > 0 || framesSent > 0) {
             Column(
                 modifier = Modifier
@@ -210,11 +208,16 @@ fun DesktopShellContent(
                     .background(Color.Black.copy(alpha = 0.7f))
                     .padding(8.dp)
             ) {
-                Text(text = "Sending frames via QUIC", color = Color.White, fontSize = 12.sp)
+                Text(text = "Streaming H.264 via QUIC", color = Color.White, fontSize = 12.sp)
                 Text(text = "Frames sent: $framesSent", color = Color.White, fontSize = 12.sp)
                 if (com.example.androidhost.BuildConfig.DEBUG) {
-                    Text(text = "Tiles: ${regionStats.first}", color = Color.White, fontSize = 12.sp)
-                    Text(text = "Video: ${if (regionStats.second) "Y" else "N"}", color = Color.White, fontSize = 12.sp)
+                    val encode by com.example.androidhost.service.DisplayService
+                        .encoderStats.latest.collectAsState()
+                    Text(
+                        text = "Encode: ${encode.fps} fps, ${encode.kilobitsPerSecond} kbps",
+                        color = Color.White,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }

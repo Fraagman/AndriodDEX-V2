@@ -108,7 +108,7 @@ object LocalInputDispatcher {
      * @param wireY  Y in the [WIRE_HEIGHT] coordinate space
      * @param buttons bitmask of [WIRE_BUTTON_LEFT] / [WIRE_BUTTON_RIGHT] / [WIRE_BUTTON_MIDDLE]
      */
-    fun onMouse(wireX: Int, wireY: Int, buttons: Int) {
+    fun onMouse(wireX: Int, wireY: Int, buttons: Int, modifiers: Int = 0) {
         mainHandler.post { handleMouse(wireX, wireY, buttons) }
     }
 
@@ -345,12 +345,16 @@ object LocalInputDispatcher {
      * When our IME is the active keyboard and has a live `InputConnection`, the event is
      * handed to it so text lands in the focused editor. Otherwise it goes straight into
      * the view tree.
+     *
+     * @param wireModifiers modifier bitmask from the receiver. When non-zero, this is
+     *        used directly instead of the locally-reconstructed state, which can desync
+     *        if a modifier release is missed over the network (classic: Shift stuck on).
      */
-    fun onKey(winitKeyCode: Int, pressed: Boolean) {
-        mainHandler.post { handleKey(winitKeyCode, pressed) }
+    fun onKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
+        mainHandler.post { handleKey(winitKeyCode, pressed, wireModifiers) }
     }
 
-    private fun handleKey(winitKeyCode: Int, pressed: Boolean) {
+    private fun handleKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
         updateMetaState(winitKeyCode, pressed)
 
         val keyCode = WinitKeyMap.toAndroidKeyCode(winitKeyCode)
@@ -359,7 +363,10 @@ object LocalInputDispatcher {
             return
         }
 
-        val effectiveMeta = metaState or lockState
+        // When the receiver sends a non-zero modifier bitmask, trust it over the
+        // locally-reconstructed state. A missed key-up over the network leaves the
+        // local tracker stuck, but the receiver always has the real modifier state.
+        val effectiveMeta = if (wireModifiers != 0) wireModifiersToAndroidMeta(wireModifiers) or lockState else metaState or lockState
         val now = SystemClock.uptimeMillis()
         val downTime: Long
         if (pressed) {
@@ -423,5 +430,18 @@ object LocalInputDispatcher {
         }
 
         metaState = if (pressed) metaState or bits else metaState and bits.inv()
+    }
+
+    /**
+     * Converts the wire modifier bitmask (matching `input.proto` Modifier enum values)
+     * into Android [KeyEvent] `META_*` flags.
+     */
+    private fun wireModifiersToAndroidMeta(wireModifiers: Int): Int {
+        var meta = 0
+        if (wireModifiers and 1 != 0) meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        if (wireModifiers and 2 != 0) meta = meta or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        if (wireModifiers and 4 != 0) meta = meta or KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+        if (wireModifiers and 8 != 0) meta = meta or KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON
+        return meta
     }
 }

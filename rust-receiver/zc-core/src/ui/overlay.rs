@@ -51,8 +51,10 @@ impl OverlayUi {
         encoder: &mut wgpu::CommandEncoder,
         phase: &ConnectionPhase,
         mouse_pos: (f64, f64),
-        is_vm: bool,
+        has_video: bool,
         is_kiosk: bool,
+        decode_fps: u32,
+        decode_us: u64,
     ) {
         let raw_input = self.state.take_egui_input(window);
         
@@ -75,27 +77,27 @@ impl OverlayUi {
             egui::Id::new("overlay"),
         ));
 
-        // VM Label - always visible in top-right corner if is_vm is true
-        if is_vm {
+        // Decode stats label - always visible in top-right corner if video is running
+        if has_video {
             let window_size = window.inner_size();
             let label_rect = Rect::from_min_size(
-                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 - 40.0, 10.0),
-                Vec2::new(30.0, 20.0)
+                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 - 120.0, 10.0),
+                Vec2::new(110.0, 20.0)
             );
             
             painter.rect(
                 label_rect,
                 Rounding::same(4.0),
-                Color32::from_rgba_premultiplied(50, 50, 0, 200),
-                Stroke::new(1.0, Color32::YELLOW),
+                Color32::from_rgba_premultiplied(0, 50, 0, 200),
+                Stroke::new(1.0, Color32::GREEN),
             );
             
             painter.text(
                 label_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "VM",
+                format!("{} fps  {:.1}ms", decode_fps, decode_us as f64 / 1000.0),
                 FontId::proportional(10.0),
-                Color32::YELLOW,
+                Color32::GREEN,
             );
         }
 
@@ -188,7 +190,11 @@ impl OverlayUi {
             painter.text(
                 rect.min + Vec2::new(10.0, 50.0),
                 egui::Align2::LEFT_TOP,
-                "Latency: -- ms",
+                if decode_fps > 0 {
+                    format!("Decode: {} fps, {:.1} ms", decode_fps, decode_us as f64 / 1000.0)
+                } else {
+                    "Decode: waiting...".to_string()
+                },
                 FontId::proportional(14.0),
                 Color32::from_rgba_premultiplied(180, 180, 180, (255.0 * alpha) as u8),
             );

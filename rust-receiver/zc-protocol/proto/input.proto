@@ -1,23 +1,53 @@
 syntax = "proto3";
 package protocol;
 
+option java_package = "com.androiddex.protocol";
+option java_outer_classname = "InputProto";
+option java_multiple_files = true;
+
+// Modifier bitmask shared by MouseEvent and KeyboardEvent.
+//
+// The receiver reports the real modifier state from winit rather than making the
+// phone reconstruct it from keypress history, which desynchronises whenever a
+// modifier release is missed (classic symptom: Shift stuck on).
+enum Modifier {
+    MODIFIER_NONE = 0;
+    MODIFIER_SHIFT = 1;
+    MODIFIER_CTRL = 2;
+    MODIFIER_ALT = 4;
+    MODIFIER_SUPER = 8;
+}
+
 message MouseEvent {
-  uint32 x = 1;
-  uint32 y = 2;
-  uint32 buttons = 3;
-  uint64 timestamp = 4;
+    uint32 x = 1;
+    uint32 y = 2;
+    uint32 buttons = 3;
+    uint64 timestamp = 4;
+    uint32 modifiers = 5;
 }
 
 message KeyboardEvent {
-  uint32 keycode = 1;
-  bool pressed = 2;
-  uint32 modifiers = 3;
-  uint64 timestamp = 4;
+    uint32 keycode = 1;
+    bool pressed = 2;
+    uint32 modifiers = 3;
+    uint64 timestamp = 4;
+}
+
+// Mouse wheel. Values are in detents (notches), matching winit's LineDelta;
+// positive v_scroll scrolls content away from the user, positive h_scroll right.
+message ScrollEvent {
+    uint32 x = 1;
+    uint32 y = 2;
+    float v_scroll = 3;
+    float h_scroll = 4;
+    uint64 timestamp = 5;
+    uint32 modifiers = 6;
 }
 
 message InputEvent {
-  oneof event {
-    MouseEvent mouse = 1;
-    KeyboardEvent keyboard = 2;
-  }
+    oneof event {
+        MouseEvent mouse = 1;
+        KeyboardEvent keyboard = 2;
+        ScrollEvent scroll = 3;
+    }
 }

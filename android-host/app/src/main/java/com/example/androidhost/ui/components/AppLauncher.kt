@@ -1,8 +1,6 @@
 package com.example.androidhost.ui.components
 
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -49,32 +47,28 @@ fun AppLauncher(
             .background(Color.Black.copy(alpha = 0.8f))
             .clickable { onDismiss() }
     ) {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 80.dp),
-            contentPadding = PaddingValues(32.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(apps) { app ->
-                AppIconCell(app = app, onClick = {
-                    val intent = context.packageManager.getLaunchIntentForPackage(app.packageName)
-                    if (intent != null) {
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or 
-                                      Intent.FLAG_ACTIVITY_MULTIPLE_TASK or 
-                                      Intent.FLAG_ACTIVITY_NEW_DOCUMENT or 
-                                      Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                        val options = android.app.ActivityOptions.makeBasic()
-                        options.setLaunchDisplayId(displayId)
-                        try {
-                            context.startActivity(intent, options.toBundle())
-                        } catch (e: Exception) {
-                            android.widget.Toast.makeText(context, "Failed to launch app: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                        }
-                    } else {
-                        android.widget.Toast.makeText(context, "App not installed or cannot be launched directly", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                    onAppSelected(app.packageName)
-                    onDismiss()
-                })
+        Column(modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = "AndroidDEX runs its own workspace rather than mirroring phone apps.",
+                color = Color.White,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 32.dp, start = 16.dp, end = 16.dp)
+            )
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 80.dp),
+                contentPadding = PaddingValues(32.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(apps) { app ->
+                    AppIconCell(app = app, onClick = {
+                        onAppSelected(app.packageName)
+                        onDismiss()
+                    })
+                }
             }
         }
     }
@@ -122,38 +116,10 @@ fun AppIconCell(app: AppInfo, onClick: () -> Unit) {
 }
 
 private fun loadTargetApps(context: Context): List<AppInfo> {
-    val pm = context.packageManager
-    
-    val targetPackages = listOf(
-        "com.androiddex.codeserver", // Native Compute: VS Code
-        "com.androiddex.terminal",   // Native Compute: Terminal
-        "com.android.chrome",
-        "com.google.android.documentsui", // Files
-        "com.android.settings",
-        "com.google.android.calculator",
-        "com.google.android.calendar",
-        "com.android.camera2", // Camera
-        "com.google.android.gm", // Gmail
-        "com.google.android.apps.photos" // Photos
+    return listOf(
+        AppInfo("com.androiddex.codeserver", "VS Code", null),
+        AppInfo("com.androiddex.terminal", "Terminal", null),
+        AppInfo("com.androiddex.files", "Files", null),
+        AppInfo("com.androiddex.settings", "Settings", null)
     )
-
-    val result = mutableListOf<AppInfo>()
-
-    for (pkg in targetPackages) {
-        try {
-            val appInfo = pm.getApplicationInfo(pkg, PackageManager.GET_META_DATA)
-            val label = pm.getApplicationLabel(appInfo).toString()
-            val icon = pm.getApplicationIcon(appInfo)
-            result.add(AppInfo(pkg, label, icon))
-        } catch (e: PackageManager.NameNotFoundException) {
-            // Provide a fallback if not installed on this specific emulator/device
-            val fallbackName = when (pkg) {
-                "com.androiddex.codeserver" -> "VS Code"
-                "com.androiddex.terminal" -> "Terminal"
-                else -> pkg.substringAfterLast(".").replaceFirstChar { it.uppercase() }
-            }
-            result.add(AppInfo(pkg, fallbackName, null))
-        }
-    }
-    return result
 }
