@@ -478,7 +478,6 @@ fn main() {
                                 keycode = code as u32;
                             }
                             let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
-                            println!("zc-core KeyboardInput: keycode={}, pressed={}", keycode, key_event.state == ElementState::Pressed);
                             let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {

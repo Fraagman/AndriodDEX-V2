@@ -203,7 +203,7 @@ class DisplayService : Service() {
                 val state = QuicServer.getConnectionState()
                 if (state == QUIC_STATE_AUTHENTICATED && lastQuicState != QUIC_STATE_AUTHENTICATED) {
                     Log.i(TAG, "Client authenticated — requesting keyframe")
-                    screenEncoder?.requestKeyframe()
+                    screenEncoder?.requestKeyframe(bypassCooldown = true)
                     forceRedraw.value++
                 }
                 lastQuicState = state

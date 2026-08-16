@@ -128,11 +128,11 @@ class ScreenEncoder(
      * Throttled to 1 per second to prevent network congestion collapses if the receiver
      * asks for keyframes in a tight loop.
      */
-    fun requestKeyframe() {
+    fun requestKeyframe(bypassCooldown: Boolean = false) {
         val encoder = codec ?: return
         if (!running) return
         val now = System.currentTimeMillis()
-        if (now - lastKeyframeRequestTime < 1000) return
+        if (!bypassCooldown && now - lastKeyframeRequestTime < 1000) return
         lastKeyframeRequestTime = now
 
         try {

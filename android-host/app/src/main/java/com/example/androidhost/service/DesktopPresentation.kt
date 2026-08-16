@@ -37,6 +37,14 @@ class DesktopPresentation(
     /** The Compose view that receives input from the PC. */
     private var contentView: ComposeView? = null
 
+    private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            contentView?.invalidate()
+            heartbeatHandler.postDelayed(this, 500)
+        }
+    }
+
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
 
@@ -91,6 +99,7 @@ class DesktopPresentation(
         // silently leave the desktop unresponsive to the PC.
         contentView?.let { LocalInputDispatcher.attach(it) }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        heartbeatHandler.postDelayed(heartbeatRunnable, 500)
     }
 
     fun onResume() {
@@ -99,6 +108,7 @@ class DesktopPresentation(
 
     override fun onStop() {
         super.onStop()
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
         LocalInputDispatcher.detach()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
     }

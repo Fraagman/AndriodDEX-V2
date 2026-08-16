@@ -165,11 +165,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(event) => {
                                         use zc_protocol::protocol::input_event::Event;
                                         match event.event {
-                                            Some(Event::Mouse(m)) => {
-                                                println!("[MOUSE] x={}, y={}, buttons={}, ts={}", m.x, m.y, m.buttons, m.timestamp);
+                                            Some(Event::Mouse(_m)) => {
+                                                // Mouse event received
                                             }
-                                            Some(Event::Keyboard(k)) => {
-                                                println!("[KEYBOARD] keycode={}, pressed={}, modifiers={}, ts={}", k.keycode, k.pressed, k.modifiers, k.timestamp);
+                                            Some(Event::Keyboard(_k)) => {
+                                                // Keyboard event received
                                             }
                                             None => {
                                                 println!("[INPUT] Empty InputEvent");
