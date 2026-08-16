@@ -83,6 +83,16 @@ fun DesktopShellContent(
     val computeState by com.example.androidhost.service.NativeComputeService.nclState.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
     val forceRedraw by com.example.androidhost.service.DisplayService.forceRedraw.collectAsState()
+    var burstTick by remember { mutableStateOf(0) }
+
+    LaunchedEffect(forceRedraw) {
+        if (forceRedraw > 0) {
+            for (i in 0 until 10) {
+                burstTick++
+                kotlinx.coroutines.delay(16)
+            }
+        }
+    }
 
     // Both are optional capabilities. When off, the shell hides the buttons they power
     // rather than blocking or nagging — desktop control works either way.
@@ -138,9 +148,10 @@ fun DesktopShellContent(
                 )
             }
         }
-        if (forceRedraw % 2 != 0) {
-            // Guarantee a buffer is queued to the VirtualDisplay by changing layout slightly
-            androidx.compose.foundation.layout.Box(Modifier.size(1.dp).background(Color(0x02000000)))
+        if (burstTick > 0) {
+            // Guarantee a buffer is queued to the VirtualDisplay by changing layout slightly.
+            // Using a burst of 10 frames ensures the MediaCodec pipeline is fully flushed.
+            androidx.compose.foundation.layout.Box(Modifier.size((burstTick % 10 + 1).dp).background(Color.Black))
         }
 
         // Launcher Overlay
