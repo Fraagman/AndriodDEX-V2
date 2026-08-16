@@ -116,10 +116,7 @@ fun AppIconCell(app: AppInfo, onClick: () -> Unit) {
 }
 
 private fun loadTargetApps(context: Context): List<AppInfo> {
-    return listOf(
-        AppInfo("com.androiddex.codeserver", "VS Code", null),
-        AppInfo("com.androiddex.terminal", "Terminal", null),
-        AppInfo("com.androiddex.files", "Files", null),
-        AppInfo("com.androiddex.settings", "Settings", null)
-    )
+    return AppRegistry.apps.values.map { config ->
+        AppInfo(config.packageName, config.name, config.icon)
+    }
 }

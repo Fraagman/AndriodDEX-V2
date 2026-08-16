@@ -356,6 +356,7 @@ object LocalInputDispatcher {
 
     private fun handleKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
         updateMetaState(winitKeyCode, pressed)
+        Log.d(TAG, "LocalInputDispatcher handleKey: winitKeyCode=$winitKeyCode, pressed=$pressed")
 
         val keyCode = WinitKeyMap.toAndroidKeyCode(winitKeyCode)
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {

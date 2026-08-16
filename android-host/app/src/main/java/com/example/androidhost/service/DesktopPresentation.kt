@@ -22,7 +22,7 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewmodel.MutableCreationExtras
 import android.app.Application
 import com.example.androidhost.DesktopShell
-import com.example.androidhost.KeepAliveRedraw
+
 import com.example.androidhost.input.LocalInputDispatcher
 
 class DesktopPresentation(
@@ -69,9 +69,7 @@ class DesktopPresentation(
 
         val composeView = ComposeView(context).apply {
             setContent {
-                KeepAliveRedraw {
-                    DesktopShell(displayId = display.displayId)
-                }
+                DesktopShell(displayId = display.displayId)
             }
         }
 

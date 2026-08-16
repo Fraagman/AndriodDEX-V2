@@ -91,6 +91,7 @@ object InputManager {
             }
             InputEvent.EventCase.KEYBOARD -> {
                 val k = event.keyboard
+                Log.d(TAG, "InputManager handleInputEvent KEYBOARD: keycode=${k.keycode}, pressed=${k.pressed}")
                 LocalInputDispatcher.onKey(k.keycode, k.pressed, k.modifiers)
             }
             InputEvent.EventCase.SCROLL -> {

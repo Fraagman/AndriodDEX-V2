@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong
 class ScreenEncoder(
     private val width: Int,
     private val height: Int,
+    private var bitrate: Int,
     private val listener: Listener
 ) {
 
@@ -32,7 +33,6 @@ class ScreenEncoder(
         private const val TAG = "ScreenEncoder"
 
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val BIT_RATE = 12_000_000
         private const val FRAME_RATE = 60
         private const val I_FRAME_INTERVAL_SEC = 3
 
@@ -108,7 +108,7 @@ class ScreenEncoder(
 
         surface = encoder.createInputSurface()
         codec = encoder
-        Log.i(TAG, "Encoder prepared: ${width}x$height @ ${FRAME_RATE}fps, ${BIT_RATE / 1_000_000} Mbps")
+        Log.i(TAG, "Encoder prepared: ${width}x$height @ ${FRAME_RATE}fps, ${bitrate / 1_000_000} Mbps")
     }
 
     /** Starts encoding. [prepare] must have been called. */
@@ -120,13 +120,21 @@ class ScreenEncoder(
         Log.i(TAG, "Encoder started")
     }
 
+    private var lastKeyframeRequestTime = 0L
+
     /**
      * Asks the encoder to emit an IDR on the next frame. Called when a client finishes
      * pairing, so it does not wait up to [I_FRAME_INTERVAL_SEC] seconds for a picture.
+     * Throttled to 1 per second to prevent network congestion collapses if the receiver
+     * asks for keyframes in a tight loop.
      */
     fun requestKeyframe() {
         val encoder = codec ?: return
         if (!running) return
+        val now = System.currentTimeMillis()
+        if (now - lastKeyframeRequestTime < 1000) return
+        lastKeyframeRequestTime = now
+
         try {
             encoder.setParameters(Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
@@ -134,6 +142,23 @@ class ScreenEncoder(
             Log.d(TAG, "Keyframe requested")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe", e)
+        }
+    }
+
+    /**
+     * Dynamically changes the encoder bitrate without restarting it.
+     */
+    fun setBitrate(newBitrate: Int) {
+        val encoder = codec ?: return
+        if (!running) return
+        try {
+            encoder.setParameters(Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrate)
+            })
+            bitrate = newBitrate
+            Log.d(TAG, "Bitrate updated to $newBitrate")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update bitrate", e)
         }
     }
 
@@ -163,7 +188,7 @@ class ScreenEncoder(
         return MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             // Required for zero-copy: input comes from a Surface, not from byte buffers.
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             // CBR so a burst of desktop activity cannot spike the bitrate and queue up.
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)

@@ -19,6 +19,7 @@ import com.example.androidhost.quic.QuicServer
 import com.example.androidhost.video.EncoderStats
 import com.example.androidhost.video.ScreenEncoder
 import java.nio.ByteBuffer
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * Owns the VirtualDisplay the desktop shell is rendered into, and the hardware H.264
@@ -41,8 +42,9 @@ class DisplayService : Service() {
          * LocalInputDispatcher scales incoming PC coordinates into this space — there
          * must be exactly one definition of the desktop's resolution.
          */
-        const val CAPTURE_WIDTH = 1920
-        const val CAPTURE_HEIGHT = 1080
+        var CAPTURE_WIDTH = 1920
+        var CAPTURE_HEIGHT = 1080
+        var BIT_RATE = 12_000_000 // 12 Mbps default
         private const val CAPTURE_DPI = 320
 
         /**
@@ -60,6 +62,7 @@ class DisplayService : Service() {
          * per-instance so the desktop shell can display it without binding to the
          * service, which it cannot do from inside the Presentation.
          */
+        val forceRedraw = MutableStateFlow(0)
         val encoderStats = EncoderStats()
 
         var instance: DisplayService? = null
@@ -67,6 +70,27 @@ class DisplayService : Service() {
 
         fun requestKeyframe() {
             instance?.screenEncoder?.requestKeyframe()
+            forceRedraw.value++
+        }
+
+        fun updateResolution(width: Int, height: Int) {
+            if (CAPTURE_WIDTH == width && CAPTURE_HEIGHT == height) return
+            CAPTURE_WIDTH = width
+            CAPTURE_HEIGHT = height
+            instance?.let {
+                // Restart pipeline to apply new resolution
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    it.stopEncodingPipeline()
+                    it.startEncodingPipeline()
+                }
+            }
+        }
+
+        fun updateBitrate(kbps: Int) {
+            val bps = kbps * 1000
+            if (BIT_RATE == bps) return
+            BIT_RATE = bps
+            instance?.screenEncoder?.setBitrate(bps)
         }
     }
 
@@ -112,7 +136,7 @@ class DisplayService : Service() {
     private fun startEncodingPipeline() {
         if (virtualDisplay != null) return
 
-        val encoder = ScreenEncoder(CAPTURE_WIDTH, CAPTURE_HEIGHT, encoderListener)
+        val encoder = ScreenEncoder(CAPTURE_WIDTH, CAPTURE_HEIGHT, BIT_RATE, encoderListener)
         try {
             encoder.prepare()
         } catch (e: Exception) {
@@ -180,6 +204,7 @@ class DisplayService : Service() {
                 if (state == QUIC_STATE_AUTHENTICATED && lastQuicState != QUIC_STATE_AUTHENTICATED) {
                     Log.i(TAG, "Client authenticated — requesting keyframe")
                     screenEncoder?.requestKeyframe()
+                    forceRedraw.value++
                 }
                 lastQuicState = state
 

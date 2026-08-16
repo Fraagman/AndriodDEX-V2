@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.androidhost.ui.components.AppLauncher
+import com.example.androidhost.ui.components.AppRegistry
 import com.example.androidhost.ui.components.Taskbar
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.ConnectionViewModel
@@ -42,82 +43,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.ui.text.font.FontWeight
 import com.example.androidhost.vm.ShellViewModel
 import kotlinx.coroutines.delay
-
-/**
- * Forces continuous Compose redraws on every frame by reading withFrameNanos
- * and using drawBehind to invalidate the render layer. This is used ONLY inside
- * the VirtualDisplay Presentation so the H.264 encoder always has fresh frames to consume.
- *
- * How it works:
- * - LaunchedEffect loops forever calling withFrameNanos, which suspends until
- *   the next choreographer VSYNC and returns the frame time.
- * - Each iteration updates 'tick', which triggers recomposition.
- * - The drawBehind modifier reads 'tick', which invalidates the draw layer,
- *   causing the VirtualDisplay Surface to be re-rendered even when nothing
- *   in the actual content has changed.
- */
-@Composable
-fun KeepAliveRedraw(content: @Composable () -> Unit) {
-    var tick by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
-        var lastTime = 0L
-        while (true) { 
-            withFrameNanos { 
-                if (it - lastTime >= 33_000_000L) { // ~30fps throttle
-                    tick = it
-                    lastTime = it
-                }
-            } 
-        }
-    }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .drawBehind {
-                // read 'tick' so this layer is invalidated at 30fps
-                @Suppress("UNUSED_EXPRESSION")
-                tick
-            }
-    ) { content() }
-}
-
-/**
- * Temporary proof-of-life indicator: a small orange rectangle that oscillates
- * horizontally plus a "LIVE Xs" counter. Visible on the VirtualDisplay capture
- * to confirm frames are flowing to the PC receiver.
- * Remove this composable once frame flow is verified stable.
- */
-@Composable
-fun ProofOfLifeIndicator() {
-    var elapsed by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
-        val start = System.currentTimeMillis()
-        while (true) {
-            elapsed = System.currentTimeMillis() - start
-            delay(16) // ~60fps update
-        }
-    }
-    // Oscillate 0..200dp over a 3-second period
-    val period = 3000f
-    val phase = (elapsed % period.toLong()) / period
-    val offsetX = phase * 200f
-
-    Box(
-        modifier = Modifier
-            .offset(x = offsetX.dp, y = 40.dp)
-            .size(30.dp)
-            .background(Color(0xFFFF6B35), RoundedCornerShape(6.dp))
-    )
-    Text(
-        text = "LIVE ${elapsed / 1000}s",
-        color = Color.White,
-        fontSize = 10.sp,
-        modifier = Modifier
-            .offset(x = offsetX.dp, y = 74.dp)
-            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-            .padding(horizontal = 4.dp, vertical = 2.dp)
-    )
-}
 
 @Composable
 fun DesktopShell(
@@ -153,11 +78,11 @@ fun DesktopShellContent(
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
     var showLauncher by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
 
     val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
     val computeState by com.example.androidhost.service.NativeComputeService.nclState.collectAsState()
     val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
+    val forceRedraw by com.example.androidhost.service.DisplayService.forceRedraw.collectAsState()
 
     // Both are optional capabilities. When off, the shell hides the buttons they power
     // rather than blocking or nagging — desktop control works either way.
@@ -191,7 +116,7 @@ fun DesktopShellContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Transparent)  // Transparent so native apps behind it are visible
+            .background(Color.Transparent)
     ) {
         // The desktop content ALWAYS renders the real desktop:
         // 1. Background (dark wallpaper color, already set on the Box)
@@ -199,58 +124,23 @@ fun DesktopShellContent(
         // 3. Launcher overlay (when toggled)
         // 4. Taskbar at the bottom
 
-        // Debug overlay — encoder + QUIC stats (top-right)
-        if (quicState > 0 || framesSent > 0) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp)
-                    .background(Color.Black.copy(alpha = 0.7f))
-                    .padding(8.dp)
-            ) {
-                Text(text = "Streaming H.264 via QUIC", color = Color.White, fontSize = 12.sp)
-                Text(text = "Frames sent: $framesSent", color = Color.White, fontSize = 12.sp)
-                if (com.example.androidhost.BuildConfig.DEBUG) {
-                    val encode by com.example.androidhost.service.DisplayService
-                        .encoderStats.latest.collectAsState()
-                    Text(
-                        text = "Encode: ${encode.fps} fps, ${encode.kilobitsPerSecond} kbps",
-                        color = Color.White,
-                        fontSize = 12.sp
-                    )
-                }
-            }
-        }
 
-        // Proof-of-life moving indicator (temporary — confirms frames are flowing)
-        ProofOfLifeIndicator()
 
         // Windows
         windows.forEach { window ->
-            if (window.packageName == "com.androiddex.codeserver") {
-                com.example.androidhost.ui.linux.CodeServerWindow(
-                    windowState = window,
-                    onClose = { shellViewModel?.closeWindow(window.id) },
-                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
-                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
+            val appConfig = AppRegistry.apps[window.packageName]
+            if (appConfig != null) {
+                appConfig.content(
+                    window,
+                    { shellViewModel?.closeWindow(window.id) },
+                    { shellViewModel?.minimizeWindow(window.id) },
+                    { shellViewModel?.maximizeWindow(window.id) }
                 )
-            } else if (window.packageName == "com.androiddex.terminal") {
-                com.example.androidhost.ui.linux.TerminalWindow(
-                    windowState = window,
-                    onClose = { shellViewModel?.closeWindow(window.id) },
-                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
-                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
-                )
-            } else {
-                WindowChrome(
-                    windowState = window,
-                    onClose = { shellViewModel?.closeWindow(window.id) },
-                    onMinimize = { shellViewModel?.minimizeWindow(window.id) },
-                    onMaximize = { shellViewModel?.maximizeWindow(window.id) }
-                ) {
-                    // Empty for unsupported mock windows
-                }
             }
+        }
+        if (forceRedraw % 2 != 0) {
+            // Guarantee a buffer is queued to the VirtualDisplay by changing layout slightly
+            androidx.compose.foundation.layout.Box(Modifier.size(1.dp).background(Color(0x02000000)))
         }
 
         // Launcher Overlay
@@ -264,74 +154,7 @@ fun DesktopShellContent(
             )
         }
 
-        // Settings Overlay Dialog
-        if (showSettings) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable { showSettings = false }
-            ) {
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .width(320.dp)
-                        .background(Color(0xFF1E1E1E), shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-                        .clickable(enabled = false) {}
-                        .padding(24.dp)
-                ) {
-                    Text(
-                        text = "System Settings",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 20.dp)
-                    )
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Enable System Audio",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Switch(
-                            checked = isAudioCapturing,
-                            onCheckedChange = { onRequestAudioCapture(it) }
-                        )
-                    }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Compute Engine",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            modifier = Modifier.weight(1f)
-                        )
-                        val context = androidx.compose.ui.platform.LocalContext.current
-                        Button(
-                            onClick = {
-                                val intent = android.content.Intent(context, com.example.androidhost.service.NativeComputeService::class.java)
-                                intent.action =
-                                    if (computeState == com.example.androidhost.service.ComputeState.RUNNING) "STOP_NCL"
-                                    else "START_NCL"
-                                context.startService(intent)
-                            }
-                        ) {
-                            Text(if (computeState == com.example.androidhost.service.ComputeState.RUNNING) "Stop" else "Start")
-                        }
-                    }
-                }
-            }
-        }
 
         // Taskbar at bottom
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
@@ -340,7 +163,7 @@ fun DesktopShellContent(
                 isAudioCapturing = isAudioCapturing,
                 computeState = computeState,
                 onLauncherClick = { showLauncher = !showLauncher },
-                onSettingsClick = { showSettings = !showSettings },
+                onSettingsClick = { shellViewModel?.openApp("com.androiddex.settings") },
                 showNavButtons = a11yEnabled,
                 onBackClick = { com.example.androidhost.service.DesktopAccessibilityService.performBack() },
                 onHomeClick = { com.example.androidhost.service.DesktopAccessibilityService.performHome() },

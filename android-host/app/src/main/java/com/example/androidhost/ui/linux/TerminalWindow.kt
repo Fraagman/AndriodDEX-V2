@@ -46,7 +46,14 @@ fun TerminalWindow(
                 scrollView.addView(editText)
                 
                 try {
-                    val process = ProcessBuilder("sh").redirectErrorStream(true).start()
+                    val rootDir = context.filesDir
+                    var currentDir = rootDir
+                    
+                    val prompt = { "${currentDir.absolutePath} $ " }
+                    
+                    editText.setText("Welcome to AndroidDex Native Terminal\n${prompt()}")
+                    
+                    val process = ProcessBuilder("sh").redirectErrorStream(true).directory(currentDir).start()
                     val reader = BufferedReader(InputStreamReader(process.inputStream))
                     val writer = process.outputStream.bufferedWriter()
                     
@@ -54,7 +61,9 @@ fun TerminalWindow(
                         while (true) {
                             val line = reader.readLine() ?: break
                             editText.post {
-                                editText.append(line + "\n$ ")
+                                editText.append(line + "\n")
+                                // Only append prompt if not immediately followed by another line? No, sh doesn't echo prompt over pipe.
+                                // But we handle the prompt manually on command execution.
                                 scrollView.fullScroll(ScrollView.FOCUS_DOWN)
                             }
                         }
@@ -63,16 +72,34 @@ fun TerminalWindow(
                     editText.setOnKeyListener { _, keyCode, event ->
                         if (event.action == android.view.KeyEvent.ACTION_DOWN && keyCode == android.view.KeyEvent.KEYCODE_ENTER) {
                             val lines = editText.text.toString().split("\n")
-                            val lastLine = lines.last().substringAfter("$ ")
+                            val lastLine = lines.last().substringAfter(prompt())
                             if (lastLine.isNotEmpty()) {
-                                try {
-                                    writer.write(lastLine + "\n")
-                                    writer.flush()
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
+                                if (lastLine.trim().startsWith("cd ")) {
+                                    val target = lastLine.trim().substringAfter("cd ").trim()
+                                    val targetDir = java.io.File(currentDir, target).canonicalFile
+                                    if (targetDir.absolutePath.startsWith(rootDir.absolutePath)) {
+                                        if (targetDir.exists() && targetDir.isDirectory) {
+                                            currentDir = targetDir
+                                            editText.append("\n${prompt()}")
+                                        } else {
+                                            editText.append("\ncd: $target: No such file or directory\n${prompt()}")
+                                        }
+                                    } else {
+                                        editText.append("\ncd: $target: Permission denied. The terminal is sandboxed to ${rootDir.absolutePath}.\n${prompt()}")
+                                    }
+                                } else {
+                                    try {
+                                        writer.write("cd ${currentDir.absolutePath} && $lastLine\n")
+                                        writer.flush()
+                                        // Wait a tiny bit for output, then append prompt?
+                                        // A better way is to append prompt after a small delay, but for simplicity:
+                                        editText.postDelayed({ editText.append(prompt()) }, 100)
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                    }
                                 }
                             } else {
-                                editText.append("\n$ ")
+                                editText.append("\n${prompt()}")
                             }
                             true
                         } else {

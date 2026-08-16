@@ -67,6 +67,7 @@ class AndroidDexIME : InputMethodService() {
             downTime: Long,
             eventTime: Long
         ): Boolean {
+            Log.d(TAG, "AndroidDexIME dispatchFromHost: keyCode=$keyCode, pressed=$pressed")
             val ime = instance ?: return false
             if (!ime.hasLiveEditor()) return false
             val connection = ime.currentInputConnection ?: return false
@@ -78,7 +79,8 @@ class AndroidDexIME : InputMethodService() {
                 KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
                 InputDevice.SOURCE_KEYBOARD
             )
-            return connection.sendKeyEvent(event)
+            connection.sendKeyEvent(event)
+            return true
         }
 
         /**
