@@ -13,5 +13,30 @@
 .externalNativeBuild
 .cxx
 local.properties
-rust-receiver/target/  
- android-host/app/src/rust_quic_server/target/
+
+# Rust build output. These paths were wrong before: the android-host entry pointed at
+# app/src/rust_quic_server/target (no such directory) and had a leading space, so 182 MB
+# of build output was committed.
+rust-receiver/target/
+android-host/rust_quic_server/target/
+AndroidDEX-Core/target/
+AndroidDEX-Core/androiddex-video/receiver/target/
+
+# The native QUIC server is cross-compiled by the :app:buildRustQuicServer Gradle task
+# into app/build/rustJniLibs. A .so must never be committed again: a stale one silently
+# replaces the code in rust_quic_server/ at packaging time.
+android-host/app/src/main/jniLibs/
+
+# Code-signing material. NEVER commit these.
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Packaging output and local databases
+packaging/windows/androiddex.exe
+mdm-console/mdm.db
+protoc/bin/
+
+# Device logs
+logcat*.txt

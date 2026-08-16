@@ -63,7 +63,30 @@ class QuicServer {
         @JvmStatic
         private external fun sendAudio(handle: Long, data: ByteArray)
 
+        /**
+         * Video frames the native side discarded because the network could not keep up.
+         *
+         * The video queue holds two frames; a third arriving before the oldest has been
+         * written evicts that oldest one. A climbing count means the encoder is outrunning
+         * the link, which is the intended behaviour — latency stays bounded instead of the
+         * backlog growing — but it is worth watching during testing.
+         */
+        fun getDroppedVideoFrames(): Long {
+            return if (handle != 0L) droppedVideoFrames(handle) else 0L
+        }
+
+        /** Audio frames discarded for the same reason. */
+        fun getDroppedAudioFrames(): Long {
+            return if (handle != 0L) droppedAudioFrames(handle) else 0L
+        }
+
         @JvmStatic
         private external fun connectionState(handle: Long): Int
+
+        @JvmStatic
+        private external fun droppedVideoFrames(handle: Long): Long
+
+        @JvmStatic
+        private external fun droppedAudioFrames(handle: Long): Long
     }
 }

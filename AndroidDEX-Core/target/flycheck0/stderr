@@ -1,7 +1,0 @@
-warning: virtual workspace defaulting to `resolver = "1"` despite one or more workspace members being on edition 2021 which implies `resolver = "2"`
-  |
-  = note: to keep the current resolver, specify `workspace.resolver = "1"` in the workspace root's manifest
-  = note: to use the edition 2021 resolver, specify `workspace.resolver = "2"` in the workspace root's manifest
-  = note: for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions
-    Blocking waiting for file lock on package cache
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s

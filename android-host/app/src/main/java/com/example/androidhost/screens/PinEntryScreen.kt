@@ -20,15 +20,34 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.example.androidhost.quic.QuicServer
 import com.example.androidhost.security.SecurityBridge
 
+/** Mirrors STATE_AUTHENTICATED in the native server. */
+private const val STATE_AUTHENTICATED = 2
+
+/**
+ * Pairing screen.
+ *
+ * The PIN is generated and displayed by the PC; this screen only collects it. The check
+ * itself happens in the native server, which derives a pre-shared key from the digits and
+ * then requires the PC to prove it derived the same one. Nothing here can grant access on
+ * its own — entering the wrong PIN leaves the connection unauthenticated no matter what
+ * this screen does.
+ */
 @Composable
 fun PinEntryScreen(
     onPinSuccess: () -> Unit
 ) {
     var pin by remember { mutableStateOf("") }
     var isError by remember { mutableStateOf(false) }
+    var awaitingPin by remember { mutableStateOf(false) }
+    var alreadyPaired by remember { mutableStateOf(false) }
+    var verifying by remember { mutableStateOf(false) }
     val shakeOffset = remember { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
@@ -39,6 +58,27 @@ fun PinEntryScreen(
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
+    }
+
+    // Follow the native server: it tells us when a PC is mid-pairing and waiting for the
+    // user, and when a session has authenticated so this screen can step out of the way.
+    LaunchedEffect(Unit) {
+        while (true) {
+            awaitingPin = SecurityBridge.isAwaitingPin()
+            alreadyPaired = SecurityBridge.isPaired()
+            if (QuicServer.getConnectionState() == STATE_AUTHENTICATED) {
+                onPinSuccess()
+                return@LaunchedEffect
+            }
+            delay(300)
+        }
+    }
+
+    val statusText = when {
+        verifying -> "Checking with your PC…"
+        awaitingPin -> "Enter the PIN shown on your PC"
+        alreadyPaired -> "Waiting for your paired PC to connect…"
+        else -> "Waiting for a PC to connect…"
     }
 
     Box(
@@ -54,7 +94,7 @@ fun PinEntryScreen(
             }
         ) {
             Text(
-                text = "Enter the PIN shown on your PC",
+                text = statusText,
                 color = platinumColor,
                 fontSize = 18.sp,
                 modifier = Modifier.padding(bottom = 32.dp)
@@ -83,7 +123,15 @@ fun PinEntryScreen(
                     Box(
                         modifier = Modifier
                             .size(48.dp, 64.dp)
-                            .border(1.dp, if (isError) Color.Red else Color.White, RoundedCornerShape(4.dp))
+                            .border(
+                                1.dp,
+                                when {
+                                    isError -> Color.Red
+                                    awaitingPin -> Color.White
+                                    else -> Color.DarkGray
+                                },
+                                RoundedCornerShape(4.dp)
+                            )
                             .background(Color.Transparent),
                         contentAlignment = Alignment.Center
                     ) {
@@ -110,14 +158,22 @@ fun PinEntryScreen(
 
             Button(
                 onClick = {
-                    if (SecurityBridge.verifyPin(pin)) {
-                        android.util.Log.d("PinEntryScreen", "Navigate to desktop")
-                        onPinSuccess()
-                    } else {
-                        android.util.Log.d("PinEntryScreen", "Incorrect PIN")
-                        isError = true
-                        pin = ""
-                        coroutineScope.launch {
+                    val submitted = pin
+                    verifying = true
+                    coroutineScope.launch {
+                        // verifyPin blocks until the PC's auth token arrives, so it must
+                        // not run on the main thread.
+                        val accepted = withContext(Dispatchers.IO) {
+                            SecurityBridge.verifyPin(submitted)
+                        }
+                        verifying = false
+                        if (accepted) {
+                            android.util.Log.d("PinEntryScreen", "Pairing accepted")
+                            onPinSuccess()
+                        } else {
+                            android.util.Log.d("PinEntryScreen", "Pairing rejected")
+                            isError = true
+                            pin = ""
                             shakeOffset.animateTo(
                                 targetValue = 0f,
                                 animationSpec = keyframes {
@@ -131,22 +187,36 @@ fun PinEntryScreen(
                         }
                     }
                 },
-                enabled = pin.length == 6,
+                enabled = pin.length == 6 && awaitingPin && !verifying,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = electricBlue,
                     contentColor = Color.Black,
                     disabledContainerColor = Color.DarkGray
                 )
             ) {
-                Text("Verify")
+                Text(if (verifying) "Checking…" else "Verify")
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-            
+
+            // Opens the phone's own control panel. It grants a PC nothing: an unpaired PC
+            // still has to complete the PIN flow, and a paired one authenticates on its
+            // own without this screen.
             TextButton(
                 onClick = { onPinSuccess() }
             ) {
-                Text("Skip (Already Paired)", color = platinumColor)
+                Text("Open control panel", color = platinumColor)
+            }
+
+            if (alreadyPaired) {
+                TextButton(
+                    onClick = {
+                        SecurityBridge.forgetPairing()
+                        alreadyPaired = false
+                    }
+                ) {
+                    Text("Forget paired PC", color = Color(0xFF8B949E))
+                }
             }
         }
     }

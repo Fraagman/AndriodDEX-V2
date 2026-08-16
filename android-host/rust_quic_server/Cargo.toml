@@ -6,13 +6,22 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+# Every version is pinned exactly. The wire protocol and the PSK derivation have to
+# stay byte-identical to the Windows receiver in ../../rust-receiver, so `ring` in
+# particular is pinned to the same 0.17.14 that the receiver workspace resolves.
 [dependencies]
-jni = "0.21"
-tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-rcgen = "0.13"
-x25519-dalek = "2.0.1"
-sha2 = "0.11.0"
-rand_core = "0.6"
-crossbeam-channel = "0.5"
+jni = "=0.21.1"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+quinn = "=0.11.11"
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rcgen = "=0.13.2"
+ring = "=0.17.14"
+crossbeam-channel = "=0.5.16"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+# Deliberately NOT panic = "abort": tokio catches a panicking task at the JoinHandle,
+# so an unwinding panic can only kill one connection. Aborting would let a single bad
+# connection take the whole app down, which is exactly what Phase 3 is about.
+panic = "unwind"
