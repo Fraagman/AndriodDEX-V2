@@ -626,7 +626,13 @@ fn main() {
                                             Ok(None) => { /* NAL consumed, no picture */ }
                                             Err(e) => {
                                                 eprintln!("H.264 decode error: {}", e);
-                                                // TODO: request keyframe from phone
+                                                let ev = zc_input::create_keyframe_request();
+                                                let mut serialized = Vec::new();
+                                                if prost::Message::encode(&ev, &mut serialized).is_ok() {
+                                                    let mut buf = input_buffer_for_poll.lock().unwrap();
+                                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                                    buf.push_back(serialized);
+                                                }
                                             }
                                         }
                                     }

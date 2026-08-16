@@ -44,10 +44,13 @@ message ScrollEvent {
     uint32 modifiers = 6;
 }
 
+message KeyframeRequest {}
+
 message InputEvent {
     oneof event {
         MouseEvent mouse = 1;
         KeyboardEvent keyboard = 2;
         ScrollEvent scroll = 3;
+        KeyframeRequest request_keyframe = 4;
     }
 }

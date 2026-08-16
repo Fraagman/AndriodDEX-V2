@@ -1,0 +1,18 @@
+[package]
+name = "rust_quic_server"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rcgen = "0.13"
+x25519-dalek = "2.0.1"
+sha2 = "0.11.0"
+rand_core = "0.6"
+crossbeam-channel = "0.5"

@@ -48,6 +48,12 @@ pub fn create_keyboard_event(keycode: u32, pressed: bool, modifiers: u32) -> Inp
     }
 }
 
+pub fn create_keyframe_request() -> InputEvent {
+    InputEvent {
+        event: Some(input_event::Event::RequestKeyframe(zc_protocol::protocol::KeyframeRequest {})),
+    }
+}
+
 pub fn create_scroll_event(
     x: f64,
     y: f64,

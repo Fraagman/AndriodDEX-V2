@@ -61,6 +61,13 @@ class DisplayService : Service() {
          * service, which it cannot do from inside the Presentation.
          */
         val encoderStats = EncoderStats()
+
+        var instance: DisplayService? = null
+            private set
+
+        fun requestKeyframe() {
+            instance?.screenEncoder?.requestKeyframe()
+        }
     }
 
     private val binder = LocalBinder()
@@ -87,6 +94,7 @@ class DisplayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         startEncodingPipeline()
     }
 

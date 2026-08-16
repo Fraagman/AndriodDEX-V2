@@ -97,6 +97,10 @@ object InputManager {
                 val s = event.scroll
                 LocalInputDispatcher.onScroll(s.x, s.y, s.vScroll, s.hScroll)
             }
+            InputEvent.EventCase.REQUEST_KEYFRAME -> {
+                Log.i(TAG, "Keyframe requested by receiver")
+                DisplayService.requestKeyframe()
+            }
             InputEvent.EventCase.EVENT_NOT_SET, null -> Unit
         }
     }
