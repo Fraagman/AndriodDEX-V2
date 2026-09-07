@@ -334,7 +334,10 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
     
     let conn = scan_rndis_subnet(&endpoint, port, &status_callback).await?;
 
-    let fp = fingerprint.lock().unwrap().unwrap();
+    let fp = fingerprint
+        .lock()
+        .map_err(|e| format!("Fingerprint lock poisoned: {e}"))?
+        .ok_or("Server certificate fingerprint not captured: verify_server_cert did not run")?;
     
     let secret = EphemeralSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);

@@ -90,6 +90,7 @@ fun DesktopShellContent(
                 burstTick++
                 kotlinx.coroutines.delay(16)
             }
+            burstTick = 0
         }
     }
 

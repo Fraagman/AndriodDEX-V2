@@ -40,3 +40,11 @@ protoc/bin/
 
 # Device logs
 logcat*.txt
+
+# Untracked build artifacts and IDE state
+/release/
+/gfxinfo.txt
+android-host/.kotlin/
+android-host/.idea/
+/protoc/
+

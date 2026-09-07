@@ -97,6 +97,7 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
   implementation(libs.androidx.biometric)
+  implementation(libs.androidx.fragment.ktx)
 
   // Generated protobuf message classes. javalite is the Android-sized runtime.
   implementation(libs.protobuf.javalite)

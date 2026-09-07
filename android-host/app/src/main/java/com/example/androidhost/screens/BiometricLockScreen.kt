@@ -22,18 +22,23 @@ import androidx.fragment.app.FragmentActivity
 fun BiometricLockScreen(
     onUnlockSuccess: () -> Unit
 ) {
-    val context = LocalContext.current as FragmentActivity
+    val fragmentActivity = LocalContext.current as? FragmentActivity
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        val executor = ContextCompat.getMainExecutor(context)
+    LaunchedEffect(fragmentActivity) {
+        if (fragmentActivity == null) {
+            errorMsg = "Biometric authentication unavailable: host is not a FragmentActivity"
+            return@LaunchedEffect
+        }
+
+        val executor = ContextCompat.getMainExecutor(fragmentActivity)
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Unlock AndroidDex")
             .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
             .build()
 
         val biometricPrompt = BiometricPrompt(
-            context,
+            fragmentActivity,
             executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

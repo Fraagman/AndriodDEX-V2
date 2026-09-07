@@ -7,7 +7,7 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,7 +44,7 @@ import androidx.core.content.ContextCompat
 import com.example.androidhost.service.TetheringService
 import kotlinx.coroutines.delay
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -131,7 +131,6 @@ class MainActivity : ComponentActivity() {
         }
         
         try {
-            com.example.androidhost.network.LocalInputServer.start()
             com.example.androidhost.service.InputManager.startPolling(filesDir.absolutePath)
         } catch (e: Exception) {
             e.printStackTrace()
