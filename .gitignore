@@ -44,3 +44,7 @@ logcat*.txt
 android-host/.kotlin/
 android-host/.idea/
 /protoc/
+
+# Session scratch
+/screen0.png
+/promt.md
