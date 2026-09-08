@@ -3,7 +3,7 @@ import java.io.File
 import java.util.Properties
 
 /** NDK release used for both the Android build and the Rust cross-compile. */
-val androidNdkVersion = "26.1.10909125"
+val androidNdkVersion = "30.0.14904198"
 
 plugins {
   alias(libs.plugins.android.application)
@@ -11,14 +11,35 @@ plugins {
   alias(libs.plugins.kotlin.serialization)
 }
 
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties()
+val hasReleaseSigning = if (keystorePropertiesFile.isFile) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+    true
+} else {
+    false
+}
+
 android {
     namespace = "com.example.androidhost"
     compileSdk = 36
     ndkVersion = androidNdkVersion
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile") ?: "")
+                storePassword = keystoreProperties.getProperty("storePassword") ?: ""
+                keyAlias = keystoreProperties.getProperty("keyAlias") ?: ""
+                keyPassword = keystoreProperties.getProperty("keyPassword") ?: ""
+            }
+        }
+    }
+
     defaultConfig {
-        applicationId = "com.example.androidhost"
+        applicationId = "com.androiddex.host"
         minSdk = 29
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 2
         versionName = "2.0.0"
         ndk {
@@ -29,8 +50,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

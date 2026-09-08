@@ -57,6 +57,9 @@ class TetheringService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Tethering Service Active")
             .build()
+        // TetheringService monitors the USB link to the connected PC (USB tethering / RNDIS interface)
+        // and broadcasts tethering availability for external communication with the connected PC.
+        // It legitimately retains FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(2, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {

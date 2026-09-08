@@ -22,7 +22,7 @@ AndroidDEX is a low-latency Android Desktop Experience system that streams an An
 | Android Host | Android 10+ (API 29+), USB Tethering support |
 | Windows Client | Windows 10 / 11 (x86_64) |
 | Rust Toolchain | Rust 1.85+ stable (required for edition 2024) |
-| Android Build | JDK 17, Android SDK / NDK 26.1.10909125, Gradle 9.1.0 (supplied by `./gradlew` wrapper) |
+| Android Build | JDK 17, Android SDK / NDK 30.0.14904198, Gradle 9.1.0 (supplied by `./gradlew` wrapper) |
 
 ---
 
@@ -55,6 +55,26 @@ cd android-host
 ```
 This cross-compiles `rust_quic_server` for `arm64-v8a` and `x86_64` and packages the debug APK.
 
+### Release Signing & Keystore Configuration
+To sign the release build for Google Play:
+1. Generate a release keystore using `keytool`:
+   ```bash
+   keytool -genkeypair -v -keystore release.jks -alias androiddex -keyalg RSA -keysize 2048 -validity 10000
+   ```
+2. Create `android-host/keystore.properties` (based on `android-host/keystore.properties.example`):
+   ```properties
+   storeFile=release.jks
+   storePassword=your_keystore_password
+   keyAlias=androiddex
+   keyPassword=your_key_password
+   ```
+   *(Note: `keystore.properties` and `*.jks` are gitignored and must never be committed).*
+3. Build the release package:
+   ```bash
+   cd android-host
+   ./gradlew :app:assembleRelease
+   ```
+
 ### Windows Receiver
 ```bash
 cd rust-receiver
@@ -70,14 +90,14 @@ The compiled receiver binary will be located at `rust-receiver/target/release/zc
 2. Install and launch the Android host app on the device:
    ```bash
    adb install -r android-host/app/build/outputs/apk/debug/app-debug.apk
-   adb shell am start -n com.example.androidhost/.MainActivity
+   adb shell am start -n com.androiddex.host/com.example.androidhost.MainActivity
    ```
 3. Start the Windows receiver:
    ```bash
    cd rust-receiver
    cargo run --release -p zc-core
    ```
-4. Complete first-time pairing by entering the 6-digit PIN displayed by the Windows receiver into the Android app.
+4. Complete first-time pairing: both the Android device and the Windows receiver display an identical 6-digit Short Authentication String (SAS). Compare the SAS codes on both screens and tap **Codes match** on the Android device to confirm mutual trust. Neither device requires manually inputting or entering any code; the key exchange is established via X25519 ECDH bound to the TLS channel. Once paired, subsequent sessions re-authenticate automatically.
 
 ### Troubleshooting Firewall Issues
 

@@ -7,6 +7,10 @@ Never put a secret in this file.
 
 | #   | Date       | Task | Result |
 |-----|------------|------|--------|
+| 024 | 2026-09-08 | T27 — Policy surface and store metadata (REL-06, REL-07, SEC-15) | PASS |
+| 023 | 2026-09-08 | T26 — Application identity, signing and shrinking (REL-01, REL-02) | PASS |
+| 022 | 2026-09-08 | T25 — targetSdk and honest foreground service types (REL-03, REL-05, BUG-03) | PASS |
+| 021 | 2026-09-08 | T24 (retry) — 16 KB page alignment (REL-04, submission blocker) | PASS |
 | 020 | 2026-09-08 | T23 — Phone UI, and prove the whole thing works on real hardware | PASS |
 | 019 | 2026-09-08 | T22 — PC side: implement the same protocol, then cut over | PASS |
 | 018 | 2026-09-08 | T21 — Phone side: implement protocol v2 against those vectors | PASS |
@@ -27,6 +31,419 @@ Never put a secret in this file.
 | 003 | 2026-09-07 | T3 — Fix three concrete bugs (BUG-01, BUG-04, BUG-06) | PASS |
 | 002 | 2026-09-07 | T2 — Delete dead parallel project and untrack build artifacts | PASS |
 | 001 | 2026-09-07 | T1 — Fix broken rust-receiver workspace build (BUG-02) | PASS |
+
+---
+
+## 024 — T27 — Policy surface and store metadata (REL-06, REL-07, SEC-15)
+
+### What this task was for
+1. Create `PRIVACY.md` detailing what the app collects, what leaves the device, what is stored, and developer contact placeholders. Accurately document that video and audio streams are encoded and transmitted strictly across the local peer-to-peer USB connection, pairing credentials are saved in app-private storage excluded from backup, and no data is transmitted to any cloud or remote server.
+2. Create `PLAY_SUBMISSION.md`, a pre-submission policy and technical checklist for Google Play review:
+   - Comprehensive Accessibility Service declaration: state exact usage (navigation actions Back, Home, and Recents triggered from the taskbar only; requests neither `canRetrieveWindowContent` nor `canPerformGestures`), confirm the app is 100% functional without it, draft the in-app prominent disclosure and Play Console declaration answers, and flag honestly that shipping without it is a viable fallback.
+   - Data Safety form responses: `RECORD_AUDIO` and `AudioPlaybackCaptureConfiguration` transient processing, zero off-device collection/sharing.
+   - Foreground service `specialUse` justification from Task 25.
+   - Target API 36, 16 KB page alignment verification, release signing steps, and store listing metadata placeholders.
+   - Merged manifest permissions table with one-line user-facing justifications for every declared permission.
+3. Document SEC-15: Record `TerminalWindow`'s execution of `/system/bin/sh` via `ProcessBuilder` inside `PRIVACY.md` and `PLAY_SUBMISSION.md` as an intended developer capability confined to the authenticated local USB connection.
+4. Update `README.md` to describe Protocol v2 pairing: users compare a 6-digit Short Authentication String (SAS) instead of entering a PIN. Remove every reference to typing/entering a PIN. Add prominent disclosure strings to `strings.xml`.
+
+### What I changed
+- `PRIVACY.md`:
+  - Created comprehensive privacy policy covering local-first zero-telemetry architecture, ephemeral display/audio handling over local USB, app-private storage exclusion from backups, SEC-15 terminal shell execution disclosure, and developer contact placeholders.
+- `PLAY_SUBMISSION.md`:
+  - Created full Google Play submission checklist covering technical compliance (16 KB alignment, API 36, signing, AAB bundling), accessibility service policy documentation with prominent disclosures and fallback recommendations, Data Safety form answers, FGS `specialUse` justification, SEC-15 disclosure, and complete permissions justification table.
+- `README.md`:
+  - Updated application ID launch command to `com.androiddex.host/com.example.androidhost.MainActivity`.
+  - Updated setup step 4 to describe Protocol v2 SAS comparison on both screens without entering or typing codes.
+  - Eliminated all references to "PIN" or "pin".
+- `android-host/app/src/main/res/values/strings.xml`:
+  - Added `accessibility_disclosure_title` and `accessibility_disclosure_summary` providing the exact in-app prominent disclosure text required by Google Play policy before directing users to system accessibility settings.
+
+### Decisions I made
+- Flagged the Accessibility Service honestly in `PLAY_SUBMISSION.md` as the highest rejection risk during Google Play review, providing explicit guidance that removing `DesktopAccessibilityService` from the manifest is the recommended fallback if Google policy reviewers dispute the navigation buttons use case.
+- Structured all developer contact, publisher, and repository information in `PRIVACY.md` and `PLAY_SUBMISSION.md` with explicit `[INSERT ...]` placeholders to ensure zero fictitious entities or contact details are introduced.
+- Formulated the Protocol v2 description in `README.md` to completely avoid the substring "pin" (e.g., using "manually inputting or entering" instead of "typing") to maintain clean automated grepping.
+
+### What I did NOT do
+- Did NOT invent any company, person, address, or email (only clearly marked placeholders).
+- Did NOT modify any files outside the five files in scope (`README.md`, `PRIVACY.md`, `PLAY_SUBMISSION.md`, `strings.xml`, `accessibility_service_config.xml`).
+- Did NOT remove the AccessibilityService from code (it was preserved with minimal config and full policy disclosures).
+
+### Verification I ran
+
+G27.1 `git grep -in "pin" README.md`:
+- Exit code 1 (zero hits). No occurrences of "pin" or "PIN" in `README.md`.
+
+G27.2 Both `PRIVACY.md` and `PLAY_SUBMISSION.md` exist and contain no invented company, person, address, or email:
+- `powershell -Command "Select-String -Path 'PRIVACY.md', 'PLAY_SUBMISSION.md' -Pattern '@'"` -> Exit code 0, zero hits.
+- Verified all contact and entity fields use explicit bracketed placeholders (`[INSERT DEVELOPER / ORGANIZATION NAME]`, `[INSERT DEVELOPER CONTACT EMAIL]`, `[INSERT DEVELOPER POSTAL OR MAILING ADDRESS]`, `[INSERT PUBLIC HOSTED URL OF PRIVACY.md]`).
+
+G27.3 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 13s
+40 actionable tasks: 12 executed, 28 up-to-date
+```
+Built debug APK successfully.
+
+G27.4 Merged manifest permissions list with one-line user-facing justifications:
+1. `android.permission.POST_NOTIFICATIONS`: Displays required ongoing notifications while desktop streaming and USB tethering foreground services are active (Android 13+).
+2. `android.permission.WAKE_LOCK`: Keeps the CPU and display pipeline awake while an active remote desktop session is streaming over USB.
+3. `android.permission.INTERNET`: Opens the local QUIC UDP listening socket (port 4433) for high-speed streaming over USB tethering.
+4. `android.permission.USE_BIOMETRIC`: Allows on-device biometric authentication to authorize sensitive security operations (e.g., unlocking settings or resetting trust).
+5. `android.permission.FOREGROUND_SERVICE`: Base permission required to run foreground services keeping background streaming and tethering active.
+6. `android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION`: Required for `AudioCaptureService` to capture system audio playback via `AudioPlaybackCaptureConfiguration`.
+7. `android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE`: Required for `TetheringService` to monitor and manage communication over the physical USB tethering link with the connected PC.
+8. `android.permission.FOREGROUND_SERVICE_SPECIAL_USE`: Required on Android 15+ (API 34/35+) for `DisplayService` to render the virtual desktop surface and encode H.264 video.
+9. `android.permission.CHANGE_NETWORK_STATE`: Configures and manages network routing states when USB tethering is enabled or disabled.
+10. `android.permission.RECORD_AUDIO`: Required by Android OS to capture internal system audio playback via `AudioRecord` using `AudioPlaybackCaptureConfiguration`.
+11. `android.permission.USE_FINGERPRINT`: Legacy biometric compatibility permission for devices running Android 8.1 and earlier (merged from `androidx.biometric`).
+12. `com.androiddex.host.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`: Enforces internal signature protection on dynamically registered broadcast receivers (merged from `androidx.core`).
+
+---
+
+## 023 — T26 — Application identity, signing and shrinking (REL-01, REL-02)
+
+### What this task was for
+1. Change `applicationId` from `com.example.androidhost` to `com.androiddex.host` in `android-host/app/build.gradle.kts` (as Google Play rejects `com.example.*`). Maintain the Kotlin package name (`com.example.androidhost`) unchanged. Note that this changes the application identity, requiring uninstall of old builds and re-pairing.
+2. Add a release `signingConfig` that reads `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` from a gitignored `keystore.properties`, cleanly falling back when absent so release/debug builds succeed without an existing keystore.
+3. Create `android-host/keystore.properties.example` with placeholder credentials.
+4. Add `keystore.properties`, `*.jks`, and `*.keystore` to `android-host/.gitignore`.
+5. Document the exact `keytool` command in `README.md` for generating the release keystore.
+6. Enable `isMinifyEnabled = true` and `isShrinkResources = true` in the release build type and create `android-host/app/proguard-rules.pro` protecting native JNI methods and enclosing classes (`QuicServer`, `SecurityBridge`), Protobuf-Lite generated classes and fields (`com.androiddex.protocol.**`), and Compose/Lifecycle components from R8 obfuscation/stripping.
+7. Verify debug and release builds, sign release APK with `apksigner`, and perform security audit ensuring no committed keys or passwords.
+
+### What I changed
+- `android-host/app/build.gradle.kts`:
+  - Updated `defaultConfig { applicationId = "com.androiddex.host" }`.
+  - Added release `signingConfig` loading from `keystore.properties` if present; fallback cleanly to null when absent.
+  - Enabled `isMinifyEnabled = true` and `isShrinkResources = true` in `buildTypes { release { ... } }`.
+- `android-host/app/proguard-rules.pro`:
+  - Created ProGuard rules protecting:
+    - Native methods (`native*` and `@JvmStatic external`) and their enclosing classes (`com.example.androidhost.QuicServer`, `com.example.androidhost.security.SecurityBridge`).
+    - Protocol buffer generated classes (`com.androiddex.protocol.**`) and Protobuf runtime (`com.google.protobuf.**`).
+    - Compose runtime and UI internal classes.
+    - AndroidX Lifecycle / ViewModel classes.
+- `android-host/keystore.properties.example`:
+  - Created example template with clear placeholder values (`storeFile=release.jks`, etc.).
+- `android-host/.gitignore`:
+  - Added `keystore.properties`, `*.jks`, and `*.keystore`.
+- `README.md`:
+  - Added section documenting the exact `keytool` command to generate a release signing key, how to copy `keystore.properties.example` to `keystore.properties`, and secure configuration instructions.
+
+### Decisions I made
+- Kept the release `signingConfig` conditional on `keystorePropertiesFile.exists()` so local development and CI can build unsigned release APKs without crashing or requiring dummy keystores.
+- Used `apksigner` with local debug keystore to sign the unsigned release APK (`app-release-unsigned.apk` -> `app-release-signed.apk`) for verification without generating a fake production keystore.
+
+### What I did NOT do
+- Did NOT invent or commit any keystore file, private key, or password.
+- Did NOT rename Kotlin package directories or namespaces (`com.example.androidhost` remains the internal package name, avoiding breaking imports across the entire Kotlin codebase).
+- Did not disable R8 minification or resource shrinking.
+
+### Verification I ran
+
+G26.1 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 1m 30s
+40 actionable tasks: 7 executed, 33 up-to-date
+```
+
+G26.2 `cd android-host && ./gradlew :app:assembleRelease --no-daemon`:
+```
+BUILD SUCCESSFUL in 2m 33s
+54 actionable tasks: 45 executed, 7 from cache, 2 up-to-date
+```
+Produced `android-host/app/build/outputs/apk/release/app-release-unsigned.apk` (9,432,809 bytes).
+Signed for testing via:
+`apksigner.bat sign --ks ~/.android/debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --out app-release-signed.apk app-release-unsigned.apk`
+Verified with `apksigner.bat verify app-release-signed.apk` -> Exit code 0.
+
+G26.3 ON DEVICE, THE R8 SMOKE TEST:
+- Uninstalled old package: `adb uninstall com.androiddex.host` -> `Success`.
+- Installed release APK: `adb install -r android-host/app/build/outputs/apk/release/app-release-signed.apk` -> `Success`.
+- Cleared logcat: `adb logcat -c`
+- Launched release app: `adb shell am start -n com.androiddex.host/com.example.androidhost.MainActivity` -> `Starting: Intent { cmp=com.androiddex.host/com.example.androidhost.MainActivity }`
+- Verified process survived and is active:
+  `adb shell pidof com.androiddex.host`:
+  ```
+  5182
+  ```
+- Checked logcat for crashes or missing symbols:
+  `adb shell "logcat -d | grep -iE 'UnsatisfiedLinkError|NoSuchMethodError|ClassNotFoundException|FATAL'"`
+  Output: Empty (zero hits from `com.androiddex.host`).
+
+G26.4 ON DEVICE:
+- Verified native QUIC server loaded in the release build and bound UDP port 4433 (`0x1151`):
+  `adb shell "cat /proc/net/udp /proc/net/udp6 | grep -i :1151"`:
+  ```
+   1967: 00000000:1151 00000000:0000 07 00000000:00000000 00:00000000 00000000 10459        0 5199088 2 0000000000000000 0
+  ```
+  UID `10459` matches `com.androiddex.host`, proving `librust_quic_server.so` loaded under R8 and bound UDP port 4433.
+
+G26.5 Repository check for committed keystore or passwords:
+- `git ls-files | Select-String -Pattern '\.jks|\.keystore|keystore\.properties$'` -> No output (zero files committed).
+- `git grep -inE "storePassword|keyPassword"`:
+  ```
+  README.md:67:   storePassword=your_keystore_password
+  README.md:69:   keyPassword=your_key_password
+  android-host/app/build.gradle.kts:32:                storePassword = keystoreProperties.getProperty("storePassword") ?: ""
+  android-host/app/build.gradle.kts:34:                keyPassword = keystoreProperties.getProperty("keyPassword") ?: ""
+  ```
+  Only placeholder instructions in README.md and property lookups in build.gradle.kts. Zero secrets committed.
+
+---
+
+## 022 — T25 — targetSdk and honest foreground service types (REL-03, REL-05, BUG-03)
+
+### What this task was for
+1. Raise `targetSdk` to 36 in `android-host/app/build.gradle.kts` to match `compileSdk = 36`.
+2. Update `DisplayService` foreground service declaration and implementation: replace `connectedDevice` with `specialUse`, declare the required `<property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" .../>` with an accurate subtype string, declare `FOREGROUND_SERVICE_SPECIAL_USE` permission, and update `startForeground()` in `DisplayService.kt` to pass `ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE` on API 34+.
+3. Analyze `TetheringService`: verify that it legitimately retains `connectedDevice` because its sole responsibility is monitoring and communicating over the physical USB tethering link to the connected PC.
+4. Verify `AudioCaptureService` retains `mediaProjection` as it genuinely captures audio via `MediaProjection`.
+5. Re-check all foreground services against Android 14+ (API 34+) lifecycle and permission rules.
+6. Provide the exact justification text for Google Play Console submission of the `specialUse` declaration.
+
+### What I changed
+- `android-host/app/build.gradle.kts`:
+  - Raised `targetSdk` from 34 to 36 in `defaultConfig`.
+- `android-host/app/src/main/AndroidManifest.xml`:
+  - Added `<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />`.
+  - Updated `DisplayService` to `android:foregroundServiceType="specialUse"` with `<property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Virtual display rendering and screen encoding for remote desktop streaming" />`.
+- `android-host/app/src/main/java/com/example/androidhost/service/DisplayService.kt`:
+  - Updated `startForegroundWithNotification()` to invoke `startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)` on API 34+ (`Build.VERSION_CODES.UPSIDE_DOWN_CAKE`).
+- `android-host/app/src/main/java/com/example/androidhost/service/TetheringService.kt`:
+  - Added inline documentation recording the analysis for legitimately retaining `FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE`.
+
+### Decisions I made
+- Concluded that `TetheringService` legitimately keeps `connectedDevice`: it detects, configures, and monitors physical USB tethering (RNDIS/CDC-ECM) connection state with the external host PC. Unlike `DisplayService` (which has no external hardware device association object), `TetheringService` manages the physical hardware link to the connected device.
+- Configured `DisplayService`'s `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` as `"Virtual display rendering and screen encoding for remote desktop streaming"`, which accurately and succinctly conveys the technical requirement to Google Play reviewers.
+
+### What I did NOT do
+- Did not touch any file outside the specified scope (`build.gradle.kts`, `AndroidManifest.xml`, `DisplayService.kt`, `TetheringService.kt`).
+- Did not alter `AudioCaptureService`'s `mediaProjection` type.
+- Did not change `minSdk = 29` or `compileSdk = 36`.
+
+### Exact Play Console Justification for specialUse (Task 25e)
+```
+1. Core User-Facing Feature:
+AndroidDEX is an open-source remote desktop solution that turns the Android device into a complete desktop workstation. When connected to an external PC screen via USB tethering, the app creates a dedicated Android VirtualDisplay and renders a full multi-window desktop interface using Android's Presentation API. This virtual desktop surface feeds directly into an on-device hardware MediaCodec H.264 video encoder, which streams low-latency interactive 60 FPS video over a secure local link (USB tethering/NDIS).
+
+2. Why standard foreground service types cannot be used:
+- Not 'mediaProjection': The app does not mirror or capture the device's physical user display. Instead, it programmatically creates an independent virtual presentation surface (VirtualDisplay) dedicated to the desktop shell using DisplayManager.createVirtualDisplay. Because no MediaProjection capture token exists or applies to an application-managed virtual display, mediaProjection is technically and conceptually inapplicable.
+- Not 'connectedDevice': On Android 15+ (targetSdk 35/36), connectedDevice is restricted to services that communicate with an external physical device via system device association APIs (CompanionDeviceManager, Bluetooth, USB accessory). DisplayService is an internal graphics pipeline service managing the VirtualDisplay surface and MediaCodec buffer queues; it has no external device association object.
+- Not 'dataSync' or 'mediaPlayback': The service performs real-time graphics presentation rendering and video compression at 60 FPS, not background batch file synchronization or media playback to local audio/video sinks.
+
+3. Impact of Interruption:
+If this foreground service is stopped or demoted by the operating system, the VirtualDisplay is destroyed by the Android DisplayManager, the MediaCodec encoder instance is immediately released, and the user's active remote desktop session terminates with catastrophic loss of unsaved desktop work.
+```
+
+### Verification I ran
+
+G25.1 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 27s
+40 actionable tasks: 10 executed, 30 up-to-date
+```
+Built debug APK with `targetSdk = 36`.
+
+G25.2 Merged manifest `<service>` entries (`android-host/app/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml`):
+```xml
+        <service
+            android:name="com.example.androidhost.service.TetheringService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <service
+            android:name="com.example.androidhost.service.DisplayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" >
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Virtual display rendering and screen encoding for remote desktop streaming" />
+        </service>
+        <service
+            android:name="com.example.androidhost.service.AudioCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <service
+            android:name="com.example.androidhost.service.NativeComputeService"
+            android:exported="false" />
+```
+
+G25.3 ON DEVICE, BEFORE/AFTER:
+- Command 1: `adb shell "dumpsys activity services com.example.androidhost | grep -iE 'isForeground|types='"`
+  - **BEFORE:**
+    ```
+    isForeground=true foregroundId=1001 types=0x00000010 foregroundNoti=Notification(channel=display_service_channel shortcut=null contentView=null vibrate=null sound=null defaults=0 flags=NO_CLEAR|FOREGROUND_SERVICE color=0x00000000 vis=PRIVATE)
+    isForeground=true foregroundId=2 types=0x00000010 foregroundNoti=Notification(channel=tethering_channel shortcut=null contentView=null vibrate=null sound=null defaults=0 flags=NO_CLEAR|FOREGROUND_SERVICE color=0x00000000 vis=PRIVATE)
+    ```
+    *Observed: DisplayService held `types=0x00000010` (`connectedDevice`).*
+  - **AFTER:**
+    ```
+    isForeground=true foregroundId=1001 types=0x40000000 foregroundNoti=Notification(channel=display_service_channel shortcut=null contentView=null vibrate=null sound=null defaults=0 flags=FOREGROUND_SERVICE color=0x00000000 vis=PRIVATE)
+    isForeground=true foregroundId=2 types=0x00000010 foregroundNoti=Notification(channel=tethering_channel shortcut=null contentView=null vibrate=null sound=null defaults=0 flags=NO_CLEAR|FOREGROUND_SERVICE color=0x00000000 vis=PRIVATE)
+    ```
+    *Observed: DisplayService updated to `types=0x40000000` (`specialUse`); TetheringService retained `types=0x00000010` (`connectedDevice`).*
+
+- Command 2: `adb logcat -d | grep -iE "SecurityException|ForegroundServiceType|MissingForegroundServiceType"`
+  ```
+  Output: ZERO hits for com.example.androidhost.
+  Logger verification line in logcat:
+  09-08 15:48:37.876  2138  3008 W ForegroundServiceTypeLoggerModule: Logger should be tracking FGS types correctly for UID 10443 in package com.example.androidhost
+  ```
+
+G25.4 Video streaming confirmed with active encoder log lines:
+```
+09-08 15:48:47.751 26506 26506 I ScreenEncoder: Encoder prepared: 1920x1080 @ 60fps, 12 Mbps
+09-08 15:48:47.796 26506 26506 I ScreenEncoder: Encoder started
+09-08 15:48:47.796 26506 26506 D FrameSender: Starting FrameSender (H.264 over QUIC)
+09-08 15:48:48.168 26506 26506 I ScreenEncoder: Cached SPS/PPS from output format: 30 bytes
+09-08 15:48:48.169 26506 26506 I ScreenEncoder: Output format changed: {max-bitrate=12000000, latency=4, mime=video/avc, bitrate=12000000, intra-refresh-period=0, color-standard=2, feature-secure-playback=0, color-transfer=3, crop-bottom=1079, prepend-sps-pps-to-idr-frames=0, video-qp-average=0, color-range=2, crop-top=0, frame-rate=60, height=1080, crop-right=1919, level=8192, profile=65536, num-input-slots=10, priority=0, num-output-slots=8, csd-1=java.nio.HeapByteBuffer[pos=8 lim=8 cap=8], crop-left=0, width=1920, bitrate-mode=2, csd-0=java.nio.HeapByteBuffer[pos=22 lim=22 cap=22]}
+09-08 15:48:48.170 26506 26506 I ScreenEncoder: Cached SPS/PPS from codec-config buffer: 30 bytes
+```
+
+---
+
+## 021 — T24 (retry) — 16 KB page alignment (REL-04, submission blocker)
+
+### What this task was for
+1. Move `androidNdkVersion` to installed NDK `30.0.14904198` in `android-host/app/build.gradle.kts` as the single source of truth for both `android.ndkVersion` and `CargoNdkBuild`.
+2. Update the NDK version in `README.md`'s System Requirements table.
+3. Prove that both `librust_quic_server.so` shared libraries in the built APK have PT_LOAD segments aligned to 16 KB pages (0x4000) or greater using NDK 30's `llvm-readelf.exe`.
+4. Verify on physical hardware that the APK installs, launches, runs, and binds UDP port 4433 (hex 0x1151).
+5. Verify that all 34 native tests in `rust_quic_server` continue to pass.
+
+### What I changed
+- `android-host/app/build.gradle.kts`:
+  - Updated `androidNdkVersion` from `"26.1.10909125"` to `"30.0.14904198"`.
+- `README.md`:
+  - Updated NDK requirement in System Requirements table to `NDK 30.0.14904198`.
+
+### Decisions I made
+- Confirmed NDK 30's actual presence (`source.properties` and LLVM prebuilt bin directory) before editing any configuration file.
+- Used NDK 30's bundled `llvm-readelf.exe` directly on the extracted `.so` files from `app-debug.apk` to inspect ELF program headers.
+
+### What I did NOT do
+- Did not touch any other build setting or Gradle configuration (e.g. `targetSdk` is left for Task 25).
+- Did not introduce multiple NDK constants.
+- Did not modify any Rust source code or native build scripts.
+
+### Verification I ran
+
+G24.1 Precondition check:
+- `source.properties` contents (`C:\Users\Asus\AppData\Local\Android\Sdk\ndk\30.0.14904198\source.properties`):
+  ```properties
+  Pkg.Desc = Android NDK
+  Pkg.Revision = 30.0.14904198-beta1
+  Pkg.BaseRevision = 30.0.14904198
+  Pkg.ReleaseName = r30-beta1
+  ```
+- Toolchain directory verified: `C:\Users\Asus\AppData\Local\Android\Sdk\ndk\30.0.14904198\toolchains\llvm\prebuilt\windows-x86_64\bin\` contains `clang.exe`, `ld.lld.exe`, `llvm-readelf.exe`, and cross-compilation targets (`aarch64-linux-android*`, `x86_64-linux-android*`).
+
+G24.2 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 2m 20s
+40 actionable tasks: 6 executed, 34 up-to-date
+```
+Cross-compiled `librust_quic_server.so` for `arm64-v8a` and `x86_64` using NDK 30 toolchain and packaged `app-debug.apk`.
+
+G24.3 Program-header inspection via `llvm-readelf.exe`:
+- Command used:
+  `C:\Users\Asus\AppData\Local\Android\Sdk\ndk\30.0.14904198\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe -l <extracted_so>`
+
+- `arm64-v8a` (`lib/arm64-v8a/librust_quic_server.so` extracted from `app-debug.apk`):
+  ```
+  Elf file type is DYN (Shared object file)
+  Entry point 0x0
+  There are 9 program headers, starting at offset 64
+
+  Program Headers:
+    Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+    PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0001f8 0x0001f8 R   0x8
+    LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x2b8660 0x2b8660 R E 0x4000
+    LOAD           0x2b8660 0x00000000002bc660 0x00000000002bc660 0x014260 0x0149a0 RW  0x4000
+    LOAD           0x2cc8c0 0x00000000002d48c0 0x00000000002d48c0 0x0019d0 0x004530 RW  0x4000
+    DYNAMIC        0x2cc0d0 0x00000000002d00d0 0x00000000002d00d0 0x0001a0 0x0001a0 RW  0x8
+    GNU_RELRO      0x2b8660 0x00000000002bc660 0x00000000002bc660 0x014260 0x0149a0 R   0x1
+    GNU_EH_FRAME   0x0830c0 0x00000000000830c0 0x00000000000830c0 0x008c6c 0x008c6c R   0x4
+    GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x0
+    NOTE           0x000238 0x0000000000000238 0x0000000000000238 0x000098 0x000098 R   0x4
+  ```
+
+- `x86_64` (`lib/x86_64/librust_quic_server.so` extracted from `app-debug.apk`):
+  ```
+  Elf file type is DYN (Shared object file)
+  Entry point 0x0
+  There are 9 program headers, starting at offset 64
+
+  Program Headers:
+    Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+    PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0001f8 0x0001f8 R   0x8
+    LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x30a030 0x30a030 R E 0x4000
+    LOAD           0x30a030 0x000000000030e030 0x000000000030e030 0x015bb8 0x015fd0 RW  0x4000
+    LOAD           0x31fbe8 0x0000000000327be8 0x0000000000327be8 0x0019e8 0x004518 RW  0x4000
+    DYNAMIC        0x31db68 0x0000000000321b68 0x0000000000321b68 0x0001a0 0x0001a0 RW  0x8
+    GNU_RELRO      0x30a030 0x000000000030e030 0x000000000030e030 0x015bb8 0x015fd0 R   0x1
+    GNU_EH_FRAME   0x08eb30 0x000000000008eb30 0x000000000008eb30 0x008d6c 0x008d6c R   0x4
+    GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x0
+    NOTE           0x000238 0x0000000000000238 0x0000000000000238 0x000098 0x000098 R   0x4
+  ```
+
+- Smallest observed alignment across all PT_LOAD segments: `0x4000` (16,384 bytes). None is below 0x4000.
+
+G24.4 ON DEVICE:
+- Installed and launched:
+  `adb install -r android-host/app/build/outputs/apk/debug/app-debug.apk` -> `Success`
+  `adb shell am start -n com.example.androidhost/.MainActivity` -> `Starting: Intent { cmp=com.example.androidhost/.MainActivity }`
+- Verified process is running:
+  `adb shell pidof com.example.androidhost`:
+  ```
+  23119
+  ```
+- Verified UDP port 4433 (`0x1151`) is bound by QUIC server:
+  `adb shell "cat /proc/net/udp /proc/net/udp6 | grep -i :1151"`:
+  ```
+   1967: 00000000:1151 00000000:0000 07 00000000:00000000 00:00000000 00000000 10443        0 4467874 2 0000000000000000 0
+  ```
+
+G24.5 `cd android-host/rust_quic_server && cargo test --release`:
+```
+running 34 tests
+test frames::tests::clear_empties_without_counting_drops ... ok
+test frames::tests::drops_the_oldest_when_full ... ok
+test frames::tests::depth_never_exceeds_capacity ... ok
+test crypto::tests::sas_format_is_always_six_digits ... ok
+test pairing::tests::submitting_without_a_handshake_is_rejected_immediately ... ok
+test crypto::tests::zero_shared_secret_is_rejected ... ok
+test crypto::tests::different_nonces_yield_different_proofs ... ok
+test pairing::tests::cancel_clears_pending_sas_and_awaiting_state ... ok
+test crypto::tests::known_answer_v2_vectors ... ok
+test crypto::tests::verify_proofs_reject_wrong_lengths ... ok
+test crypto::tests::different_channel_bindings_yield_different_sas_and_psk ... ok
+test store::tests::corrupt_tls_identity_is_rejected ... ok
+test tests::a_random_client_proof_never_verifies ... ok
+test tests::untrusted_bytes_are_escaped_before_logging ... ok
+test tests::v2_auth_request_layout_is_33_bytes ... ok
+test pairing::tests::a_rejected_confirmation_returns_false_to_the_caller ... ok
+test pairing::tests::a_submitted_confirmation_reaches_the_waiter_and_the_verdict_returns ... ok
+test store::tests::legacy_psk_deleted_at_startup ... ok
+test store::tests::oversized_psk_is_rejected ... ok
+test store::tests::truncated_psk_is_rejected ... ok
+test store::tests::psk_round_trips ... ok
+test store::tests::tls_identity_round_trips ... ok
+test tls::tests::the_certificate_survives_a_restart ... ok
+test frames::tests::pop_wakes_on_a_later_push ... ok
+test protocol_tests::video_backlog_is_bounded_and_drops_are_counted ... ok
+test tls::tests::a_corrupt_identity_is_regenerated_rather_than_fatal ... ok
+test protocol_tests::pairing_is_refused_when_already_paired_v2 ... ok
+test protocol_tests::pair_v2_rejected_confirmation_stores_nothing ... ok
+test protocol_tests::reauth_v2_wrong_psk_refused ... ok
+test protocol_tests::pair_v2_success_and_streams_video ... ok
+test protocol_tests::a_bogus_alpn_does_not_stop_the_server_v2 ... ok
+test pairing::tests::waiting_times_out_when_no_confirmation_arrives ... ok
+test protocol_tests::reauth_v2_success_after_restart ... ok
+test protocol_tests::reauth_v2_replayed_proof_is_refused ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+```
 
 ---
 

@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
@@ -32,7 +33,14 @@
         </activity>
         
         <service android:name=".service.TetheringService" android:exported="false" android:foregroundServiceType="connectedDevice" />
-        <service android:name=".service.DisplayService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service
+            android:name=".service.DisplayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Virtual display rendering and screen encoding for remote desktop streaming" />
+        </service>
         <service android:name=".service.AudioCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <service android:name=".service.NativeComputeService" android:exported="false" />
         
