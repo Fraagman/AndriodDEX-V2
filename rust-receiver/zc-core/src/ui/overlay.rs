@@ -109,7 +109,7 @@ impl OverlayUi {
 
         match phase {
             ConnectionPhase::Connected => {} // Draw nothing full-screen
-            ConnectionPhase::WaitingForPin(pin) => {
+            ConnectionPhase::WaitingForSas(sas) => {
                 painter.rect(
                     banner_rect,
                     Rounding::ZERO,
@@ -117,13 +117,29 @@ impl OverlayUi {
                     Stroke::new(1.0, Color32::WHITE),
                 );
                 
-                let formatted_pin = pin.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+                painter.text(
+                    banner_rect.center() - Vec2::new(0.0, 50.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Pairing Code",
+                    FontId::proportional(22.0),
+                    Color32::from_rgb(180, 180, 180),
+                );
+
+                let formatted_sas = sas.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
                 painter.text(
                     banner_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    format!("Your PIN: {}", formatted_pin),
-                    FontId::proportional(48.0),
+                    formatted_sas,
+                    FontId::proportional(56.0),
                     Color32::WHITE,
+                );
+
+                painter.text(
+                    banner_rect.center() + Vec2::new(0.0, 55.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Check that this 6-digit code matches the code on your phone screen.\nConfirm or reject the pairing on your phone.",
+                    FontId::proportional(16.0),
+                    Color32::from_rgb(220, 220, 220),
                 );
             }
             ConnectionPhase::CertificateChanged => {

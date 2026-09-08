@@ -1,100 +1,165 @@
-//! PSK derivation and auth-token verification.
+//! PSK derivation, SAS formatting, and Protocol v2 mutual authentication proofs.
 //!
-//! This is the phone half of the scheme implemented on the PC in
-//! `rust-receiver/zc-security/src/pairing.rs` and `rust-receiver/zc-network/src/client.rs`.
-//! Both sides must produce identical bytes, so the salt, the IKM layout and the info
-//! string below are copied from there verbatim and covered by the tests at the bottom
-//! of this file. Doing this in Rust rather than Kotlin is intentional: a second HKDF
-//! implementation is a second chance to get the salt or info string wrong, and the
-//! failure mode is a silent "wrong PIN" that is very hard to diagnose.
+//! Replaces legacy PIN-based KDF with Protocol v2 (ECDH + SAS + TLS channel binding).
+//! Uses `ring` for X25519, HKDF-SHA256, and HMAC-SHA256.
 
-// `ring::constant_time` carries a deprecation notice in 0.17.14 ("internal module"), but
-// it is still the only constant-time comparison ring exposes and it is what the receiver
-// workspace depends on. The alternative — hand-rolling a compare — is easy to get wrong
-// in a way no test detects, so the deprecation is accepted deliberately here.
 #[allow(deprecated)]
 use ring::constant_time;
-use ring::{digest, hkdf};
-
-/// HKDF salt. Must match `zc-security::pairing::derive_psk`.
-const HKDF_SALT: &[u8] = b"androiddex-v1";
-/// HKDF info string. Must match `zc-security::pairing::derive_psk`.
-const HKDF_INFO: &[u8] = b"psk";
-/// Domain separator for the authentication token. Must match `zc-network::client`.
-const AUTH_CONTEXT: &[u8] = b"auth";
+use ring::{digest, hkdf, hmac};
 
 pub const PSK_LEN: usize = 32;
-pub const TOKEN_LEN: usize = 32;
+pub const SAS_LEN: usize = 6;
+pub const PROOF_LEN: usize = 32;
+pub const NONCE_LEN: usize = 32;
+pub const BINDING_LEN: usize = 32;
 pub const EPHEMERAL_KEY_LEN: usize = 32;
-pub const PIN_LEN: usize = 6;
 
 pub type Psk = [u8; PSK_LEN];
 
-/// `hkdf::Prk::expand` needs a `KeyType` to know the output length.
-struct Okm32;
-
-impl hkdf::KeyType for Okm32 {
-    fn len(&self) -> usize {
-        PSK_LEN
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub enum CryptoError {
+    AllZeroSharedSecret,
+    DerivationFailed,
 }
 
-/// True when `pin` is exactly six ASCII digits.
-///
-/// The PC generates the PIN with `format!("{:06}", n)` for `n < 1_000_000`, so anything
-/// else can never be a legitimate PIN and is rejected before it reaches the KDF.
-pub fn is_well_formed_pin(pin: &str) -> bool {
-    pin.len() == PIN_LEN && pin.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// `HKDF-SHA256(salt = "androiddex-v1", ikm = pin_ascii || ephemeral_public_key, info = "psk")`.
-pub fn derive_psk(pin: &str, ephemeral_public_key: &[u8; EPHEMERAL_KEY_LEN]) -> Psk {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, HKDF_SALT);
-
-    let mut ikm = Vec::with_capacity(pin.len() + EPHEMERAL_KEY_LEN);
-    ikm.extend_from_slice(pin.as_bytes());
-    ikm.extend_from_slice(ephemeral_public_key);
-
-    let prk = salt.extract(&ikm);
-
-    // Both calls below are infallible for a 32-byte SHA-256 output: `expand` only errors
-    // when the requested length exceeds 255*HashLen, and `fill` only when the destination
-    // length differs from the KeyType length. Neither can happen here, but the crate has
-    // a no-unwrap rule, so they are handled rather than asserted.
-    let mut psk = [0u8; PSK_LEN];
-    match prk.expand(&[HKDF_INFO], Okm32) {
-        Ok(okm) => {
-            if okm.fill(&mut psk).is_err() {
-                psk = [0u8; PSK_LEN];
+impl std::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CryptoError::AllZeroSharedSecret => {
+                write!(f, "low-order point check failed: shared secret Z is all zeros")
             }
-        }
-        Err(_) => {
-            psk = [0u8; PSK_LEN];
+            CryptoError::DerivationFailed => write!(f, "cryptographic derivation failed"),
         }
     }
-    psk
 }
 
-/// `SHA256(psk || "auth")` — the value the PC puts on the wire after the `A` tag.
-pub fn auth_token(psk: &Psk) -> [u8; TOKEN_LEN] {
-    let mut ctx = digest::Context::new(&digest::SHA256);
-    ctx.update(psk);
-    ctx.update(AUTH_CONTEXT);
-    let d = ctx.finish();
+impl std::error::Error for CryptoError {}
 
-    let mut token = [0u8; TOKEN_LEN];
-    // SHA-256 always yields exactly 32 bytes, so this copy is exact.
-    token.copy_from_slice(d.as_ref());
-    token
+impl From<ring::error::Unspecified> for CryptoError {
+    fn from(_: ring::error::Unspecified) -> Self {
+        CryptoError::DerivationFailed
+    }
 }
 
-/// Constant-time check of a presented token against the one `psk` implies.
+struct Okm4;
+
+impl hkdf::KeyType for Okm4 {
+    fn len(&self) -> usize {
+        4
+    }
+}
+
+/// Derives the 6-digit SAS string and 32-byte PSK for Protocol v2 pairing.
 ///
-/// `==` on secrets leaks the length of the matching prefix through timing, which turns a
-/// 2^256 search into a 32-step one, so the comparison goes through `ring`.
+/// Steps 4-9 of Protocol v2 pairing:
+/// 4. Checks that shared secret Z is not all zeros (low-order point check).
+/// 6. transcript = SHA256( b"androiddex-pair-v2" || A || B || binding )
+/// 7. prk = HKDF-Extract(salt = transcript, ikm = Z) [HKDF-SHA256]
+/// 8. sas_bytes = HKDF-Expand(prk, info = b"sas", 4 bytes)
+///    sas = u32::from_be_bytes(sas_bytes) % 1_000_000, formatted as %06d
+/// 9. psk = HKDF-Expand(prk, info = b"psk", 32 bytes)
+pub fn derive_pairing_v2(
+    a: &[u8; EPHEMERAL_KEY_LEN],
+    b: &[u8; EPHEMERAL_KEY_LEN],
+    binding: &[u8; BINDING_LEN],
+    z: &[u8; 32],
+) -> Result<(String, Psk), CryptoError> {
+    // 4. Low-order point check: reject all-zero Z
+    #[allow(deprecated)]
+    if constant_time::verify_slices_are_equal(z, &[0u8; 32]).is_ok() {
+        return Err(CryptoError::AllZeroSharedSecret);
+    }
+
+    // 6. transcript = SHA256( b"androiddex-pair-v2" || A || B || binding )
+    let mut digest_ctx = digest::Context::new(&digest::SHA256);
+    digest_ctx.update(b"androiddex-pair-v2");
+    digest_ctx.update(a);
+    digest_ctx.update(b);
+    digest_ctx.update(binding);
+    let transcript = digest_ctx.finish();
+
+    // 7. prk = HKDF-Extract(salt = transcript, ikm = Z)
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, transcript.as_ref());
+    let prk = salt.extract(z);
+
+    // 8. sas_bytes = HKDF-Expand(prk, info = b"sas", 4 bytes)
+    let okm_sas = prk.expand(&[b"sas"], Okm4)?;
+    let mut sas_bytes = [0u8; 4];
+    okm_sas.fill(&mut sas_bytes)?;
+    let sas_num = u32::from_be_bytes(sas_bytes) % 1_000_000;
+    let sas = format!("{:06}", sas_num);
+
+    // 9. psk = HKDF-Expand(prk, info = b"psk", 32 bytes)
+    let okm_psk = prk.expand(&[b"psk"], hkdf::HKDF_SHA256)?;
+    let mut psk = [0u8; PSK_LEN];
+    okm_psk.fill(&mut psk)?;
+
+    Ok((sas, psk))
+}
+
+/// Computes server_proof:
+/// server_proof = HMAC-SHA256(psk, b"server-proof" || client_nonce || server_nonce || binding)
+pub fn server_proof(
+    psk: &Psk,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    binding: &[u8; BINDING_LEN],
+) -> [u8; PROOF_LEN] {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, psk);
+    let mut ctx = hmac::Context::with_key(&key);
+    ctx.update(b"server-proof");
+    ctx.update(client_nonce);
+    ctx.update(server_nonce);
+    ctx.update(binding);
+    let tag = ctx.sign();
+    let mut out = [0u8; PROOF_LEN];
+    out.copy_from_slice(tag.as_ref());
+    out
+}
+
+/// Computes client_proof:
+/// client_proof = HMAC-SHA256(psk, b"client-proof" || client_nonce || server_nonce || binding)
+pub fn client_proof(
+    psk: &Psk,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    binding: &[u8; BINDING_LEN],
+) -> [u8; PROOF_LEN] {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, psk);
+    let mut ctx = hmac::Context::with_key(&key);
+    ctx.update(b"client-proof");
+    ctx.update(client_nonce);
+    ctx.update(server_nonce);
+    ctx.update(binding);
+    let tag = ctx.sign();
+    let mut out = [0u8; PROOF_LEN];
+    out.copy_from_slice(tag.as_ref());
+    out
+}
+
+/// Verifies client_proof in constant time.
 #[allow(deprecated)]
-pub fn verify_auth_token(psk: &Psk, presented: &[u8]) -> bool {
-    let expected = auth_token(psk);
+pub fn verify_client_proof(
+    psk: &Psk,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    binding: &[u8; BINDING_LEN],
+    presented: &[u8],
+) -> bool {
+    let expected = client_proof(psk, client_nonce, server_nonce, binding);
+    constant_time::verify_slices_are_equal(&expected, presented).is_ok()
+}
+
+/// Verifies server_proof in constant time.
+#[allow(deprecated)]
+pub fn verify_server_proof(
+    psk: &Psk,
+    client_nonce: &[u8; NONCE_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    binding: &[u8; BINDING_LEN],
+    presented: &[u8],
+) -> bool {
+    let expected = server_proof(psk, client_nonce, server_nonce, binding);
     constant_time::verify_slices_are_equal(&expected, presented).is_ok()
 }
 
@@ -102,57 +167,119 @@ pub fn verify_auth_token(psk: &Psk, presented: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// Locks the derivation to a fixed vector. If this test ever changes value, the phone
-    /// and the PC have diverged and every paired device would silently stop connecting.
     #[test]
-    fn psk_derivation_is_stable() {
-        let key = [7u8; EPHEMERAL_KEY_LEN];
-        let psk = derive_psk("123456", &key);
-        assert_ne!(psk, [0u8; PSK_LEN], "derivation must not fall back to zeros");
+    fn known_answer_v2_vectors() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let binding = [0x33u8; 32];
+        let z = [0x44u8; 32];
+        let client_nonce = [0x55u8; 32];
+        let server_nonce = [0x66u8; 32];
 
-        // Recomputing gives the same answer; a different PIN does not.
-        assert_eq!(psk, derive_psk("123456", &key));
-        assert_ne!(psk, derive_psk("123457", &key));
-        assert_ne!(psk, derive_psk("123456", &[8u8; EPHEMERAL_KEY_LEN]));
-    }
+        let (sas, psk) = derive_pairing_v2(&a, &b, &binding, &z).expect("derive_pairing_v2");
+        let s_proof = server_proof(&psk, &client_nonce, &server_nonce, &binding);
+        let c_proof = client_proof(&psk, &client_nonce, &server_nonce, &binding);
 
-    #[test]
-    fn known_answer_psk() {
-        let key = [7u8; EPHEMERAL_KEY_LEN];
-        let expected: [u8; 32] = [
-            137, 103, 192, 249, 41, 149, 254, 88, 189, 58, 8, 253, 14, 220, 146, 84,
-            135, 25, 59, 133, 39, 54, 64, 211, 189, 223, 157, 201, 189, 78, 79, 172,
+        // Assert the exact four literals from Task 20:
+        assert_eq!(sas, "040666");
+
+        let expected_psk: [u8; 32] = [
+            21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195,
+            72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206,
         ];
-        assert_eq!(derive_psk("123456", &key), expected);
+        assert_eq!(psk, expected_psk);
+
+        let expected_server_proof: [u8; 32] = [
+            233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70,
+            203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241,
+        ];
+        assert_eq!(s_proof, expected_server_proof);
+
+        let expected_client_proof: [u8; 32] = [
+            215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97,
+            6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183,
+        ];
+        assert_eq!(c_proof, expected_client_proof);
+
+        // Constant time verification checks
+        assert!(verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, &s_proof));
+        assert!(verify_client_proof(&psk, &client_nonce, &server_nonce, &binding, &c_proof));
+
+        let mut bad_server_proof = s_proof;
+        bad_server_proof[0] ^= 1;
+        assert!(!verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, &bad_server_proof));
+
+        let mut bad_client_proof = c_proof;
+        bad_client_proof[0] ^= 1;
+        assert!(!verify_client_proof(&psk, &client_nonce, &server_nonce, &binding, &bad_client_proof));
     }
 
     #[test]
-    fn token_matches_only_for_the_right_psk() {
-        let key = [3u8; EPHEMERAL_KEY_LEN];
-        let good = derive_psk("482915", &key);
-        let bad = derive_psk("482916", &key);
+    fn zero_shared_secret_is_rejected() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let binding = [0x33u8; 32];
+        let z = [0x00u8; 32];
 
-        let token = auth_token(&good);
-        assert!(verify_auth_token(&good, &token));
-        assert!(!verify_auth_token(&bad, &token));
+        let result = derive_pairing_v2(&a, &b, &binding, &z);
+        assert_eq!(result, Err(CryptoError::AllZeroSharedSecret));
     }
 
     #[test]
-    fn token_of_wrong_length_is_rejected() {
-        let psk = derive_psk("000000", &[0u8; EPHEMERAL_KEY_LEN]);
-        assert!(!verify_auth_token(&psk, &[]));
-        assert!(!verify_auth_token(&psk, &[0u8; 31]));
-        assert!(!verify_auth_token(&psk, &[0u8; 33]));
+    fn sas_format_is_always_six_digits() {
+        assert_eq!(format!("{:06}", 0), "000000");
+        assert_eq!(format!("{:06}", 40666), "040666");
+        assert_eq!(format!("{:06}", 999999), "999999");
+        assert_eq!(format!("{:06}", 40666).len(), SAS_LEN);
     }
 
     #[test]
-    fn pin_shape_is_enforced() {
-        assert!(is_well_formed_pin("000000"));
-        assert!(is_well_formed_pin("999999"));
-        assert!(!is_well_formed_pin(""));
-        assert!(!is_well_formed_pin("12345"));
-        assert!(!is_well_formed_pin("1234567"));
-        assert!(!is_well_formed_pin("12345a"));
-        assert!(!is_well_formed_pin("12 456"));
+    fn different_channel_bindings_yield_different_sas_and_psk() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let z = [0x44u8; 32];
+        let binding1 = [0x33u8; 32];
+        let mut binding2 = [0x33u8; 32];
+        binding2[0] ^= 0xff;
+
+        let (sas1, psk1) = derive_pairing_v2(&a, &b, &binding1, &z).expect("derive 1");
+        let (sas2, psk2) = derive_pairing_v2(&a, &b, &binding2, &z).expect("derive 2");
+
+        assert_ne!(sas1, sas2, "channel binding change must alter SAS");
+        assert_ne!(psk1, psk2, "channel binding change must alter PSK");
+    }
+
+    #[test]
+    fn different_nonces_yield_different_proofs() {
+        let psk = [0x42u8; 32];
+        let binding = [0x33u8; 32];
+        let cn1 = [0x55u8; 32];
+        let mut cn2 = [0x55u8; 32];
+        cn2[0] ^= 0x01;
+        let sn = [0x66u8; 32];
+
+        let s_proof1 = server_proof(&psk, &cn1, &sn, &binding);
+        let s_proof2 = server_proof(&psk, &cn2, &sn, &binding);
+        let c_proof1 = client_proof(&psk, &cn1, &sn, &binding);
+        let c_proof2 = client_proof(&psk, &cn2, &sn, &binding);
+
+        assert_ne!(s_proof1, s_proof2);
+        assert_ne!(c_proof1, c_proof2);
+    }
+
+    #[test]
+    fn verify_proofs_reject_wrong_lengths() {
+        let psk = [0x42u8; 32];
+        let binding = [0x33u8; 32];
+        let cn = [0x55u8; 32];
+        let sn = [0x66u8; 32];
+        let s_proof = server_proof(&psk, &cn, &sn, &binding);
+
+        // Truncated proof
+        assert!(!verify_server_proof(&psk, &cn, &sn, &binding, &s_proof[..16]));
+        // Overlong proof
+        let mut long_proof = s_proof.to_vec();
+        long_proof.push(0x00);
+        assert!(!verify_server_proof(&psk, &cn, &sn, &binding, &long_proof));
     }
 }

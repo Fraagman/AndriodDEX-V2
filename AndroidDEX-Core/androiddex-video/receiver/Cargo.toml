@@ -1,7 +1,0 @@
-[package]
-name = "receiver"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-shared-protocol = { path = "../../shared-protocol" }

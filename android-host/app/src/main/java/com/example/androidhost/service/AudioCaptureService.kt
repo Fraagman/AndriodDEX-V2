@@ -40,30 +40,17 @@ class AudioCaptureService : Service() {
         // Flow to communicate service status to Compose UI
         val isServiceRunning = MutableStateFlow(false)
 
-        init {
-            tryRestoreMutedVolume()
-        }
-
-        fun tryRestoreMutedVolume(context: Context? = null) {
+        fun tryRestoreMutedVolume(context: Context) {
             try {
-                val ctx = context ?: try {
-                    val activityThreadClass = Class.forName("android.app.ActivityThread")
-                    val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
-                    currentApplicationMethod.invoke(null) as? Context
-                } catch (e: Exception) {
-                    null
-                }
-                if (ctx != null) {
-                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    if (prefs.contains(KEY_RESTORE_VOLUME)) {
-                        val volumeToRestore = prefs.getInt(KEY_RESTORE_VOLUME, -1)
-                        if (volumeToRestore >= 0) {
-                            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                            am?.setStreamVolume(AudioManager.STREAM_MUSIC, volumeToRestore, 0)
-                            Log.d(TAG, "Restored leftover muted volume from previous run: $volumeToRestore")
-                        }
-                        prefs.edit().remove(KEY_RESTORE_VOLUME).commit()
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                if (prefs.contains(KEY_RESTORE_VOLUME)) {
+                    val volumeToRestore = prefs.getInt(KEY_RESTORE_VOLUME, -1)
+                    if (volumeToRestore >= 0) {
+                        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                        am?.setStreamVolume(AudioManager.STREAM_MUSIC, volumeToRestore, 0)
+                        Log.d(TAG, "Restored leftover muted volume from previous run: $volumeToRestore")
                     }
+                    prefs.edit().remove(KEY_RESTORE_VOLUME).commit()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to restore muted volume", e)

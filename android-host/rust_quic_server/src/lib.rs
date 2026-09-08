@@ -2,17 +2,10 @@
 //!
 //! Two ALPNs are served on the same endpoint:
 //!
-//! * `androiddex-pairing` — first contact. The PC sends `P` + a 32-byte ephemeral public
-//!   key and displays a six-digit PIN. The user types that PIN on the phone; both sides
-//!   derive `HKDF-SHA256(salt = "androiddex-v1", ikm = pin || pubkey, info = "psk")`. The
-//!   phone answers `OK`, the PC then proves it derived the same PSK by sending
-//!   `A` + `SHA256(psk || "auth")` on a second bidirectional stream, and only a matching
-//!   token completes pairing.
-//! * `androiddex` — a device that already paired. It presents the same token; a mismatch
-//!   closes the connection without a reply and without changing the reported state.
-//!
-//! The PC half of this lives in `rust-receiver/zc-network/src/client.rs` and
-//! `rust-receiver/zc-security/src/pairing.rs`.
+//! * `androiddex-pair-v2` — first contact. Ephemeral X25519 key exchange + short
+//!   authentication string (SAS) comparison + TLS channel binding.
+//! * `androiddex-v2` — a device that already paired. Mutual challenge-response
+//!   proof exchange bound to the TLS session.
 //!
 //! Nothing in the network path may panic: every connection is driven by a spawned task,
 //! and this crate contains no `unwrap()`/`expect()` outside `#[cfg(test)]`.
@@ -39,9 +32,9 @@ use quinn::{Connection, Endpoint, SendStream, VarInt};
 use tokio::runtime::Runtime;
 use tokio::time::Instant;
 
-use crypto::{derive_psk, is_well_formed_pin, verify_auth_token, Psk};
+use crypto::Psk;
 use frames::FrameQueue;
-use pairing::PinChannel;
+use pairing::ConfirmationChannel;
 use store::SecureStore;
 
 // -- Constants shared with the Kotlin side --------------------------------------------
@@ -52,13 +45,11 @@ const STATE_PAIRING: i32 = 1;
 const STATE_AUTHENTICATED: i32 = 2;
 const STATE_DISCONNECTED: i32 = 3;
 
-const ALPN_STREAM: &[u8] = b"androiddex";
-const ALPN_PAIRING: &[u8] = b"androiddex-pairing";
+const ALPN_STREAM: &[u8] = b"androiddex-v2";
+const ALPN_PAIRING: &[u8] = b"androiddex-pair-v2";
 
 /// Whole-handshake budget for a pairing connection, covering the wait for the user.
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(60);
-/// A six-digit PIN is only a million guesses, so a connection gets very few tries.
-const MAX_PIN_ATTEMPTS: u32 = 5;
 /// An already-paired device has no human in the loop; it gets a much shorter budget.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -92,7 +83,7 @@ struct Server {
     video: Arc<FrameQueue>,
     audio: Arc<FrameQueue>,
     input_tx: Sender<Vec<u8>>,
-    pins: PinChannel,
+    confirmations: ConfirmationChannel,
     store: SecureStore,
     /// The pairing key of the currently paired PC, mirrored from disk.
     psk: Mutex<Option<Psk>>,
@@ -200,8 +191,8 @@ enum HandshakeError {
     Timeout(&'static str),
     Stream(String),
     Protocol(String),
-    NoPin,
-    AttemptsExhausted,
+    NoConfirmation,
+    ConfirmationRejected,
 }
 
 impl fmt::Display for HandshakeError {
@@ -210,10 +201,8 @@ impl fmt::Display for HandshakeError {
             Self::Timeout(what) => write!(f, "timed out waiting for {what}"),
             Self::Stream(e) => write!(f, "stream error: {e}"),
             Self::Protocol(e) => write!(f, "protocol error: {e}"),
-            Self::NoPin => write!(f, "no PIN was entered on the phone"),
-            Self::AttemptsExhausted => {
-                write!(f, "too many incorrect PINs ({MAX_PIN_ATTEMPTS})")
-            }
+            Self::NoConfirmation => write!(f, "no confirmation was entered on the phone"),
+            Self::ConfirmationRejected => write!(f, "user rejected confirmation on the phone"),
         }
     }
 }
@@ -275,15 +264,13 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
         }
     };
 
-    // rustls is built with only the ring provider, but installing it explicitly keeps the
-    // behaviour independent of which crate happens to touch rustls first.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let persisted_psk = store.load_psk();
     if persisted_psk.is_some() {
-        log_i!("a paired device is on record; PIN entry is not required");
+        log_i!("a paired device is on record; pairing confirmation is not required");
     } else {
-        log_i!("no paired device on record; the next PC must pair with a PIN");
+        log_i!("no paired device on record; next PC must pair with SAS confirmation");
     }
 
     let (input_tx, input_rx) = unbounded::<Vec<u8>>();
@@ -293,7 +280,7 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
         video: Arc::new(FrameQueue::new(VIDEO_QUEUE_DEPTH)),
         audio: Arc::new(FrameQueue::new(AUDIO_QUEUE_DEPTH)),
         input_tx,
-        pins: PinChannel::new(),
+        confirmations: ConfirmationChannel::new(),
         store,
         psk: Mutex::new(persisted_psk),
         sessions: AtomicUsize::new(0),
@@ -314,8 +301,6 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
 
 // -- Accept loop -----------------------------------------------------------------------
 
-/// Binds the QUIC endpoint. Split out from [`accept_loop`] so the protocol tests can bind
-/// an ephemeral port and learn which one they got.
 fn bind_endpoint(server: &Arc<Server>, addr: std::net::SocketAddr) -> Result<Endpoint, String> {
     let config = tls::build_server_config(&server.store, &[ALPN_STREAM, ALPN_PAIRING])?;
     Endpoint::server(config, addr).map_err(|e| format!("cannot bind {addr}: {e}"))
@@ -338,9 +323,6 @@ async fn run_endpoint(server: Arc<Server>, port: u16) {
 async fn accept_loop(server: Arc<Server>, endpoint: Endpoint) {
     server.state.store(STATE_IDLE, Ordering::SeqCst);
 
-    // Each connection runs in its own task. A connection that misbehaves — a truncated
-    // handshake, a bogus ALPN, a stalled stream — can therefore only affect itself; the
-    // accept loop keeps running.
     while let Some(incoming) = endpoint.accept().await {
         let server = server.clone();
         tokio::spawn(async move {
@@ -362,8 +344,6 @@ async fn handle_incoming(server: Arc<Server>, incoming: quinn::Incoming) {
         }
     };
 
-    // Attacker-controlled: a peer can complete a QUIC handshake and then present anything
-    // at all here, so both the presence of handshake data and its type are checked.
     let alpn = match negotiated_alpn(&conn) {
         Some(alpn) => alpn,
         None => {
@@ -389,7 +369,6 @@ fn negotiated_alpn(conn: &Connection) -> Option<Vec<u8>> {
     handshake.protocol
 }
 
-/// Renders untrusted bytes for a log line without letting them corrupt it.
 fn printable(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -403,7 +382,7 @@ fn printable(bytes: &[u8]) -> String {
         .collect()
 }
 
-// -- Pairing (ALPN androiddex-pairing) --------------------------------------------------
+// -- Pairing (ALPN androiddex-pair-v2) --------------------------------------------------
 
 async fn pair_and_serve(server: Arc<Server>, conn: Connection, remote: std::net::SocketAddr) {
     if server.is_paired() {
@@ -424,7 +403,7 @@ async fn pair_and_serve(server: Arc<Server>, conn: Connection, remote: std::net:
     let deadline = Instant::now() + PAIRING_TIMEOUT;
     let outcome = run_pairing(&server, &conn, deadline).await;
 
-    server.pins.cancel().await;
+    server.confirmations.cancel().await;
 
     match outcome {
         Ok(psk) => {
@@ -448,7 +427,21 @@ async fn run_pairing(
     conn: &Connection,
     deadline: Instant,
 ) -> Result<Psk, HandshakeError> {
-    // Step 1: `P` + the PC's 32-byte ephemeral public key.
+    // 1. Phone generates an ephemeral X25519 keypair (b, B).
+    let rng = ring::rand::SystemRandom::new();
+    let my_private = ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::X25519, &rng)
+        .map_err(|_| HandshakeError::Protocol("failed to generate ephemeral key".into()))?;
+    let my_public = my_private
+        .compute_public_key()
+        .map_err(|_| HandshakeError::Protocol("failed to compute public key".into()))?;
+
+    let mut b_bytes = [0u8; crypto::EPHEMERAL_KEY_LEN];
+    if my_public.as_ref().len() != crypto::EPHEMERAL_KEY_LEN {
+        return Err(HandshakeError::Protocol("invalid public key length".into()));
+    }
+    b_bytes.copy_from_slice(my_public.as_ref());
+
+    // 2. PC opens a bidirectional stream, sends: 'P' || A (1 + 32 bytes).
     let (mut send, mut recv) = before(deadline, "the pairing stream", conn.accept_bi())
         .await?
         .map_err(|e| HandshakeError::Stream(e.to_string()))?;
@@ -465,77 +458,75 @@ async fn run_pairing(
         )));
     }
 
-    let mut ephemeral_public_key = [0u8; crypto::EPHEMERAL_KEY_LEN];
-    ephemeral_public_key.copy_from_slice(&hello[1..]);
+    let mut a_bytes = [0u8; crypto::EPHEMERAL_KEY_LEN];
+    a_bytes.copy_from_slice(&hello[1..]);
 
-    // Step 2: the user reads the PIN off the PC and types it here. The `OK` that unblocks
-    // the PC is deliberately withheld until that happens — the PC blocks on this read, so
-    // answering early would let it race ahead of the user.
-    let mut attempts = 0u32;
-    let mut announced = false;
+    // 3. Phone replies: 'Q' || B (1 + 32 bytes).
+    let mut reply = [0u8; 1 + crypto::EPHEMERAL_KEY_LEN];
+    reply[0] = b'Q';
+    reply[1..].copy_from_slice(&b_bytes);
+    before(deadline, "the pairing reply", send.write_all(&reply))
+        .await?
+        .map_err(|e| HandshakeError::Stream(e.to_string()))?;
 
-    loop {
-        if attempts >= MAX_PIN_ATTEMPTS {
-            return Err(HandshakeError::AttemptsExhausted);
-        }
+    // 5. TLS channel binding: 32 bytes via export_keying_material.
+    let mut binding = [0u8; crypto::BINDING_LEN];
+    if let Err(e) = conn.export_keying_material(&mut binding, b"androiddex-pair-v2", b"") {
+        return Err(HandshakeError::Protocol(format!("export_keying_material failed: {e:?}")));
+    }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(HandshakeError::Timeout("a PIN"));
-        }
-
-        let submission = match server.pins.next_pin(remaining).await {
-            Some(s) => s,
-            None => return Err(HandshakeError::NoPin),
-        };
-        attempts += 1;
-
-        if !is_well_formed_pin(submission.pin()) {
-            log_w!("attempt {attempts}/{MAX_PIN_ATTEMPTS}: PIN is not six digits");
-            submission.answer(false);
-            continue;
-        }
-
-        let candidate = derive_psk(submission.pin(), &ephemeral_public_key);
-
-        if !announced {
-            before(deadline, "the pairing acknowledgement", send.write_all(b"OK"))
-                .await?
-                .map_err(|e| HandshakeError::Stream(e.to_string()))?;
-            if let Err(e) = send.finish() {
-                return Err(HandshakeError::Stream(e.to_string()));
+    // 4. Compute Z = X25519(own_private, peer_public) and derive (sas, psk) via steps 6-9.
+    let peer_public = ring::agreement::UnparsedPublicKey::new(&ring::agreement::X25519, &a_bytes);
+    let (sas, psk) = ring::agreement::agree_ephemeral(
+        my_private,
+        &peer_public,
+        |z_bytes| {
+            if z_bytes.len() != 32 {
+                return Err(HandshakeError::Protocol("invalid shared secret length".into()));
             }
-            announced = true;
+            let mut z = [0u8; 32];
+            z.copy_from_slice(z_bytes);
+            crypto::derive_pairing_v2(&a_bytes, &b_bytes, &binding, &z)
+                .map_err(|e| HandshakeError::Protocol(format!("derivation failed: {e}")))
+        },
+    )
+    .map_err(|_| HandshakeError::Protocol("X25519 agreement failed".into()))??;
+
+    // 10-11. Display 6-digit SAS to user and wait for confirmation.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(HandshakeError::Timeout("confirmation"));
+    }
+
+    let submission = match server.confirmations.wait_for_confirmation(sas, remaining).await {
+        Some(s) => s,
+        None => return Err(HandshakeError::NoConfirmation),
+    };
+
+    // 12. Phone sends 'Y' on match, 'N' otherwise.
+    if submission.matched() {
+        before(deadline, "the confirmation response", send.write_all(b"Y"))
+            .await?
+            .map_err(|e| HandshakeError::Stream(e.to_string()))?;
+        if let Err(e) = send.finish() {
+            log_w!("stream finish error: {e}");
         }
-
-        // Step 3: the PC proves it derived the same PSK. This is the only thing that can
-        // tell the phone whether the typed PIN was right.
-        let (mut auth_send, token) = match read_auth_request(conn, deadline).await {
-            Ok(v) => v,
-            Err(e) => {
-                submission.answer(false);
-                return Err(e);
-            }
-        };
-
-        if verify_auth_token(&candidate, &token) {
-            before(deadline, "the auth acknowledgement", auth_send.write_all(b"OK"))
-                .await?
-                .map_err(|e| HandshakeError::Stream(e.to_string()))?;
-            let _ = auth_send.finish();
-            submission.answer(true);
-            return Ok(candidate);
+        submission.answer(true);
+        Ok(psk)
+    } else {
+        log_w!("user rejected the pairing confirmation ('They are different')");
+        before(deadline, "the rejection response", send.write_all(b"N"))
+            .await?
+            .map_err(|e| HandshakeError::Stream(e.to_string()))?;
+        if let Err(e) = send.finish() {
+            log_w!("stream finish error: {e}");
         }
-
-        // Wrong PIN. No `OK` goes out: the PC's `read_exact` on the reply fails and it
-        // tears the connection down. A client that stays connected may try again until
-        // the attempt budget or the 60 s deadline runs out.
-        log_w!("attempt {attempts}/{MAX_PIN_ATTEMPTS}: token mismatch, PIN rejected");
         submission.answer(false);
+        Err(HandshakeError::ConfirmationRejected)
     }
 }
 
-// -- Authentication (ALPN androiddex) ---------------------------------------------------
+// -- Authentication (ALPN androiddex-v2) -------------------------------------------------
 
 async fn authenticate_and_serve(
     server: Arc<Server>,
@@ -543,72 +534,108 @@ async fn authenticate_and_serve(
     remote: std::net::SocketAddr,
 ) {
     let Some(psk) = server.psk() else {
-        log_w!("rejecting {remote}: no device is paired, so no token can be valid");
+        log_w!("rejecting {remote}: no device is paired, so no authentication can succeed");
         conn.close(VarInt::from_u32(CLOSE_NOT_PAIRED), b"not paired");
         return;
     };
 
     let deadline = Instant::now() + AUTH_TIMEOUT;
 
-    let (mut send, token) = match read_auth_request(&conn, deadline).await {
-        Ok(v) => v,
+    // binding = export_keying_material(32, b"androiddex-auth-v2", b"")
+    let mut binding = [0u8; crypto::BINDING_LEN];
+    if let Err(e) = conn.export_keying_material(&mut binding, b"androiddex-auth-v2", b"") {
+        log_w!("rejecting {remote}: export_keying_material failed: {e:?}");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"binding failed");
+        return;
+    }
+
+    // 1. PC opens a bi stream, sends 'C' || client_nonce (32 random bytes).
+    let (mut send, mut recv) = match before(deadline, "the auth stream", conn.accept_bi()).await {
+        Ok(Ok(bi)) => bi,
+        Ok(Err(e)) => {
+            log_w!("rejecting {remote}: accept_bi failed: {e}");
+            conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"stream failed");
+            return;
+        }
         Err(e) => {
             log_w!("rejecting {remote}: {e}");
-            conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"auth failed");
+            conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"timeout");
             return;
         }
     };
 
-    if !verify_auth_token(&psk, &token) {
-        log_w!("rejecting {remote}: auth token does not match the paired key");
-        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"auth failed");
+    let mut client_req = [0u8; 1 + crypto::NONCE_LEN];
+    if let Err(e) = before(deadline, "the client nonce", recv.read_exact(&mut client_req)).await {
+        log_w!("rejecting {remote}: failed to read client nonce: {e}");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"read nonce failed");
         return;
     }
 
-    if send.write_all(b"OK").await.is_err() {
-        log_w!("{remote} authenticated but the acknowledgement could not be sent");
+    if client_req[0] != b'C' {
+        log_w!("rejecting {remote}: expected 'C' tag, got {}", printable(&client_req[..1]));
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"bad tag");
         return;
     }
+
+    let mut client_nonce = [0u8; crypto::NONCE_LEN];
+    client_nonce.copy_from_slice(&client_req[1..]);
+
+    // 2. Phone replies 'S' || server_nonce || server_proof (1 + 32 + 32 bytes).
+    let rng = ring::rand::SystemRandom::new();
+    let mut server_nonce = [0u8; crypto::NONCE_LEN];
+    if ring::rand::SecureRandom::fill(&rng, &mut server_nonce).is_err() {
+        log_e!("rejecting {remote}: CSPRNG failure");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"rng failure");
+        return;
+    }
+
+    let s_proof = crypto::server_proof(&psk, &client_nonce, &server_nonce, &binding);
+
+    let mut server_resp = [0u8; 1 + crypto::NONCE_LEN + crypto::PROOF_LEN];
+    server_resp[0] = b'S';
+    server_resp[1..1 + crypto::NONCE_LEN].copy_from_slice(&server_nonce);
+    server_resp[1 + crypto::NONCE_LEN..].copy_from_slice(&s_proof);
+
+    if let Err(e) = before(deadline, "the server proof", send.write_all(&server_resp)).await {
+        log_w!("rejecting {remote}: failed to send server proof: {e}");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"write proof failed");
+        return;
+    }
+
+    // 3. PC sends 'D' || client_proof (1 + 32 bytes).
+    let mut client_resp = [0u8; 1 + crypto::PROOF_LEN];
+    if let Err(e) = before(deadline, "the client proof", recv.read_exact(&mut client_resp)).await {
+        log_w!("rejecting {remote}: failed to read client proof: {e}");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"read client proof failed");
+        return;
+    }
+
+    if client_resp[0] != b'D' {
+        log_w!("rejecting {remote}: expected 'D' tag, got {}", printable(&client_resp[..1]));
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"bad client tag");
+        return;
+    }
+
+    let mut presented_proof = [0u8; crypto::PROOF_LEN];
+    presented_proof.copy_from_slice(&client_resp[1..]);
+
+    // 4. Phone verifies client_proof in CONSTANT TIME.
+    if !crypto::verify_client_proof(&psk, &client_nonce, &server_nonce, &binding, &presented_proof) {
+        log_w!("rejecting {remote}: client proof does not match");
+        conn.close(VarInt::from_u32(CLOSE_AUTH_FAILED), b"client proof mismatch");
+        return;
+    }
+
     let _ = send.finish();
-
-    log_i!("{remote} authenticated with the stored pairing key");
+    log_i!("{remote} mutually authenticated with stored pairing key");
     serve_session(server, conn, remote).await;
-}
-
-/// Reads `A` + a 32-byte token off a freshly accepted bidirectional stream.
-async fn read_auth_request(
-    conn: &Connection,
-    deadline: Instant,
-) -> Result<(SendStream, [u8; crypto::TOKEN_LEN]), HandshakeError> {
-    let (send, mut recv) = before(deadline, "the auth stream", conn.accept_bi())
-        .await?
-        .map_err(|e| HandshakeError::Stream(e.to_string()))?;
-
-    let mut request = [0u8; 1 + crypto::TOKEN_LEN];
-    before(deadline, "the auth token", recv.read_exact(&mut request))
-        .await?
-        .map_err(|e| HandshakeError::Stream(e.to_string()))?;
-
-    if request[0] != b'A' {
-        return Err(HandshakeError::Protocol(format!(
-            "expected an 'A' tag, got {}",
-            printable(&request[..1])
-        )));
-    }
-
-    let mut token = [0u8; crypto::TOKEN_LEN];
-    token.copy_from_slice(&request[1..]);
-    Ok((send, token))
 }
 
 // -- Streaming session ------------------------------------------------------------------
 
 async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::SocketAddr) {
-    // One streaming session at a time; a second authenticated peer waits here instead of
-    // competing for frames out of the same queue.
     let _permit = server.session_lock.lock().await;
 
-    // Whatever the encoder produced while nobody was connected is stale by definition.
     server.video.clear();
     server.audio.clear();
 
@@ -631,8 +658,6 @@ async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::
     server.state.store(STATE_AUTHENTICATED, Ordering::SeqCst);
     log_i!("streaming to {remote}");
 
-    // Video and audio each own a task. Sharing one `select!` meant a stalled audio write
-    // held the loop and video frames waited behind it.
     let mut video_task = tokio::spawn(pump(server.video.clone(), video_stream, "video"));
     let mut audio_task = tokio::spawn(pump(server.audio.clone(), audio_stream, "audio"));
     let mut input_task = tokio::spawn(read_input(server.clone(), conn.clone()));
@@ -658,7 +683,6 @@ async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::
     );
 }
 
-/// Writes length-prefixed frames from `queue` onto `stream` until either side gives up.
 async fn pump(queue: Arc<FrameQueue>, mut stream: SendStream, kind: &'static str) {
     loop {
         let frame = queue.pop().await;
@@ -682,7 +706,6 @@ async fn pump(queue: Arc<FrameQueue>, mut stream: SendStream, kind: &'static str
     let _ = stream.finish();
 }
 
-/// Reads length-prefixed input events from the PC and hands them to the JNI poller.
 async fn read_input(server: Arc<Server>, conn: Connection) {
     let mut stream = match conn.accept_uni().await {
         Ok(s) => s,
@@ -747,8 +770,6 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         return 0;
     }
 
-    // Kotlin passes a fixed 1 MiB buffer; an event that does not fit is dropped rather
-    // than allowed to raise ArrayIndexOutOfBoundsException on the polling thread.
     let capacity = match env.get_array_length(&buffer) {
         Ok(len) if len >= 0 => len as usize,
         _ => return 0,
@@ -758,13 +779,9 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         return 0;
     }
 
-    // SAFETY: `i8` and `u8` have identical size and alignment, and the slice is only read.
-    // This avoids copying every input event into a second Vec purely to change signedness.
     let signed = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i8, data.len()) };
 
     if env.set_byte_array_region(&buffer, 0, signed).is_err() {
-        // A failed JNI call leaves an exception pending; clearing it keeps the polling
-        // thread usable instead of throwing on its next JNI call.
         let _ = env.exception_clear();
         return 0;
     }
@@ -850,53 +867,100 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_droppedAudio
 
 // -- JNI: SecurityBridge -----------------------------------------------------------------
 
-/// Submits the PIN the user typed. Blocks until the PC's auth token settles the question,
-/// so Kotlin must call this off the main thread.
+/// Confirms or rejects the pairing code (SAS) displayed to the user.
+/// Called from Kotlin background thread.
 #[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeVerifyPin(
-    mut env: JNIEnv,
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeConfirmPairing(
+    _env: JNIEnv,
     _class: JClass,
-    pin: JString,
+    matched: jboolean,
 ) -> jboolean {
     let Some(server) = global_server() else {
-        log_w!("verifyPin called before the server was started");
+        log_w!("confirmPairing called before the server was started");
         return JNI_FALSE;
     };
 
-    let pin: String = match env.get_string(&pin) {
-        Ok(s) => s.into(),
-        Err(_) => {
-            let _ = env.exception_clear();
-            return JNI_FALSE;
-        }
-    };
-
-    // Shape is checked here as well as in the pairing task so a malformed value never
-    // even consumes an attempt slot on a live handshake.
-    if !is_well_formed_pin(&pin) {
-        return JNI_FALSE;
-    }
-
-    if server.pins.submit_blocking(pin) {
+    if server.confirmations.submit_blocking(matched == JNI_TRUE) {
         JNI_TRUE
     } else {
         JNI_FALSE
     }
 }
 
-/// True while a PC is mid-pairing and the phone is waiting for the user to type the PIN.
+/// Alias for `nativeConfirmPairing`.
 #[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingPin(
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeConfirm(
+    env: JNIEnv,
+    class: JClass,
+    matched: jboolean,
+) -> jboolean {
+    Java_com_example_androidhost_security_SecurityBridge_nativeConfirmPairing(env, class, matched)
+}
+
+/// Legacy PIN verification bridge stub. Returns false under Protocol v2.
+#[no_mangle]
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeVerifyPin(
+    _env: JNIEnv,
+    _class: JClass,
+    _pin: JString,
+) -> jboolean {
+    log_w!("legacy nativeVerifyPin called; Protocol v2 requires confirmation");
+    JNI_FALSE
+}
+
+/// Reads the pending 6-digit SAS code, or returns null if no pairing is awaiting confirmation.
+#[no_mangle]
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeGetPendingSas(
+    env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jstring {
+    let Some(server) = global_server() else {
+        return std::ptr::null_mut();
+    };
+
+    match server.confirmations.get_pending_sas() {
+        Some(sas) => match env.new_string(sas) {
+            Ok(js) => js.into_raw(),
+            Err(_) => {
+                let _ = env.exception_clear();
+                std::ptr::null_mut()
+            }
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Alias for `nativeGetPendingSas`.
+#[no_mangle]
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeGetSas(
+    env: JNIEnv,
+    class: JClass,
+) -> jni::sys::jstring {
+    Java_com_example_androidhost_security_SecurityBridge_nativeGetPendingSas(env, class)
+}
+
+/// True while a PC is mid-pairing and the phone is waiting for the user to confirm the SAS.
+#[no_mangle]
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingConfirmation(
     _env: JNIEnv,
     _class: JClass,
 ) -> jboolean {
     match global_server() {
-        Some(server) if server.pins.is_awaiting() => JNI_TRUE,
+        Some(server) if server.confirmations.is_awaiting() => JNI_TRUE,
         _ => JNI_FALSE,
     }
 }
 
-/// True when a pairing key is on record, i.e. a known PC can connect without a PIN.
+/// Backward compatibility alias for `nativeIsAwaitingConfirmation`.
+#[no_mangle]
+pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingPin(
+    env: JNIEnv,
+    class: JClass,
+) -> jboolean {
+    Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingConfirmation(env, class)
+}
+
+/// True when a pairing key is on record, i.e. a known PC can connect without confirmation.
 #[no_mangle]
 pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsPaired(
     _env: JNIEnv,
@@ -908,7 +972,7 @@ pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nati
     }
 }
 
-/// Forgets the paired PC. The next connection has to go through the PIN flow again.
+/// Forgets the paired PC. The next connection has to go through the pairing flow again.
 #[no_mangle]
 pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeClearPairing(
     _env: JNIEnv,
@@ -922,34 +986,37 @@ pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto::auth_token;
 
-    /// The exact bytes the PC puts on the wire for an already-paired device.
     #[test]
-    fn auth_request_layout_is_33_bytes() {
-        let psk = derive_psk("123456", &[1u8; crypto::EPHEMERAL_KEY_LEN]);
-        let token = auth_token(&psk);
-
+    fn v2_auth_request_layout_is_33_bytes() {
         let mut wire = Vec::new();
-        wire.push(b'A');
-        wire.extend_from_slice(&token);
-        assert_eq!(wire.len(), 1 + crypto::TOKEN_LEN);
-        assert_eq!(wire[0], b'A');
-        assert!(verify_auth_token(&psk, &wire[1..]));
+        wire.push(b'C');
+        wire.extend_from_slice(&[0x55u8; 32]);
+        assert_eq!(wire.len(), 1 + crypto::NONCE_LEN);
+        assert_eq!(wire[0], b'C');
     }
 
     #[test]
-    fn a_random_token_never_verifies() {
-        let psk = derive_psk("654321", &[9u8; crypto::EPHEMERAL_KEY_LEN]);
-        // Stand-in for the "raw client that skips pairing" case.
+    fn a_random_client_proof_never_verifies() {
+        let psk: Psk = [42u8; crypto::PSK_LEN];
+        let client_nonce = [0x11u8; crypto::NONCE_LEN];
+        let server_nonce = [0x22u8; crypto::NONCE_LEN];
+        let binding = [0x33u8; crypto::BINDING_LEN];
+
         for seed in 0u8..64 {
-            assert!(!verify_auth_token(&psk, &[seed; crypto::TOKEN_LEN]));
+            assert!(!crypto::verify_client_proof(
+                &psk,
+                &client_nonce,
+                &server_nonce,
+                &binding,
+                &[seed; crypto::PROOF_LEN]
+            ));
         }
     }
 
     #[test]
     fn untrusted_bytes_are_escaped_before_logging() {
-        assert_eq!(printable(b"androiddex"), "androiddex");
+        assert_eq!(printable(b"androiddex-v2"), "androiddex-v2");
         assert_eq!(printable(b"\x00\x1b[31m"), "\\x00\\x1b[31m");
     }
 }

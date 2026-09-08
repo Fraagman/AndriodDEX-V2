@@ -1,16 +1,17 @@
 package com.example.androidhost.security
 
 /**
- * Pairing surface of the native QUIC server.
+ * Pairing surface of the native QUIC server (Protocol v2).
  *
- * The PIN is checked in Rust, not here. The phone cannot tell whether the digits the user
- * typed are correct until the PC proves it derived the same pre-shared key, so
- * [verifyPin] hands the PIN to the native pairing task and blocks until that exchange
- * settles. **Call it off the main thread.**
+ * The phone no longer receives a PIN. The native server computes a 6-digit
+ * Short Authentication String (SAS) derived from the ECDH key exchange and TLS channel
+ * binding.
+ *
+ * [confirmPairing] submits the user's decision ("Codes match" -> true, "They're different" -> false)
+ * and blocks until the verdict settles. **Call it off the main thread.**
  *
  * The native methods are declared inside a `companion object` so Kotlin emits them as
- * static natives on this class — the same shape as
- * `com.example.androidhost.quic.QuicServer`, whose bindings are known to resolve.
+ * static natives on this class.
  */
 class SecurityBridge {
     companion object {
@@ -19,30 +20,35 @@ class SecurityBridge {
         }
 
         /**
-         * Submits the PIN the user typed and waits for the verdict.
-         *
-         * Blocks for as long as the handshake takes, up to roughly 20 seconds. Returns
-         * false if the PIN was wrong, if no pairing is in progress, or if the PC gave up.
+         * Confirms (matched = true) or rejects (matched = false) the pairing code.
+         * Blocks until the native handshake decides or times out.
          */
-        fun verifyPin(pin: String): Boolean = nativeVerifyPin(pin)
+        fun confirmPairing(matched: Boolean): Boolean = nativeConfirmPairing(matched)
 
         /**
-         * True while a PC is mid-pairing and the server is waiting for a PIN. The PIN
-         * screen polls this to know whether to accept input.
+         * Reads the pending 6-digit SAS code, or returns null if no pairing is awaiting confirmation.
          */
-        fun isAwaitingPin(): Boolean = nativeIsAwaitingPin()
+        fun getPendingSas(): String? = nativeGetPendingSas()
 
-        /** True when a pairing key is on record, so a known PC connects without a PIN. */
+        /**
+         * True while a PC is mid-pairing and the phone is waiting for the user to confirm the SAS.
+         */
+        fun isAwaitingConfirmation(): Boolean = nativeIsAwaitingConfirmation()
+
+        /** True when a pairing key is on record, so a known PC connects without confirmation. */
         fun isPaired(): Boolean = nativeIsPaired()
 
         /** Forgets the paired PC; the next connection has to pair again. */
         fun forgetPairing() = nativeClearPairing()
 
         @JvmStatic
-        private external fun nativeVerifyPin(pin: String): Boolean
+        private external fun nativeConfirmPairing(matched: Boolean): Boolean
 
         @JvmStatic
-        private external fun nativeIsAwaitingPin(): Boolean
+        private external fun nativeGetPendingSas(): String?
+
+        @JvmStatic
+        private external fun nativeIsAwaitingConfirmation(): Boolean
 
         @JvmStatic
         private external fun nativeIsPaired(): Boolean

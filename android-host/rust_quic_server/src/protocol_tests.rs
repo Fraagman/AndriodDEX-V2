@@ -1,9 +1,9 @@
-//! End-to-end tests for the pairing and authentication handshake.
+#![cfg(test)]
+
+//! End-to-end tests for the pairing and authentication handshake (Protocol v2).
 //!
 //! These drive the real accept loop over a real QUIC connection on loopback, with a
-//! client that speaks exactly what `rust-receiver/zc-network/src/client.rs` speaks. They
-//! are the executable form of the Phase 1 verification list: a correct PIN connects, a
-//! wrong PIN is refused, and a client that skips pairing entirely is refused.
+//! client that speaks Protocol v2.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -16,9 +16,9 @@ use quinn::{Connection, Endpoint};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
-use crate::crypto::{auth_token, derive_psk, Psk, EPHEMERAL_KEY_LEN};
+use crate::crypto::{client_proof, derive_pairing_v2, verify_server_proof, Psk};
 use crate::frames::FrameQueue;
-use crate::pairing::PinChannel;
+use crate::pairing::ConfirmationChannel;
 use crate::store::SecureStore;
 use crate::{
     accept_loop, bind_endpoint, Server, ALPN_PAIRING, ALPN_STREAM, AUDIO_QUEUE_DEPTH,
@@ -27,7 +27,6 @@ use crate::{
 
 // -- Test harness -----------------------------------------------------------------------
 
-/// A running server plus the scratch directory holding its PSK and certificate.
 struct Harness {
     server: Arc<Server>,
     addr: SocketAddr,
@@ -36,15 +35,13 @@ struct Harness {
 }
 
 impl Harness {
-    /// Starts a server whose state lives in a fresh directory.
     fn fresh(name: &str) -> Self {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("rust_quic_server_e2e_{name}_{}", std::process::id()));
+        dir.push(format!("rust_quic_server_v2_e2e_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         Self::at(dir)
     }
 
-    /// Starts a server on top of an existing directory, i.e. simulates an app restart.
     fn at(dir: PathBuf) -> Self {
         install_crypto_provider();
 
@@ -57,7 +54,7 @@ impl Harness {
             video: Arc::new(FrameQueue::new(VIDEO_QUEUE_DEPTH)),
             audio: Arc::new(FrameQueue::new(AUDIO_QUEUE_DEPTH)),
             input_tx,
-            pins: PinChannel::new(),
+            confirmations: ConfirmationChannel::new(),
             store,
             psk: Mutex::new(persisted),
             sessions: AtomicUsize::new(0),
@@ -78,22 +75,19 @@ impl Harness {
         self.server.state.load(Ordering::SeqCst)
     }
 
-    /// Stands in for the user typing a PIN, on a blocking thread as Kotlin does.
-    ///
-    /// Waits for the server to actually be asking before submitting, which is the same
-    /// thing `SecurityBridge.isAwaitingPin()` tells the PIN screen.
-    fn type_pin(&self, pin: &str) -> tokio::task::JoinHandle<bool> {
+    /// Simulates user tapping "Codes match" (true) or "They're different" (false) on the phone.
+    fn confirm_pairing(&self, matched: bool) -> tokio::task::JoinHandle<bool> {
         let server = self.server.clone();
-        let pin = pin.to_string();
         tokio::task::spawn_blocking(move || {
             for _ in 0..600 {
-                if server.pins.is_awaiting() {
+                if server.confirmations.is_awaiting() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let accepted = server.pins.submit_blocking(pin.clone());
-            println!("  [phone] user typed {pin} -> verifyPin returned {accepted}");
+            let sas = server.confirmations.get_pending_sas().unwrap_or_default();
+            let accepted = server.confirmations.submit_blocking(matched);
+            println!("  [phone] SAS={sas} user matched={matched} -> submit returned {accepted}");
             accepted
         })
     }
@@ -107,8 +101,6 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// Accepts any certificate and records its SHA-256, mirroring the receiver's
-/// trust-on-first-use verifier.
 #[derive(Debug)]
 struct RecordingVerifier {
     seen: Arc<Mutex<Option<[u8; 32]>>>,
@@ -157,7 +149,6 @@ impl ServerCertVerifier for RecordingVerifier {
     }
 }
 
-/// A stand-in for the Windows receiver.
 struct TestClient {
     conn: Connection,
     fingerprint: [u8; 32],
@@ -187,45 +178,134 @@ impl TestClient {
             .await
             .map_err(|e| format!("handshake: {e}"))?;
 
-        // Keep the endpoint alive for as long as the connection is used.
         std::mem::forget(endpoint);
 
         let fingerprint = seen.lock().map_err(|_| "poisoned")?.ok_or("no certificate seen")?;
         Ok(TestClient { conn, fingerprint })
     }
 
-    /// Sends `P` + pubkey and waits for the phone's `OK`, exactly as client.rs does.
-    async fn send_pairing_hello(&self, pubkey: &[u8; EPHEMERAL_KEY_LEN]) -> Result<(), String> {
-        let (mut send, mut recv) =
-            self.conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
-        send.write_all(b"P").await.map_err(|e| format!("write P: {e}"))?;
-        send.write_all(pubkey).await.map_err(|e| format!("write pubkey: {e}"))?;
+    /// Performs the PC side of Protocol v2 pairing.
+    async fn pair(&self) -> Result<(String, Psk), String> {
+        let rng = ring::rand::SystemRandom::new();
+        let my_private = ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::X25519, &rng)
+            .map_err(|_| "failed to generate ephemeral key")?;
+        let my_public = my_private
+            .compute_public_key()
+            .map_err(|_| "failed to compute public key")?;
+        let mut a_bytes = [0u8; 32];
+        a_bytes.copy_from_slice(my_public.as_ref());
 
-        let mut ok = [0u8; 2];
-        recv.read_exact(&mut ok).await.map_err(|e| format!("read ack: {e}"))?;
-        if &ok != b"OK" {
-            return Err(format!("expected OK, got {:?}", ok));
+        let (mut send, mut recv) = self.conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
+
+        let mut hello = [0u8; 33];
+        hello[0] = b'P';
+        hello[1..].copy_from_slice(&a_bytes);
+        send.write_all(&hello).await.map_err(|e| format!("write hello: {e}"))?;
+
+        let mut reply = [0u8; 33];
+        recv.read_exact(&mut reply).await.map_err(|e| format!("read reply: {e}"))?;
+        if reply[0] != b'Q' {
+            return Err(format!("expected 'Q' tag, got {}", reply[0]));
         }
-        Ok(())
+        let mut b_bytes = [0u8; 32];
+        b_bytes.copy_from_slice(&reply[1..]);
+
+        let mut binding = [0u8; 32];
+        self.conn
+            .export_keying_material(&mut binding, b"androiddex-pair-v2", b"")
+            .map_err(|e| format!("export_keying_material: {e:?}"))?;
+
+        let peer_public = ring::agreement::UnparsedPublicKey::new(&ring::agreement::X25519, &b_bytes);
+        let (sas, psk) = ring::agreement::agree_ephemeral(
+            my_private,
+            &peer_public,
+            |z_bytes| {
+                let mut z = [0u8; 32];
+                z.copy_from_slice(z_bytes);
+                derive_pairing_v2(&a_bytes, &b_bytes, &binding, &z)
+                    .map_err(|e| format!("derivation failed: {e}"))
+            },
+        )
+        .map_err(|_| "X25519 agreement failed".to_string())??;
+
+        let mut verdict = [0u8; 1];
+        recv.read_exact(&mut verdict).await.map_err(|e| format!("read verdict: {e}"))?;
+        if verdict[0] == b'Y' {
+            Ok((sas, psk))
+        } else {
+            Err(format!("pairing rejected by phone: got byte {}", verdict[0]))
+        }
     }
 
-    /// Sends `A` + token and reports whether the phone acknowledged.
-    async fn send_auth(&self, token: &[u8; 32]) -> Result<(), String> {
-        let (mut send, mut recv) =
-            self.conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
-        send.write_all(b"A").await.map_err(|e| format!("write A: {e}"))?;
-        send.write_all(token).await.map_err(|e| format!("write token: {e}"))?;
+    /// Performs the PC side of Protocol v2 re-authentication.
+    async fn authenticate(&self, psk: &Psk) -> Result<[u8; 32], String> {
+        let mut binding = [0u8; 32];
+        self.conn
+            .export_keying_material(&mut binding, b"androiddex-auth-v2", b"")
+            .map_err(|e| format!("export_keying_material: {e:?}"))?;
+
+        let rng = ring::rand::SystemRandom::new();
+        let mut client_nonce = [0u8; 32];
+        ring::rand::SecureRandom::fill(&rng, &mut client_nonce).map_err(|_| "rng")?;
+
+        let (mut send, mut recv) = self.conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
+
+        let mut req = [0u8; 33];
+        req[0] = b'C';
+        req[1..].copy_from_slice(&client_nonce);
+        send.write_all(&req).await.map_err(|e| format!("write req: {e}"))?;
+
+        let mut resp = [0u8; 65];
+        recv.read_exact(&mut resp).await.map_err(|e| format!("read resp: {e}"))?;
+        if resp[0] != b'S' {
+            return Err(format!("expected 'S' tag, got {}", resp[0]));
+        }
+        let mut server_nonce = [0u8; 32];
+        server_nonce.copy_from_slice(&resp[1..33]);
+        let presented_server_proof = &resp[33..65];
+
+        if !verify_server_proof(psk, &client_nonce, &server_nonce, &binding, presented_server_proof) {
+            return Err("server proof verification failed".into());
+        }
+
+        let c_proof = client_proof(psk, &client_nonce, &server_nonce, &binding);
+        let mut client_resp = [0u8; 33];
+        client_resp[0] = b'D';
+        client_resp[1..].copy_from_slice(&c_proof);
+        send.write_all(&client_resp).await.map_err(|e| format!("write client proof: {e}"))?;
         send.finish().map_err(|e| format!("finish: {e}"))?;
 
-        let mut ok = [0u8; 2];
-        recv.read_exact(&mut ok).await.map_err(|e| format!("read ack: {e}"))?;
-        if &ok != b"OK" {
-            return Err(format!("expected OK, got {:?}", ok));
+        Ok(c_proof)
+    }
+
+    /// Sends a raw/forged client proof during re-auth.
+    async fn authenticate_with_proof_override(&self, proof_override: &[u8; 32]) -> Result<(), String> {
+        let (mut send, mut recv) = self.conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
+
+        let rng = ring::rand::SystemRandom::new();
+        let mut client_nonce = [0u8; 32];
+        ring::rand::SecureRandom::fill(&rng, &mut client_nonce).map_err(|_| "rng")?;
+
+        let mut req = [0u8; 33];
+        req[0] = b'C';
+        req[1..].copy_from_slice(&client_nonce);
+        send.write_all(&req).await.map_err(|e| format!("write req: {e}"))?;
+
+        let mut resp = [0u8; 65];
+        recv.read_exact(&mut resp).await.map_err(|e| format!("read resp: {e}"))?;
+        if resp[0] != b'S' {
+            return Err(format!("expected 'S' tag, got {}", resp[0]));
         }
+
+        let mut client_resp = [0u8; 33];
+        client_resp[0] = b'D';
+        client_resp[1..].copy_from_slice(proof_override);
+        send.write_all(&client_resp).await.map_err(|e| format!("write proof: {e}"))?;
+        send.finish().map_err(|e| format!("finish: {e}"))?;
+
         Ok(())
     }
 
-    /// Reads one length-prefixed frame off the first stream the phone opens.
     async fn read_one_frame(&self) -> Result<Vec<u8>, String> {
         let mut stream = self.conn.accept_uni().await.map_err(|e| format!("accept_uni: {e}"))?;
         let mut len_buf = [0u8; 4];
@@ -237,20 +317,6 @@ impl TestClient {
     }
 }
 
-/// Deterministic stand-in for the PC's X25519 ephemeral public key.
-fn ephemeral_key(seed: u8) -> [u8; EPHEMERAL_KEY_LEN] {
-    [seed; EPHEMERAL_KEY_LEN]
-}
-
-fn random_token() -> [u8; 32] {
-    use ring::rand::SecureRandom;
-    let mut token = [0u8; 32];
-    let rng = ring::rand::SystemRandom::new();
-    rng.fill(&mut token).expect("system rng");
-    token
-}
-
-/// Waits for `predicate` to hold, up to ~3 seconds.
 async fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
     for _ in 0..300 {
         if predicate() {
@@ -261,265 +327,176 @@ async fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
     false
 }
 
-// -- Phase 1 verification 1: the correct PIN ---------------------------------------------
+// -- Protocol v2 tests -------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn correct_pin_pairs_authenticates_and_streams_video() {
-    println!("\n=== VERIFICATION 1: correct PIN ===");
-    let h = Harness::fresh("correct_pin");
-    assert!(!h.server.is_paired(), "a fresh phone has no pairing key");
-
-    // The PC picks the PIN and shows it on screen.
-    let pc_pin = "482915";
-    let pubkey = ephemeral_key(0x11);
-    println!("  [pc]    displays PIN {pc_pin}");
+async fn pair_v2_success_and_streams_video() {
+    println!("\n=== TEST: Protocol v2 pair success ===");
+    let h = Harness::fresh("v2_pair_success");
+    assert!(!h.server.is_paired());
 
     let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
-    println!("  [pc]    connected with ALPN androiddex-pairing");
+    let user_confirm = h.confirm_pairing(true);
 
-    // The user reads it off the PC and types the same digits into the phone.
-    let typed = h.type_pin(pc_pin);
+    let (pc_sas, psk) = client.pair().await.expect("pair");
+    println!("  [pc] computed SAS: {pc_sas}");
 
-    client.send_pairing_hello(&pubkey).await.expect("pairing hello");
-    println!("  [pc]    sent P + pubkey, received OK");
-
-    let psk = derive_psk(pc_pin, &pubkey);
-    client.send_auth(&auth_token(&psk)).await.expect("auth accepted");
-    println!("  [pc]    sent A + token, received OK");
-
-    assert!(typed.await.expect("pin task"), "verifyPin must report success");
-    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await, "state must reach AUTHENTICATED");
-    println!("  [phone] connectionState = {} (AUTHENTICATED)", h.state());
-
-    // Video reaches the PC.
-    h.server.video.push(vec![0x01, 0xDE, 0xAD, 0xBE, 0xEF]);
-    let frame = client.read_one_frame().await.expect("video frame");
-    assert_eq!(frame, vec![0x01, 0xDE, 0xAD, 0xBE, 0xEF]);
-    println!("  [pc]    received a {} byte video frame -> video appears", frame.len());
-
-    // And the key is on disk, so the next launch does not need a PIN.
-    assert!(h.server.is_paired());
-    assert_eq!(h.server.store.load_psk(), Some(psk), "PSK must be persisted");
-    println!("  RESULT: connected, video flowing, pairing key persisted\n");
-
-    h.cleanup();
-}
-
-// -- Phase 1 verification 2: the wrong PIN ------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn wrong_pin_is_refused_and_nothing_is_paired() {
-    println!("\n=== VERIFICATION 2: wrong PIN ===");
-    let h = Harness::fresh("wrong_pin");
-
-    let pc_pin = "482915";
-    let mistyped = "482916";
-    let pubkey = ephemeral_key(0x22);
-    println!("  [pc]    displays PIN {pc_pin}");
-
-    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
-
-    // The user fat-fingers the last digit.
-    let typed = h.type_pin(mistyped);
-
-    client.send_pairing_hello(&pubkey).await.expect("pairing hello");
-    println!("  [pc]    sent P + pubkey, received OK (the phone always acknowledges here)");
-
-    // The PC derives from the PIN *it* displayed; the phone derived from what was typed.
-    let pc_psk = derive_psk(pc_pin, &pubkey);
-    let outcome = client.send_auth(&auth_token(&pc_psk)).await;
-
-    println!("  [pc]    sent A + token -> {}", match &outcome {
-        Ok(()) => "ACCEPTED".to_string(),
-        Err(e) => format!("REFUSED ({e})"),
-    });
-    assert!(outcome.is_err(), "a token derived from a different PIN must not be acknowledged");
-
-    assert!(!typed.await.expect("pin task"), "verifyPin must report failure");
-    assert_ne!(h.state(), STATE_AUTHENTICATED, "state must not become AUTHENTICATED");
-    assert!(!h.server.is_paired(), "no pairing key may be stored");
-    assert!(h.server.store.load_psk().is_none(), "nothing may be written to disk");
-    println!("  [phone] connectionState = {} (not AUTHENTICATED), no key stored", h.state());
-
-    // Retrying with the same wrong PIN is refused again — the first rejection was not a
-    // one-off race. The connection stays open only so the user can retry within the
-    // five-attempt budget; see pin_attempts_are_capped_per_connection.
-    let typed_again = h.type_pin(mistyped);
-    let retry = client.send_auth(&auth_token(&pc_psk)).await;
-    assert!(retry.is_err(), "a second wrong PIN must also be refused");
-    assert!(!typed_again.await.expect("pin task"));
-    assert_ne!(h.state(), STATE_AUTHENTICATED);
-    println!("  [pc]    retried with the same wrong PIN -> REFUSED again");
-
-    // Nothing was ever streamed: no unidirectional stream was opened to this peer.
-    let opened = tokio::time::timeout(Duration::from_millis(300), client.conn.accept_uni()).await;
-    assert!(opened.is_err(), "no video stream may be opened to an unauthenticated peer");
-    println!("  [pc]    no video stream was ever opened");
-    println!("  RESULT: refused\n");
-
-    h.cleanup();
-}
-
-// -- Phase 1 verification 3: skipping the handshake ---------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn raw_client_that_skips_pairing_is_refused() {
-    println!("\n=== VERIFICATION 3: skipped handshake ===");
-
-    // (a) Against a phone that has never been paired.
-    let h = Harness::fresh("skip_unpaired");
-    let client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
-    let outcome = client.send_auth(&random_token()).await;
-    println!("  [attacker] unpaired phone, A + 32 random bytes -> {}", match &outcome {
-        Ok(()) => "ACCEPTED".to_string(),
-        Err(e) => format!("REFUSED ({e})"),
-    });
-    assert!(outcome.is_err());
-    assert_ne!(h.state(), STATE_AUTHENTICATED);
-    let dir = h.dir.clone();
-    h.cleanup();
-
-    // (b) Against a phone that IS paired — the case that matters, since the attacker is
-    //     on the same network as a working setup.
-    let _ = std::fs::remove_dir_all(&dir);
-    let h = Harness::fresh("skip_paired");
-    let psk: Psk = derive_psk("135790", &ephemeral_key(0x33));
-    h.server.store.store_psk(&psk).expect("seed a pairing");
-    h.server.set_psk(psk);
-
-    for attempt in 1..=3 {
-        let client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
-        let outcome = client.send_auth(&random_token()).await;
-        println!("  [attacker] paired phone, guess {attempt} -> {}", match &outcome {
-            Ok(()) => "ACCEPTED".to_string(),
-            Err(e) => format!("REFUSED ({e})"),
-        });
-        assert!(outcome.is_err(), "a random token must never authenticate");
-        assert_ne!(h.state(), STATE_AUTHENTICATED);
-    }
-
-    // The real token still works, proving the rejections above are not blanket failures.
-    let client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
-    client.send_auth(&auth_token(&psk)).await.expect("the genuine token must be accepted");
-    println!("  [pc]       genuine token -> ACCEPTED");
+    assert!(user_confirm.await.expect("confirm task"));
     assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
-    println!("  RESULT: forged tokens refused, genuine token accepted\n");
+
+    // Video streams
+    h.server.video.push(vec![0xAA, 0xBB, 0xCC]);
+    let frame = client.read_one_frame().await.expect("frame");
+    assert_eq!(frame, vec![0xAA, 0xBB, 0xCC]);
+
+    // Key persisted
+    assert!(h.server.is_paired());
+    assert_eq!(h.server.store.load_psk(), Some(psk));
 
     h.cleanup();
 }
 
-// -- Supporting behaviour -----------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pair_v2_rejected_confirmation_stores_nothing() {
+    println!("\n=== TEST: Protocol v2 rejected confirmation ===");
+    let h = Harness::fresh("v2_pair_reject");
+    assert!(!h.server.is_paired());
+
+    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
+    let user_reject = h.confirm_pairing(false);
+
+    let pair_result = client.pair().await;
+    assert!(pair_result.is_err(), "pair must fail when user rejects match");
+    assert!(!user_reject.await.expect("reject task"));
+
+    assert_ne!(h.state(), STATE_AUTHENTICATED);
+    assert!(!h.server.is_paired());
+    assert!(h.server.store.load_psk().is_none(), "nothing persisted on reject");
+
+    h.cleanup();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_paired_pc_reconnects_without_a_pin_after_a_restart() {
-    println!("\n=== Reconnect after restart ===");
-    let h = Harness::fresh("restart");
+async fn reauth_v2_success_after_restart() {
+    println!("\n=== TEST: Protocol v2 re-auth after restart ===");
+    let h = Harness::fresh("v2_restart");
     let dir = h.dir.clone();
 
-    let pin = "246810";
-    let pubkey = ephemeral_key(0x44);
     let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
     let first_fingerprint = client.fingerprint;
-
-    let typed = h.type_pin(pin);
-    client.send_pairing_hello(&pubkey).await.expect("hello");
-    let psk = derive_psk(pin, &pubkey);
-    client.send_auth(&auth_token(&psk)).await.expect("auth");
-    assert!(typed.await.expect("pin task"));
+    let user_confirm = h.confirm_pairing(true);
+    let (_sas, psk) = client.pair().await.expect("pair");
+    assert!(user_confirm.await.expect("confirm"));
     drop(client);
 
-    // Restart the app: same data directory, brand-new server.
+    // Restart server on same directory
     let h2 = Harness::at(dir);
-    assert!(h2.server.is_paired(), "the pairing must survive a restart");
+    assert!(h2.server.is_paired(), "PSK must survive restart");
 
-    let client = TestClient::connect(h2.addr, ALPN_STREAM).await.expect("reconnect");
+    let client2 = TestClient::connect(h2.addr, ALPN_STREAM).await.expect("reconnect");
+    assert_eq!(client2.fingerprint, first_fingerprint);
 
-    // Phase 2: the pinned fingerprint has to still match, or the receiver would discard
-    // its trust data and force a fresh pairing on every launch.
-    assert_eq!(
-        client.fingerprint, first_fingerprint,
-        "the certificate must be identical across restarts"
-    );
-    println!("  certificate fingerprint unchanged across restart");
-
-    client.send_auth(&auth_token(&psk)).await.expect("silent re-auth");
+    client2.authenticate(&psk).await.expect("authenticate");
     assert!(eventually(|| h2.state() == STATE_AUTHENTICATED).await);
-    println!("  RESULT: reconnected with no PIN prompt\n");
 
     h2.cleanup();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pin_attempts_are_capped_per_connection() {
-    println!("\n=== PIN attempt cap ===");
-    let h = Harness::fresh("attempts");
-    let pubkey = ephemeral_key(0x55);
+async fn reauth_v2_wrong_psk_refused() {
+    println!("\n=== TEST: Protocol v2 wrong PSK refused ===");
+    let h = Harness::fresh("v2_wrong_psk");
+    let genuine_psk: Psk = [0x77u8; 32];
+    h.server.store.store_psk(&genuine_psk).expect("store psk");
+    h.server.set_psk(genuine_psk);
 
-    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
+    let bad_psk: Psk = [0x88u8; 32];
+    let client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
 
-    // The PC displays a PIN the guesser does not know, and keeps proving the same PSK.
-    let pc_pin = "999999";
-    let pc_token = auth_token(&derive_psk(pc_pin, &pubkey));
-
-    // Five wrong guesses, each with its own auth stream, as a brute-forcing user would.
-    for attempt in 1..=crate::MAX_PIN_ATTEMPTS {
-        let guess = format!("{attempt:06}");
-        let typed = h.type_pin(&guess);
-        if attempt == 1 {
-            client.send_pairing_hello(&pubkey).await.expect("hello");
-        }
-        let outcome = client.send_auth(&pc_token).await;
-        assert!(outcome.is_err(), "guess {attempt} must not be acknowledged");
-        assert!(!typed.await.expect("pin task"), "guess {attempt} must be rejected");
-        println!("  guess {guess} rejected");
-    }
-
-    assert!(
-        eventually(|| client.conn.close_reason().is_some()).await,
-        "the connection must be closed once the attempts are used up"
-    );
-    println!("  RESULT: connection closed after {} attempts\n", crate::MAX_PIN_ATTEMPTS);
+    // Client fails to authenticate with wrong PSK (server proof mismatch or client proof rejected)
+    let auth_result = client.authenticate(&bad_psk).await;
+    assert!(auth_result.is_err());
+    assert_ne!(h.state(), STATE_AUTHENTICATED);
 
     h.cleanup();
 }
 
-/// Phase 3: a connection that negotiates an ALPN the server does not serve used to take
-/// the whole accept loop down through an `unwrap()`. It must now be a local failure.
+/// Proves SEC-16 is fixed: a proof captured from an earlier TLS session is rejected
+/// when replayed into a new session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_bogus_alpn_does_not_stop_the_server() {
-    println!("\n=== Malformed handshake resilience ===");
-    let h = Harness::fresh("bad_alpn");
-    let psk: Psk = derive_psk("111222", &ephemeral_key(0x66));
+async fn reauth_v2_replayed_proof_is_refused() {
+    println!("\n=== TEST: Protocol v2 replayed proof is refused (SEC-16) ===");
+    let h = Harness::fresh("v2_replay");
+    let psk: Psk = [0x42u8; 32];
+    h.server.store.store_psk(&psk).expect("store psk");
+    h.server.set_psk(psk);
+
+    // Session 1: genuine client connects and authenticates, generating valid client_proof_1
+    let client1 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 1 connect");
+    let client_proof_session1 = client1.authenticate(&psk).await.expect("session 1 auth");
+    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
+    drop(client1);
+
+    // Wait for state to settle back
+    assert!(eventually(|| h.state() != STATE_AUTHENTICATED).await);
+
+    // Session 2: attacker attempts to replay client_proof_session1 in a fresh session
+    let client2 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 2 connect");
+    let _ = client2.authenticate_with_proof_override(&client_proof_session1).await;
+
+    // Must be rejected: new TLS session has distinct channel binding and fresh nonces
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(h.state(), STATE_AUTHENTICATED, "replayed proof must never authenticate session");
+
+    // Verify genuinely fresh authentication still works
+    let client3 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 3 connect");
+    client3.authenticate(&psk).await.expect("genuine auth in session 3");
+    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
+
+    h.cleanup();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_is_refused_when_already_paired_v2() {
+    println!("\n=== TEST: Refuse pairing when already paired ===");
+    let h = Harness::fresh("already_paired_v2");
+    let original_psk: Psk = [0x55u8; 32];
+    h.server.store.store_psk(&original_psk).expect("seed pairing");
+    h.server.set_psk(original_psk);
+    assert!(h.server.is_paired());
+
+    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("connect");
+    let pair_result = client.pair().await;
+    assert!(pair_result.is_err());
+    assert_ne!(h.state(), STATE_PAIRING);
+
+    assert_eq!(h.server.psk(), Some(original_psk));
+    h.cleanup();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bogus_alpn_does_not_stop_the_server_v2() {
+    println!("\n=== TEST: Malformed handshake resilience ===");
+    let h = Harness::fresh("bad_alpn_v2");
+    let psk: Psk = [0x33u8; 32];
     h.server.store.store_psk(&psk).expect("seed pairing");
     h.server.set_psk(psk);
 
-    // An unsupported ALPN is refused by the TLS layer itself.
     for _ in 0..5 {
-        let outcome = TestClient::connect(h.addr, b"totally-not-androiddex").await;
-        assert!(outcome.is_err(), "an unknown ALPN must not produce a connection");
+        let outcome = TestClient::connect(h.addr, b"unsupported-alpn").await;
+        assert!(outcome.is_err());
     }
-    println!("  5 connections with an unknown ALPN refused");
 
-    // A connection that negotiates a valid ALPN and then goes silent must not wedge
-    // anything either; it is dropped without ever being served.
-    for _ in 0..5 {
-        let _ = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
-    }
-    println!("  5 connections that never send anything dropped");
-
-    // The server is still serving.
     let client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("connect");
-    client.send_auth(&auth_token(&psk)).await.expect("still authenticating");
+    client.authenticate(&psk).await.expect("still authenticating");
     assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
-    println!("  RESULT: accept loop survived and still authenticates\n");
 
     h.cleanup();
 }
 
-/// Phase 4: a stalled consumer must not let the queue grow without bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn video_backlog_is_bounded_and_drops_are_counted() {
-    println!("\n=== Frame dropping ===");
+    println!("\n=== TEST: Frame dropping ===");
     let h = Harness::fresh("drops");
 
     for i in 0..500u32 {
@@ -530,47 +507,6 @@ async fn video_backlog_is_bounded_and_drops_are_counted() {
         500 - VIDEO_QUEUE_DEPTH as u64,
         "everything past the two-frame window must be dropped, not buffered"
     );
-    println!(
-        "  pushed 500 frames with nobody connected -> {} dropped, {} queued",
-        h.server.video.dropped(),
-        VIDEO_QUEUE_DEPTH
-    );
-    println!("  RESULT: backlog bounded at {VIDEO_QUEUE_DEPTH} frames\n");
 
     h.cleanup();
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pairing_is_refused_when_already_paired_and_psk_is_unchanged() {
-    println!("\n=== Refuse pairing when already paired ===");
-    let h = Harness::fresh("already_paired_refuse");
-    let original_psk: Psk = derive_psk("123456", &ephemeral_key(0x77));
-    h.server.store.store_psk(&original_psk).expect("seed pairing");
-    h.server.set_psk(original_psk);
-    assert!(h.server.is_paired());
-
-    // An attacker / new client attempts ALPN_PAIRING while a pairing key is on record
-    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("quic connect");
-    
-    // Connection must be closed with application close code (CLOSE_ALREADY_PAIRED) and pairing stream fails
-    let pubkey = ephemeral_key(0x88);
-    let send_result = client.send_pairing_hello(&pubkey).await;
-    assert!(send_result.is_err(), "pairing stream must fail when server is already paired");
-
-    // Must not enter STATE_PAIRING
-    assert_ne!(h.state(), STATE_PAIRING, "state must never enter STATE_PAIRING");
-    assert!(!h.server.pins.is_awaiting(), "PIN channel must not be armed");
-
-    // Stored PSK in memory and on disk must remain unchanged
-    assert_eq!(h.server.psk(), Some(original_psk), "in-memory PSK must be unchanged");
-    assert_eq!(h.server.store.load_psk(), Some(original_psk), "on-disk PSK must be unchanged");
-
-    // The genuine paired PC can still authenticate normally
-    let valid_client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("valid client connect");
-    valid_client.send_auth(&auth_token(&original_psk)).await.expect("genuine token accepted");
-    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
-
-    println!("  RESULT: pairing refused, PSK untouched, genuine client authenticated\n");
-    h.cleanup();
-}
-

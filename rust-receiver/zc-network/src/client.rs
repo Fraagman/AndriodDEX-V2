@@ -3,10 +3,12 @@ use quinn::{Connection, Endpoint, ClientConfig};
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier, HandshakeSignatureValid};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use zc_security::storage::{load_trust_data, store_trust_data, Fingerprint};
-use zc_security::pairing::{generate_pin, derive_psk};
-use x25519_dalek::{EphemeralSecret, PublicKey};
-use rand_core::OsRng;
-use sha2::{Sha256, Digest};
+use zc_security::pairing::{
+    client_proof, derive_pairing_v2, verify_server_proof,
+};
+use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519};
+use ring::digest::{self, SHA256};
+use ring::rand::{SecureRandom, SystemRandom};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -47,7 +49,7 @@ pub enum ConnectionPhase {
     Scanning(String, u32),
     Found(String),
     Handshaking,
-    WaitingForPin(String),
+    WaitingForSas(String),
     Connected,
     CertificateChanged,
     Failed(String),
@@ -94,9 +96,10 @@ impl ServerCertVerifier for AcceptAnyCertVerifier {
 }
 
 pub fn compute_fingerprint(cert_der: &[u8]) -> Fingerprint {
-    let mut hasher = Sha256::new();
-    hasher.update(cert_der);
-    hasher.finalize().into()
+    let d = digest::digest(&SHA256, cert_der);
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(d.as_ref());
+    fp
 }
 
 pub fn verify_peer_fingerprint(actual_der: &[u8], expected: &Fingerprint) -> Result<Fingerprint, ScanError> {
@@ -262,7 +265,7 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
-        crypto.alpn_protocols = vec![b"androiddex".to_vec()];
+        crypto.alpn_protocols = vec![b"androiddex-v2".to_vec()];
 
         let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
         let mut transport_config = quinn::TransportConfig::default();
@@ -276,35 +279,55 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
         
+        // The cert pin is now defence in depth rather than the root of trust — the SAS and the channel binding are.
         match scan_rndis_subnet(&endpoint, port, Some(fp), &status_callback).await {
             Ok((conn, _)) => {
                 status_callback(ConnectionPhase::Handshaking);
                 
-                let mut auth_ok = false;
-                if let Ok((mut auth_send, mut auth_recv)) = conn.open_bi().await {
-                    let mut hasher = Sha256::new();
-                    hasher.update(&psk);
-                    hasher.update(b"auth");
-                    let token: [u8; 32] = hasher.finalize().into();
-                    
-                    if auth_send.write_all(b"A").await.is_ok() 
-                        && auth_send.write_all(&token).await.is_ok() 
-                        && auth_send.finish().is_ok() {
-                            
-                        let mut ok_buf = [0u8; 2];
-                        if auth_recv.read_exact(&mut ok_buf).await.is_ok() && &ok_buf == b"OK" {
-                            auth_ok = true;
-                        }
-                    }
+                // Export TLS channel binding: 32 bytes via export_keying_material
+                let mut binding = [0u8; 32];
+                conn.export_keying_material(&mut binding, b"androiddex-auth-v2", b"")
+                    .map_err(|e| format!("export_keying_material failed: {e:?}"))?;
+
+                let rng = SystemRandom::new();
+                let mut client_nonce = [0u8; 32];
+                rng.fill(&mut client_nonce).map_err(|_| "CSPRNG failure generating client nonce")?;
+
+                let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
+
+                // 1. PC sends 'C' || client_nonce (33 bytes)
+                let mut req = [0u8; 33];
+                req[0] = b'C';
+                req[1..].copy_from_slice(&client_nonce);
+                auth_send.write_all(&req).await?;
+
+                // 2. Phone replies 'S' || server_nonce || server_proof (1 + 32 + 32 = 65 bytes)
+                let mut resp = [0u8; 65];
+                auth_recv.read_exact(&mut resp).await?;
+                if resp[0] != b'S' {
+                    status_callback(ConnectionPhase::Failed("Invalid auth response tag from phone".into()));
+                    return Err("Invalid auth response tag from phone".into());
                 }
-                
-                if auth_ok {
-                    status_callback(ConnectionPhase::Connected);
-                    return Ok(conn);
-                } else {
-                    status_callback(ConnectionPhase::Failed("Authentication rejected by phone.".into()));
-                    return Err("Authentication rejected by phone.".into());
+                let mut server_nonce = [0u8; 32];
+                server_nonce.copy_from_slice(&resp[1..33]);
+                let presented_server_proof = &resp[33..65];
+
+                // 3. PC verifies server_proof in CONSTANT TIME
+                if !verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, presented_server_proof) {
+                    status_callback(ConnectionPhase::Failed("Server authentication proof mismatch".into()));
+                    return Err("Server authentication proof mismatch".into());
                 }
+
+                // Send 'D' || client_proof (33 bytes)
+                let my_client_proof = client_proof(&psk, &client_nonce, &server_nonce, &binding);
+                let mut client_resp = [0u8; 33];
+                client_resp[0] = b'D';
+                client_resp[1..].copy_from_slice(&my_client_proof);
+                auth_send.write_all(&client_resp).await?;
+                auth_send.finish()?;
+
+                status_callback(ConnectionPhase::Connected);
+                return Ok(conn);
             }
             Err(ScanError::FingerprintMismatch { expected, actual }) => {
                 eprintln!("SECURITY ALERT: Certificate fingerprint mismatch! Expected {:?}, got {:?}", expected, actual);
@@ -326,7 +349,7 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
     
-    crypto.alpn_protocols = vec![b"androiddex-pairing".to_vec()];
+    crypto.alpn_protocols = vec![b"androiddex-pair-v2".to_vec()];
 
     let mut client_config = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
@@ -342,47 +365,73 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
     
     let (conn, fp) = scan_rndis_subnet(&endpoint, port, None, &status_callback).await?;
 
-    let secret = EphemeralSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret);
+    // 1. PC generates an ephemeral X25519 keypair (a, A)
+    let rng = SystemRandom::new();
+    let my_private = EphemeralPrivateKey::generate(&X25519, &rng)
+        .map_err(|_| "Failed generating ephemeral key")?;
+    let mut a_bytes = [0u8; 32];
+    a_bytes.copy_from_slice(
+        my_private
+            .compute_public_key()
+            .map_err(|_| "Failed computing public key")?
+            .as_ref(),
+    );
 
     status_callback(ConnectionPhase::Handshaking);
 
+    // 2. PC opens a bidirectional stream, sends: 'P' || A (1 + 32 bytes)
     let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
-    send_stream.write_all(b"P").await?;
-    send_stream.write_all(public.as_bytes()).await?;
+    let mut req = [0u8; 33];
+    req[0] = b'P';
+    req[1..].copy_from_slice(&a_bytes);
+    send_stream.write_all(&req).await?;
 
-    let pin = generate_pin();
-    status_callback(ConnectionPhase::WaitingForPin(pin.clone()));
+    // 3. Phone replies: 'Q' || B (1 + 32 bytes)
+    let mut reply = [0u8; 33];
+    recv_stream.read_exact(&mut reply).await?;
+    if reply[0] != b'Q' {
+        status_callback(ConnectionPhase::Failed("Expected 'Q' tag from phone".into()));
+        return Err("Expected 'Q' tag from phone".into());
+    }
+    let mut b_bytes = [0u8; 32];
+    b_bytes.copy_from_slice(&reply[1..]);
 
-    let mut buf = [0u8; 2];
-    recv_stream.read_exact(&mut buf).await?;
-    if &buf != b"OK" {
-        status_callback(ConnectionPhase::Failed("Pairing rejected".into()));
-        return Err("Pairing rejected".into());
+    // 5. TLS channel binding: 32 bytes via export_keying_material
+    let mut binding = [0u8; 32];
+    conn.export_keying_material(&mut binding, b"androiddex-pair-v2", b"")
+        .map_err(|e| format!("export_keying_material failed: {e:?}"))?;
+
+    // 4, 6-9. Compute Z, low-order check, transcript, SAS, PSK
+    let peer_public = UnparsedPublicKey::new(&X25519, &b_bytes);
+    let (sas, psk) = agreement::agree_ephemeral(
+        my_private,
+        &peer_public,
+        |z_bytes| {
+            if z_bytes.len() != 32 {
+                return Err("invalid shared secret length".to_string());
+            }
+            let mut z = [0u8; 32];
+            z.copy_from_slice(z_bytes);
+            derive_pairing_v2(&a_bytes, &b_bytes, &binding, &z)
+                .map_err(|e| format!("{e}"))
+        },
+    )
+    .map_err(|_| "X25519 key agreement failed")??;
+
+    // 10. Display 6-digit SAS to user
+    status_callback(ConnectionPhase::WaitingForSas(sas.clone()));
+
+    // 11-12. User confirms or rejects on phone; phone sends 'Y' on match, 'N' otherwise.
+    let mut verdict = [0u8; 1];
+    recv_stream.read_exact(&mut verdict).await?;
+    if verdict[0] != b'Y' {
+        status_callback(ConnectionPhase::Failed("Pairing rejected on phone".into()));
+        return Err("Pairing rejected on phone".into());
     }
 
-    let psk = derive_psk(&pin, public.as_bytes())
-        .map_err(|e| format!("Failed to derive PSK: {:?}", e))?;
-    
-    let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
-    let mut hasher = Sha256::new();
-    hasher.update(&psk);
-    hasher.update(b"auth");
-    let token: [u8; 32] = hasher.finalize().into();
-    auth_send.write_all(b"A").await?;
-    auth_send.write_all(&token).await?;
-    auth_send.finish()?;
-
-    let mut ok_buf = [0u8; 2];
-    auth_recv.read_exact(&mut ok_buf).await?;
-    if &ok_buf != b"OK" {
-        status_callback(ConnectionPhase::Failed("Auth rejected".into()));
-        return Err("Auth rejected".into());
-    }
-    
-    // Store trust data ONLY after auth OK is confirmed
+    // ONLY on 'Y' does either side persist anything.
     store_trust_data(&fp, &psk)?;
-    
+
     status_callback(ConnectionPhase::Connected);
     Ok(conn)
 }
@@ -391,6 +440,7 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
 mod tests {
     use super::*;
     use rcgen::{CertificateParams, KeyPair};
+    use zc_security::pairing::server_proof;
 
     #[test]
     fn test_fingerprint_verification_accepts_identical_and_rejects_different() {
@@ -423,5 +473,42 @@ mod tests {
             }
             other => panic!("Expected ScanError::FingerprintMismatch, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_protocol_v2_vectors() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let binding = [0x33u8; 32];
+        let z = [0x44u8; 32];
+        let client_nonce = [0x55u8; 32];
+        let server_nonce = [0x66u8; 32];
+
+        let (sas, psk) = derive_pairing_v2(&a, &b, &binding, &z).expect("derive_pairing_v2");
+        let s_proof = server_proof(&psk, &client_nonce, &server_nonce, &binding);
+        let c_proof = client_proof(&psk, &client_nonce, &server_nonce, &binding);
+
+        // Assert the exact four literals from Task 20:
+        assert_eq!(sas, "040666");
+
+        let expected_psk: [u8; 32] = [
+            21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195,
+            72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206,
+        ];
+        assert_eq!(psk, expected_psk);
+
+        let expected_server_proof: [u8; 32] = [
+            233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70,
+            203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241,
+        ];
+        assert_eq!(s_proof, expected_server_proof);
+
+        let expected_client_proof: [u8; 32] = [
+            215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97,
+            6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183,
+        ];
+        assert_eq!(c_proof, expected_client_proof);
+
+        assert!(verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, &s_proof));
     }
 }

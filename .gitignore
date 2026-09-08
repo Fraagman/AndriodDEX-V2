@@ -19,8 +19,6 @@ local.properties
 # of build output was committed.
 rust-receiver/target/
 android-host/rust_quic_server/target/
-AndroidDEX-Core/target/
-AndroidDEX-Core/androiddex-video/receiver/target/
 
 # The native QUIC server is cross-compiled by the :app:buildRustQuicServer Gradle task
 # into app/build/rustJniLibs. A .so must never be committed again: a stale one silently
@@ -35,7 +33,6 @@ android-host/app/src/main/jniLibs/
 
 # Packaging output and local databases
 packaging/windows/androiddex.exe
-mdm-console/mdm.db
 protoc/bin/
 
 # Device logs
@@ -47,5 +44,3 @@ logcat*.txt
 android-host/.kotlin/
 android-host/.idea/
 /protoc/
-
-AndroidDEX-Core/build/

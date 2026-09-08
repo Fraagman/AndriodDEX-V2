@@ -7,6 +7,11 @@ Never put a secret in this file.
 
 | #   | Date       | Task | Result |
 |-----|------------|------|--------|
+| 020 | 2026-09-08 | T23 — Phone UI, and prove the whole thing works on real hardware | PASS |
+| 019 | 2026-09-08 | T22 — PC side: implement the same protocol, then cut over | PASS |
+| 018 | 2026-09-08 | T21 — Phone side: implement protocol v2 against those vectors | PASS |
+| 017 | 2026-09-08 | T20 — Protocol v2 pairing and re-auth pure derivation test vectors | PASS |
+| 016 | 2026-09-08 | T19 — Authorised deletions and one leftover bug (DEAD-01, DEAD-02, SEC-08, SEC-09, BUG-11) | PASS |
 | 015 | 2026-09-08 | T18 — The receiver's crypto path must not panic (BUG-10) | PASS |
 | 014 | 2026-09-08 | T17 — The app can leave the phone permanently silent (BUG-09) | PASS |
 | 013 | 2026-09-08 | T16 — Stop two things the software does that it should not (SEC-13, PERF-01) | PASS |
@@ -22,6 +27,601 @@ Never put a secret in this file.
 | 003 | 2026-09-07 | T3 — Fix three concrete bugs (BUG-01, BUG-04, BUG-06) | PASS |
 | 002 | 2026-09-07 | T2 — Delete dead parallel project and untrack build artifacts | PASS |
 | 001 | 2026-09-07 | T1 — Fix broken rust-receiver workspace build (BUG-02) | PASS |
+
+---
+
+## 020 — T23 — Phone UI, and prove the whole thing works on real hardware
+
+### What this task was for
+1. Replace the PIN entry screen on Android host with a pairing confirmation screen showing the 6-digit SAS computed by the native layer (`rust_quic_server`), instructing the user to compare it with the PC screen.
+2. Present two equally prominent action buttons: "They're different" (reject) and "Codes match" (confirm), ensuring the reject path is not visually de-emphasized.
+3. Update `SecurityBridge.kt` to bind to the new JNI surface: `confirmPairing(matched: Boolean)`, `getPendingSas(): String?`, `isAwaitingConfirmation(): Boolean`, `isPaired()`, and `forgetPairing()`. Ensure blocking native confirmation runs off the main thread.
+4. Retain "Forget paired PC" as the only route to clear trust and re-pair.
+5. End-to-end verification of Protocol v2 on physical hardware over USB tethering: build and unit test checks, initial pairing with screenshot of matched SAS, reconnection via mutual challenge-response re-auth without displaying code, and verification of the reject path ensuring no secret data is stored.
+
+### What I changed
+- `android-host/app/src/main/java/com/example/androidhost/screens/PairingConfirmationScreen.kt`:
+  - Created new composable replacing `PinEntryScreen.kt`.
+  - Displays the 6-digit SAS code computed by the native QUIC server in large monospace format (`44.sp`) formatted with a space separator (`XXX  XXX`).
+  - Implements two full-width, equally large buttons: "They're different" (red `0xFFE53935`) and "Codes match" (green `0xFF2E7D32`). Neither is visually de-emphasized.
+  - Submits confirmation / rejection asynchronously via `withContext(Dispatchers.IO) { SecurityBridge.confirmPairing(...) }` so the main UI thread never blocks.
+  - Retains "Forget paired PC" button and "Open control panel" fallback navigation.
+- `android-host/app/src/main/java/com/example/androidhost/screens/PinEntryScreen.kt`:
+  - Deleted legacy PIN entry composable.
+- `android-host/app/src/main/java/com/example/androidhost/security/SecurityBridge.kt`:
+  - Updated JNI declarations to Protocol v2 methods: `nativeConfirmPairing(matched: Boolean): Boolean`, `nativeGetPendingSas(): String?`, `nativeIsAwaitingConfirmation(): Boolean`, `nativeIsPaired(): Boolean`, `nativeClearPairing()`.
+  - Exposed Kotlin companion methods: `confirmPairing(matched: Boolean)`, `getPendingSas(): String?`, `isAwaitingConfirmation(): Boolean`, `isPaired(): Boolean`, `forgetPairing()`.
+- `android-host/app/src/main/java/com/example/androidhost/MainActivity.kt`:
+  - Updated `Screen` enum from `Screen.PIN` to `Screen.PAIRING`.
+  - Updated `when (currentScreen.value)` to render `PairingConfirmationScreen(onPairingSuccess = { currentScreen.value = Screen.DESKTOP })`.
+
+### Decisions I made
+- Styled "They're different" and "Codes match" with equal sizing (`weight(1f)`, `height(56.dp)`) side-by-side with clear high-contrast colors (red vs green), ensuring an observer noticing a mismatched SAS can immediately abort without hunting for a reject button.
+- Cleanly deleted `PinEntryScreen.kt` and renamed screen enum to `Screen.PAIRING` to eliminate dead code and stale nomenclature across the Android UI layer.
+
+### What I did NOT do
+- Did not touch ANY Rust file. Stage 1's protocol was frozen after Task 22.
+- Did not keep any legacy PIN entry UI or PIN verification methods in Kotlin or JNI.
+- Did not de-emphasize or hide the "They're different" reject button.
+- Did not proceed beyond Task 23 to Stage 2 (HARD STOP reached).
+
+### Verification I ran
+
+G23.1 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 6s
+40 actionable tasks: 40 up-to-date
+```
+Cross-compiled native QUIC server for `arm64-v8a` and `x86_64`, built APK successfully.
+
+G23.2 `cd android-host && ./gradlew :app:testDebugUnitTest --rerun-tasks --no-daemon`:
+```
+BUILD SUCCESSFUL in 26s
+28 actionable tasks: 28 executed
+
+Test Suites:
+- LocalInputDispatcherTest: 3 tests, 0 failures, 0 errors, 0 skipped
+- WinitKeyMapTest: 2 tests, 0 failures, 0 errors, 0 skipped
+- FrameSenderTest: 1 test, 0 failures, 0 errors, 0 skipped
+- EncoderStatsTest: 3 tests, 0 failures, 0 errors, 0 skipped
+Total: 9 tests, 0 failures.
+```
+
+G23.3 ON DEVICE AND ON PC — Real end-to-end pairing:
+- Physical phone connected via USB with USB tethering enabled (phone IP `10.188.119.181`, PC RNDIS interface `10.188.119.109`).
+- Started receiver: `cargo run -p zc-core`
+- Both devices independently derived the SAS via X25519 ECDH + TLS channel binding export:
+  - Code shown on PC overlay: `"2 4 4 2 9 4"`
+  - Code shown on phone screen: `"244  294"`
+  - Matched: Yes, identical 6-digit SAS `"244294"`.
+- Captured screenshot on device:
+  Command: `adb exec-out screencap -p > pair.png` (saved to workspace root, size: 213,534 bytes).
+  Screenshot description: Displays title "Confirm Pairing Code" in white, subtitle "Compare the 6-digit code below with the code shown on your PC. Do they match?", large dark rounded card showing electric blue monospace text `244  294`, and two equal-width buttons side-by-side at bottom: Red `They're different` on the left, Green `Codes match` on the right, followed by `Open control panel`.
+- Tapped "Codes match" via `adb shell input tap 774 1467`.
+- Server log:
+  ```
+  User confirmed pairing: match=true
+  Client proof verified successfully, sending confirmation
+  Connection established and authenticated
+  ```
+- Receiver log:
+  ```
+  ConnectionPhase updated to Connected
+  Connected to Android server
+  Opened input stream to server
+  ```
+- Video streaming: Streaming started immediately, frames rendered on PC screen.
+- Persisted files verified:
+  - Phone: `files/pairing_v2.psk` (32 bytes, mode 0600)
+  - PC: `%APPDATA%\AndroidDex\trust_v2.bin` (64 bytes: 32-byte peer cert SHA-256 fingerprint + 32-byte PSK)
+
+G23.4 ON DEVICE — Re-authentication without SAS prompt:
+- Terminated receiver process.
+- Restarted receiver: `cargo run -p zc-core`
+- Mutual challenge-response re-auth executed using stored `pairing_v2.psk` / `trust_v2.bin` and TLS channel binding:
+  ```
+  [2026-09-08T09:12:35Z INFO  zc_network::client] Connecting to 10.188.119.181:9999 (attempt 1)
+  [2026-09-08T09:12:35Z INFO  zc_network::client] Connection established to 10.188.119.181:9999
+  [2026-09-08T09:12:35Z INFO  zc_network::client] ConnectionPhase updated to Connected
+  [2026-09-08T09:12:35Z INFO  zc_core] Connected to Android server
+  [2026-09-08T09:12:35Z INFO  zc_core] Opened input stream to server
+  ```
+- Reconnected immediately without showing any SAS code on either phone or PC screen. Video streamed seamlessly.
+
+G23.5 ON DEVICE — Reject path:
+- PC trust cleared via `cargo run -p zc-core -- --forget-pairing`.
+- Phone trust cleared via tapping "Forget paired PC".
+- Initiated new pairing handshake with fresh ephemeral keypair:
+  - New SAS generated on both devices: `"737819"`.
+- Tapped "They're different" via `adb shell input tap 306 1515`.
+- Server log:
+  ```
+  User rejected pairing: match=false
+  Pairing confirmation rejected by user
+  ```
+- Receiver log:
+  ```
+  Connection lost: Connection closed: Application closed
+  ```
+- Verified storage on phone via adb:
+  Command: `adb shell "run-as com.example.androidhost ls -la files/"`
+  Output:
+  ```
+  total 16
+  drwx------ 3 u0_a287 u0_a287 4096 2026-09-08 14:48 .
+  drwx------ 5 u0_a287 u0_a287 4096 2026-09-08 14:40 ..
+  drwxr-xr-x 2 u0_a287 u0_a287 4096 2026-09-08 14:40 .rust_quic_server
+  -rw------- 1 u0_a287 u0_a287  478 2026-09-08 14:40 tls_identity.bin
+  ```
+  Confirmed: Absolutely no `pairing_v2.psk` was stored. Secrets discarded cleanly.
+
+G23.6 USB tethering status:
+- USB tethering was fully available and active throughout all testing. Hardware verification G23.3, G23.4, and G23.5 all executed and passed on physical device.
+
+---
+
+## 019 — T22 — PC side: implement the same protocol, then cut over
+
+### What this task was for
+1. Implement the PC half of Protocol v2 pairing and re-authentication in `rust-receiver/zc-network/src/client.rs` using the `zc-security` pure functions from Task 20.
+2. Add a known-answer test in `zc-network` asserting the EXACT SAME four vectors produced in Task 20 and Task 21.
+3. Use ONLY the new ALPNs: `androiddex-pair-v2` and `androiddex-v2`. Removed legacy `"androiddex"` and `"androiddex-pairing"` completely.
+4. Keep the fail-closed certificate pinning behavior from Task 11 and keep `--forget-pairing` as the only path that deletes trust data. Added comment explicitly noting that cert pinning is defense-in-depth rather than root of trust (SAS and TLS channel binding are).
+5. Store the v2 PSK under new filename `trust_v2.bin` in `zc-security/src/storage.rs`; delete any legacy `trust.bin` at startup via `cleanup_legacy_trust()`.
+6. Replace `ConnectionPhase::WaitingForPin` with `ConnectionPhase::WaitingForSas` carrying the 6-digit SAS to display, and show it prominently in the egui overlay (`overlay.rs`) with instructions to compare against the phone screen without any "trust anyway" control.
+7. Removed `sha2` and `x25519-dalek` from `zc-network/Cargo.toml`, utilizing `ring` for ephemeral key agreement and fingerprint hashing. Explained `Cargo.lock` diff.
+
+### What I changed
+- `rust-receiver/zc-security/src/storage.rs`:
+  - Updated trust file path to `trust_v2.bin`.
+  - Added `cleanup_legacy_trust()` to remove legacy `trust.bin` at startup and during trust operations (`load_trust_data`, `store_trust_data`, `delete_trust_data`).
+  - Added unit tests `test_v2_trust_storage_roundtrip` and `test_legacy_trust_deleted_at_startup` (using `TEST_MUTEX` to prevent thread races on global `CUSTOM_DATA_PATH`).
+- `rust-receiver/zc-network/Cargo.toml`:
+  - Removed `sha2 = "=0.11.0"` and `x25519-dalek = "=2.0.1"`.
+  - Added `ring = "=0.17.14"`.
+- `rust-receiver/zc-network/src/lib.rs`:
+  - Re-exported `cleanup_legacy_trust` alongside `delete_trust_data`.
+- `rust-receiver/zc-network/src/client.rs`:
+  - Replaced legacy crypto imports with `ring` (`agreement`, `digest`, `rand`) and `zc_security::pairing`.
+  - Replaced `ConnectionPhase::WaitingForPin(String)` with `ConnectionPhase::WaitingForSas(String)`.
+  - Replaced `compute_fingerprint` to use `ring::digest::SHA256`.
+  - Updated re-authentication to ALPN `androiddex-v2`, exported TLS channel binding `b"androiddex-auth-v2"`, sent CSPRNG client nonce, verified server proof in constant time via `verify_server_proof`, and sent client proof.
+  - Updated pairing to ALPN `androiddex-pair-v2`, generated ephemeral X25519 keypair, exported channel binding `b"androiddex-pair-v2"`, derived SAS and PSK via `derive_pairing_v2`, presented SAS via `WaitingForSas`, and stored trust data only on phone confirmation `'Y'`.
+  - Added known-answer test `test_protocol_v2_vectors` asserting the four shared vectors.
+- `rust-receiver/zc-core/src/main.rs`:
+  - Added `zc_network::cleanup_legacy_trust()` at the start of `main()`.
+- `rust-receiver/zc-core/src/ui/overlay.rs`:
+  - Replaced `ConnectionPhase::WaitingForPin` rendering with `ConnectionPhase::WaitingForSas`: displays "Pairing Code", the 6-digit spaced code, and instructions to check against phone screen. No bypass or "trust anyway" button.
+
+### Decisions I made
+- Synchronized `CUSTOM_DATA_PATH` test cases with a static `TEST_MUTEX` in `storage.rs` to prevent parallel test worker interference while preserving simple test execution.
+- Retained fail-closed certificate verification and pinned fingerprint check as secondary defense-in-depth, while relying on the ephemeral ECDH exchange, SAS confirmation, and TLS channel binding as primary MITM protection.
+
+### What I did NOT do
+- Did not touch any file under `android-host/` (strict fence).
+- Did not keep any legacy ALPN or fallback negotiation logic.
+- Did not add a "trust anyway" or bypass option in the receiver UI.
+
+### Verification I ran
+
+G22.1 `cd rust-receiver && cargo test --workspace`:
+```
+running 2 tests
+test client::tests::test_protocol_v2_vectors ... ok
+test client::tests::test_fingerprint_verification_accepts_identical_and_rejects_different ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 8 tests
+test tests::test_zero_shared_secret_rejected ... ok
+test tests::test_protocol_v2_vectors ... ok
+test tests::test_known_answer_psk ... ok
+test tests::test_cert_generation ... ok
+test tests::test_derive_psk ... ok
+test tests::test_generate_pin ... ok
+test storage::tests::test_v2_trust_storage_roundtrip ... ok
+test storage::tests::test_legacy_trust_deleted_at_startup ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 2 tests
+test tests::test_create_mouse_event_scaling ... ok
+test tests::test_create_scroll_event_scaling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+All tests passed across all workspace crates; `client::tests::test_protocol_v2_vectors` passed.
+
+G22.2 `cd rust-receiver && cargo check --workspace --all-targets`:
+```
+    Checking zc-security v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security)
+    Checking zc-network v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-network)
+    Checking zc-core v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.18s
+```
+Exit code 0, 0 warnings.
+
+G22.3 Four known-answer literals comparison across all three implementations:
+| Vector | Task 20 (`zc-security`) | Task 21 (`rust_quic_server`) | Task 22 (`zc-network`) | Match |
+|---|---|---|---|---|
+| **SAS** | `"040666"` | `"040666"` | `"040666"` | ALL THREE IDENTICAL |
+| **PSK** | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` | ALL THREE IDENTICAL |
+| **server_proof** | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` | ALL THREE IDENTICAL |
+| **client_proof** | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` | ALL THREE IDENTICAL |
+
+G22.4 `grep -rn "androiddex-pairing\|b\"androiddex\"" rust-receiver/ --include=*.rs`:
+Output: ZERO occurrences.
+
+G22.5 `cd rust-receiver && cargo build -p zc-core`:
+Exit 0.
+
+G22.6 `git diff --stat rust-receiver/Cargo.lock`:
+```
+ rust-receiver/Cargo.lock | 75 ++----------------------------------------------
+ 1 file changed, 2 insertions(+), 73 deletions(-)
+```
+Explanation of Cargo.lock changes:
+Removing `sha2 = "=0.11.0"` from `zc-network/Cargo.toml` caused Cargo to prune `sha2` and its exclusive transitive dependencies (`block-buffer`, `const-oid`, `crypto-common`, `digest`, `hybrid-array`, `typenum`) from `Cargo.lock` since no crate in the workspace references `sha2`. `x25519-dalek` was removed from `zc-network`'s dependency list in `Cargo.lock`, but its package definition remains in `Cargo.lock` because `zc-security` still lists it in its manifest. `ring` was added to `zc-network`'s dependency list in `Cargo.lock`, using the already locked `ring = "=0.17.14"`.
+
+---
+
+## 018 — T21 — Phone side: implement protocol v2 against those vectors
+
+### What this task was for
+1. Implement steps 4–9 and the re-auth proofs in `android-host/rust_quic_server/src/crypto.rs` using `ring`.
+2. Add known-answer tests asserting the EXACT SAME four vectors task 20 produced, written out as literals in `crypto.rs`.
+3. Replace the PIN channel with a confirmation channel (`ConfirmationChannel`): the phone no longer receives a PIN; it computes the SAS itself and waits for the user to confirm or reject via `wait_for_confirmation`.
+4. Rewire the JNI surface in `lib.rs`: replace `nativeVerifyPin` with `nativeConfirmPairing`, add `nativeGetPendingSas` and `nativeIsAwaitingConfirmation`, retaining `nativeIsPaired` and `nativeClearPairing`.
+5. Serve ONLY the new ALPNs: `androiddex-pair-v2` and `androiddex-v2`. Removed legacy `"androiddex"` and `"androiddex-pairing"` entirely.
+6. Store the v2 PSK under a new filename (`pairing_v2.psk`). Delete legacy `pairing.psk` at startup and log that a re-pair is required. Retain 0600 file permissions and atomic write-then-rename.
+7. Retain the already-paired refusal and the per-IP pairing cooldown.
+8. Update `protocol_tests.rs` to drive the new handshake end-to-end over loopback QUIC (pair-and-stream, rejected confirmation, re-auth success after restart, re-auth wrong PSK refused, and replayed proof refusal proving SEC-16).
+
+### What I changed
+- `android-host/rust_quic_server/src/crypto.rs`:
+  - Implemented `derive_pairing_v2` with low-order point check (`Z != 0`), SHA256 transcript binding, HKDF-Extract, SAS formatting (`%06d`), and PSK derivation.
+  - Implemented `server_proof`, `client_proof`, `verify_server_proof`, and `verify_client_proof` using HMAC-SHA256 and constant-time verification.
+  - Added unit tests for known-answer vectors matching Task 20, zero shared secret rejection, 6-digit SAS formatting, channel binding variation, nonce variation, and proof length validation.
+- `android-host/rust_quic_server/src/store.rs`:
+  - Changed PSK storage filename to `pairing_v2.psk`.
+  - Added startup deletion of legacy `pairing.psk` with logging indicating re-pair requirement.
+  - Added test `legacy_psk_deleted_at_startup`.
+- `android-host/rust_quic_server/src/pairing.rs`:
+  - Replaced `PinChannel` with `ConfirmationChannel` (`get_pending_sas`, `wait_for_confirmation`, `submit_blocking`, `cancel`).
+  - Implemented timeout, stale submission rejection, and unwrap-free error handling.
+- `android-host/rust_quic_server/src/lib.rs`:
+  - Updated ALPN constants to `ALPN_PAIRING = b"androiddex-pair-v2"` and `ALPN_STREAM = b"androiddex-v2"`.
+  - Updated `pair_and_serve` for Protocol v2 (ephemeral key exchange `P`/`Q`, channel binding via `export_keying_material`, SAS confirmation, and `Y`/`N` reply).
+  - Updated `authenticate_and_serve` for Protocol v2 challenge-response (`C` || client_nonce, `S` || server_nonce || server_proof, `D` || client_proof) with constant-time verification.
+  - Rewired JNI surface to expose `nativeConfirmPairing`, `nativeGetPendingSas`, and `nativeIsAwaitingConfirmation`.
+- `android-host/rust_quic_server/src/tls.rs`:
+  - Updated test ALPN literals from `b"androiddex"` to `b"androiddex-v2"`.
+- `android-host/rust_quic_server/src/protocol_tests.rs`:
+  - Updated loopback test client and harness to drive Protocol v2 pairing and re-authentication.
+  - Added `reauth_v2_replayed_proof_is_refused` test proving SEC-16 fix.
+
+### Decisions I made
+- Preserved strict zero-unwrap/zero-expect discipline in production code: used `?` with appropriate error mapping throughout `lib.rs`, `pairing.rs`, `crypto.rs`, and `store.rs`.
+- Added `#![cfg(test)]` to `protocol_tests.rs` to make test scoping explicit across analysis tools.
+- Ensured channel binding is exported identically with label `b"androiddex-pair-v2"` for pairing and `b"androiddex-auth-v2"` for re-authentication.
+
+### What I did NOT do
+- Did not touch any Kotlin file in `android-host/` (frozen until Task 23).
+- Did not touch any file under `rust-receiver/` (frozen until Task 22).
+- Did not keep any legacy ALPN ("androiddex" or "androiddex-pairing") or legacy fallback paths.
+
+### Verification I ran
+
+G21.1 `cd android-host/rust_quic_server && cargo test --release`:
+```
+running 34 tests
+test crypto::tests::different_channel_bindings_yield_different_sas_and_psk ... ok
+test crypto::tests::zero_shared_secret_is_rejected ... ok
+test frames::tests::drops_the_oldest_when_full ... ok
+test frames::tests::clear_empties_without_counting_drops ... ok
+test crypto::tests::sas_format_is_always_six_digits ... ok
+test crypto::tests::verify_proofs_reject_wrong_lengths ... ok
+test crypto::tests::different_nonces_yield_different_proofs ... ok
+test frames::tests::depth_never_exceeds_capacity ... ok
+test crypto::tests::known_answer_v2_vectors ... ok
+test pairing::tests::submitting_without_a_handshake_is_rejected_immediately ... ok
+test pairing::tests::cancel_clears_pending_sas_and_awaiting_state ... ok
+test pairing::tests::a_rejected_confirmation_returns_false_to_the_caller ... ok
+test pairing::tests::a_submitted_confirmation_reaches_the_waiter_and_the_verdict_returns ... ok
+test tests::a_random_client_proof_never_verifies ... ok
+test tests::untrusted_bytes_are_escaped_before_logging ... ok
+test tests::v2_auth_request_layout_is_33_bytes ... ok
+test store::tests::legacy_psk_deleted_at_startup ... ok
+test store::tests::truncated_psk_is_rejected ... ok
+test store::tests::oversized_psk_is_rejected ... ok
+test store::tests::corrupt_tls_identity_is_rejected ... ok
+test store::tests::psk_round_trips ... ok
+test protocol_tests::video_backlog_is_bounded_and_drops_are_counted ... ok
+test protocol_tests::pairing_is_refused_when_already_paired_v2 ... ok
+test tls::tests::the_certificate_survives_a_restart ... ok
+test protocol_tests::pair_v2_rejected_confirmation_stores_nothing ... ok
+test store::tests::tls_identity_round_trips ... ok
+test protocol_tests::reauth_v2_wrong_psk_refused ... ok
+test tls::tests::a_corrupt_identity_is_regenerated_rather_than_fatal ... ok
+test frames::tests::pop_wakes_on_a_later_push ... ok
+test protocol_tests::pair_v2_success_and_streams_video ... ok
+test protocol_tests::a_bogus_alpn_does_not_stop_the_server_v2 ... ok
+test pairing::tests::waiting_times_out_when_no_confirmation_arrives ... ok
+test protocol_tests::reauth_v2_success_after_restart ... ok
+test protocol_tests::reauth_v2_replayed_proof_is_refused ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+```
+Count: 34 tests (HIGHER than 31).
+Tests added / updated:
+- `crypto::tests::known_answer_v2_vectors`
+- `crypto::tests::zero_shared_secret_is_rejected`
+- `crypto::tests::sas_format_is_always_six_digits`
+- `crypto::tests::different_channel_bindings_yield_different_sas_and_psk`
+- `crypto::tests::different_nonces_yield_different_proofs`
+- `crypto::tests::verify_proofs_reject_wrong_lengths`
+- `pairing::tests::submitting_without_a_handshake_is_rejected_immediately`
+- `pairing::tests::cancel_clears_pending_sas_and_awaiting_state`
+- `pairing::tests::a_submitted_confirmation_reaches_the_waiter_and_the_verdict_returns`
+- `pairing::tests::a_rejected_confirmation_returns_false_to_the_caller`
+- `pairing::tests::waiting_times_out_when_no_confirmation_arrives`
+- `store::tests::legacy_psk_deleted_at_startup`
+- `tests::v2_auth_request_layout_is_33_bytes`
+- `protocol_tests::pair_v2_success_and_streams_video`
+- `protocol_tests::pair_v2_rejected_confirmation_stores_nothing`
+- `protocol_tests::reauth_v2_success_after_restart`
+- `protocol_tests::reauth_v2_wrong_psk_refused`
+- `protocol_tests::reauth_v2_replayed_proof_is_refused`
+- `protocol_tests::pairing_is_refused_when_already_paired_v2`
+- `protocol_tests::a_bogus_alpn_does_not_stop_the_server_v2`
+
+G21.2 Four known-answer literals comparison:
+| Vector | Task 20 Literal (`zc-security`) | Task 21 Literal (`rust_quic_server`) | Match |
+|---|---|---|---|
+| **SAS** | `"040666"` | `"040666"` | IDENTICAL |
+| **PSK** | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` | IDENTICAL |
+| **server_proof** | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` | IDENTICAL |
+| **client_proof** | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` | IDENTICAL |
+
+G21.3 `grep for unwrap() / expect( outside #[cfg(test)] in this crate`:
+Output: ZERO occurrences.
+
+G21.4 `grep -rn "androiddex-pairing\"\|b\"androiddex\"" on the crate`:
+Output: ZERO occurrences.
+
+G21.5 Replay-refusal test in full and passing line:
+```rust
+/// Proves SEC-16 is fixed: a proof captured from an earlier TLS session is rejected
+/// when replayed into a new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reauth_v2_replayed_proof_is_refused() {
+    println!("\n=== TEST: Protocol v2 replayed proof is refused (SEC-16) ===");
+    let h = Harness::fresh("v2_replay");
+    let psk: Psk = [0x42u8; 32];
+    h.server.store.store_psk(&psk).expect("store psk");
+    h.server.set_psk(psk);
+
+    // Session 1: genuine client connects and authenticates, generating valid client_proof_1
+    let client1 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 1 connect");
+    let client_proof_session1 = client1.authenticate(&psk).await.expect("session 1 auth");
+    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
+    drop(client1);
+
+    // Wait for state to settle back
+    assert!(eventually(|| h.state() != STATE_AUTHENTICATED).await);
+
+    // Session 2: attacker attempts to replay client_proof_session1 in a fresh session
+    let client2 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 2 connect");
+    let _ = client2.authenticate_with_proof_override(&client_proof_session1).await;
+
+    // Must be rejected: new TLS session has distinct channel binding and fresh nonces
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(h.state(), STATE_AUTHENTICATED, "replayed proof must never authenticate session");
+
+    // Verify genuinely fresh authentication still works
+    let client3 = TestClient::connect(h.addr, ALPN_STREAM).await.expect("session 3 connect");
+    client3.authenticate(&psk).await.expect("genuine auth in session 3");
+    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
+
+    h.cleanup();
+}
+```
+Passing line:
+`test protocol_tests::reauth_v2_replayed_proof_is_refused ... ok`
+
+G21.6 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 50s
+40 actionable tasks: 5 executed, 35 up-to-date
+Configuration cache entry reused.
+```
+
+---
+
+## 017 — T20 — Protocol v2 pairing and re-auth pure derivation test vectors
+
+### What this task was for
+1. Implement pure cryptographic functions for Protocol v2 pairing in `zc-security::pairing`:
+   - Step 4: Low-order point check (reject all-zero `Z`).
+   - Step 6: `transcript = SHA256( b"androiddex-pair-v2" || A || B || binding )`.
+   - Step 7: `prk = HKDF-Extract(salt = transcript, ikm = Z)`.
+   - Step 8: `sas_bytes = HKDF-Expand(prk, info = b"sas", 4 bytes)`, `sas = u32::from_be_bytes(sas_bytes) % 1_000_000`, formatted as 6 digits with leading zeros (`%06d`).
+   - Step 9: `psk = HKDF-Expand(prk, info = b"psk", 32 bytes)`.
+2. Implement pure cryptographic functions for Protocol v2 re-authentication in `zc-security::pairing`:
+   - `server_proof = HMAC-SHA256(psk, b"server-proof" || client_nonce || server_nonce || binding)`.
+   - `client_proof = HMAC-SHA256(psk, b"client-proof" || client_nonce || server_nonce || binding)`.
+   - Constant-time verification functions `verify_server_proof` and `verify_client_proof`.
+3. Establish fixed test vectors for inputs:
+   - `A = [0x11; 32]`
+   - `B = [0x22; 32]`
+   - `binding = [0x33; 32]`
+   - `Z = [0x44; 32]`
+   - `client_nonce = [0x55; 32]`
+   - `server_nonce = [0x66; 32]`
+4. Verify rejection of all-zero `Z` before any derivation occurs.
+
+### What I changed
+- `rust-receiver/zc-security/src/pairing.rs`:
+  - Added `PairingError` enum (`AllZeroSharedSecret`, `CryptoError`).
+  - Implemented `derive_pairing_v2`, `server_proof`, `client_proof`, `verify_server_proof`, and `verify_client_proof`.
+  - Retained legacy `generate_pin` and `derive_psk` to preserve compatibility with `zc-network/src/client.rs` until cutover in Task 22.
+- `rust-receiver/zc-security/src/lib.rs`:
+  - Added `test_protocol_v2_vectors` asserting hardcoded literals for SAS, PSK, server_proof, and client_proof, printing the computed values.
+  - Added `test_zero_shared_secret_rejected` asserting that all-zero `Z` returns `Err(PairingError::AllZeroSharedSecret)`.
+
+### Decisions I made
+- Kept legacy `generate_pin` and `derive_psk` in `pairing.rs` during Task 20 to avoid breaking compilation or warnings in `zc-network/src/client.rs` before Task 22.
+- Used `ring::constant_time::verify_slices_are_equal` for the all-zero check of `Z` as well as proof verification to ensure timing-attack resistance.
+
+### What I did NOT do
+- Did not touch any networking code, wire protocol, or ALPN strings.
+- Did not modify any UI code in either the receiver or the Android host.
+- Did not touch any files outside `rust-receiver/zc-security/src/pairing.rs` and `rust-receiver/zc-security/src/lib.rs`.
+
+### Verification I ran
+
+G20.1 `cd rust-receiver && cargo test -p zc-security -- --nocapture`:
+```
+running 6 tests
+test tests::test_zero_shared_secret_rejected ... ok
+=== PROTOCOL V2 TEST VECTORS ===
+SAS: 040666
+PSK: [21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]
+server_proof: [233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]
+client_proof: [215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]
+================================
+test tests::test_derive_psk ... ok
+test tests::test_known_answer_psk ... ok
+test tests::test_protocol_v2_vectors ... ok
+test tests::test_cert_generation ... ok
+test tests::test_generate_pin ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+G20.2 `cd rust-receiver && cargo check --workspace --all-targets`:
+```
+    Checking zc-security v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-security)
+    Checking zc-network v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-network)
+    Checking zc-core v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.67s
+```
+Exit 0 with 0 warnings.
+
+G20.3 Protocol v2 Test Vectors:
+
+| Vector | Value |
+|---|---|
+| **SAS** | `040666` |
+| **PSK** | `[21, 97, 41, 45, 233, 40, 231, 116, 228, 17, 232, 172, 15, 105, 128, 195, 72, 5, 26, 98, 78, 168, 43, 225, 61, 47, 83, 80, 246, 130, 13, 206]` |
+| **server_proof** | `[233, 15, 167, 106, 1, 144, 225, 156, 139, 176, 114, 148, 69, 36, 248, 70, 203, 69, 180, 56, 185, 117, 98, 194, 215, 168, 86, 78, 67, 99, 10, 241]` |
+| **client_proof** | `[215, 170, 107, 90, 253, 145, 225, 74, 51, 2, 152, 214, 12, 105, 81, 97, 6, 145, 45, 71, 94, 91, 202, 76, 151, 126, 38, 228, 105, 199, 75, 183]` |
+
+G20.4 Confirmed:
+No networking, ALPN or UI code was touched in this task. Only `rust-receiver/zc-security/src/pairing.rs` and `rust-receiver/zc-security/src/lib.rs` were modified.
+
+---
+
+## 016 — T19 — Authorised deletions and one leftover bug (DEAD-01, DEAD-02, SEC-08, SEC-09, BUG-11)
+
+### What this task was for
+1. Remove `AndroidDEX-Core/` entirely from git and disk (63 tracked files; dead core architecture).
+2. Remove `mdm-console/` entirely from git and disk (25 tracked files; dead MDM console with unauthenticated API and security issues).
+3. Clean `.gitignore` of entries that only existed for those two trees (`AndroidDEX-Core/target/`, `AndroidDEX-Core/androiddex-video/receiver/target/`, `mdm-console/mdm.db`, `AndroidDEX-Core/build/`).
+4. Fix BUG-11:
+   - Call `AudioCaptureService.tryRestoreMutedVolume(this)` from `MainActivity.onCreate` using the real Activity Context.
+   - In `AudioCaptureService`, remove the reflection block querying hidden API `android.app.ActivityThread.currentApplication()` and the companion `init` block that invoked it.
+
+### What I changed
+- `AndroidDEX-Core/`: removed entire directory and all 63 tracked files via `git rm -r -f` and deleted leftover disk directory.
+- `mdm-console/`: removed entire directory and all 25 tracked files via `git rm -r -f` and deleted leftover disk directory.
+- `.gitignore`: removed target/build paths for `AndroidDEX-Core` and `mdm-console/mdm.db`.
+- `android-host/app/src/main/java/com/example/androidhost/service/AudioCaptureService.kt`: deleted companion `init` and `ActivityThread` reflection block; updated `tryRestoreMutedVolume(context: Context)` to take and use the provided context.
+- `android-host/app/src/main/java/com/example/androidhost/MainActivity.kt`: imported `AudioCaptureService` and invoked `AudioCaptureService.tryRestoreMutedVolume(this)` at the start of `onCreate`.
+
+### Decisions I made
+- Removed `init` block from `AudioCaptureService.companion object` so that muted volume recovery does not rely on companion class initialization during Control Panel composition.
+- Provided explicit non-null `Context` parameter to `tryRestoreMutedVolume(context: Context)`, eliminating the hidden API reflection call.
+
+### What I did NOT do
+- Did not edit historical entries in `progress.md`.
+- Did not touch any files outside the defined scope (`AndroidDEX-Core/`, `mdm-console/`, `.gitignore`, `MainActivity.kt`, `AudioCaptureService.kt`).
+- Did not execute `git commit`, `git push`, or any forbidden git commands.
+
+### Verification I ran
+
+G19.1 `git ls-files AndroidDEX-Core/ mdm-console/`:
+```
+(no output)
+```
+
+G19.2 Directory existence check:
+```
+False
+False
+```
+Neither directory exists on disk.
+
+G19.3 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`:
+```
+BUILD SUCCESSFUL in 18s
+40 actionable tasks: 4 executed, 36 up-to-date
+```
+
+G19.4 `cd android-host && ./gradlew :app:testDebugUnitTest --no-daemon`:
+```
+BUILD SUCCESSFUL in 10s
+28 actionable tasks: 4 executed, 24 up-to-date
+```
+All 9 unit tests passed with 0 failures:
+- `LocalInputDispatcherTest`: 3 passed, 0 failures
+- `WinitKeyMapTest`: 2 passed, 0 failures
+- `FrameSenderTest`: 1 passed, 0 failures
+- `EncoderStatsTest`: 3 passed, 0 failures
+
+G19.5 `cd rust-receiver && cargo check --workspace --all-targets`:
+```
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.14s
+```
+Exit 0 with 0 warnings.
+
+G19.6 `grep -rn "ActivityThread" android-host/app/src/`:
+```
+(no output)
+```
+
+G19.7 ON DEVICE, the BUG-11 test:
+```
+adb shell "cmd audio set-volume 3 10"
+calling AudioManager.setStreamVolume(3, 10, 0)
+
+adb shell "cmd audio get-stream-volume 3"
+AudioManager.getStreamVolume(3) -> 10
+
+adb shell "run-as com.example.androidhost sh -c 'cat shared_prefs/audio_capture_prefs.xml'"
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <int name="restore_volume" value="10" />
+</map>
+
+adb shell "cmd audio set-volume 3 0"
+calling AudioManager.setStreamVolume(3, 0, 0)
+
+adb shell "cmd audio get-stream-volume 3"
+AudioManager.getStreamVolume(3) -> 0
+
+adb shell am force-stop com.example.androidhost
+adb shell am start -n com.example.androidhost/.MainActivity
+Starting: Intent { cmp=com.example.androidhost/.MainActivity }
+
+adb shell "cmd audio get-stream-volume 3"
+AudioManager.getStreamVolume(3) -> 10
+
+adb shell "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"
+  mCurrentFocus=Window{258705a u0 com.example.androidhost/com.example.androidhost.MainActivity}
+  mFocusedApp=ActivityRecord{32091347 u0 com.example.androidhost/.MainActivity t15396}
+```
+Stream volume 3 restored to 10 upon launching `MainActivity` while on the pairing screen, without opening the Control Panel.
 
 ---
 

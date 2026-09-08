@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.androidhost.service.TetheringService
+import com.example.androidhost.service.AudioCaptureService
 import kotlinx.coroutines.delay
 
 class MainActivity : FragmentActivity() {
@@ -71,10 +72,11 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AudioCaptureService.tryRestoreMutedVolume(this)
         enableEdgeToEdge()
         setContent {
             val currentScreen = remember { 
-                mutableStateOf(Screen.PIN) 
+                mutableStateOf(Screen.PAIRING) 
             }
 
             val ctx = LocalContext.current
@@ -86,8 +88,8 @@ class MainActivity : FragmentActivity() {
             }
 
             when (currentScreen.value) {
-                Screen.PIN -> com.example.androidhost.screens.PinEntryScreen(
-                    onPinSuccess = { currentScreen.value = Screen.DESKTOP }
+                Screen.PAIRING -> com.example.androidhost.screens.PairingConfirmationScreen(
+                    onPairingSuccess = { currentScreen.value = Screen.DESKTOP }
                 )
                 Screen.LOCK -> com.example.androidhost.screens.BiometricLockScreen(
                     onUnlockSuccess = { currentScreen.value = Screen.DESKTOP }
@@ -289,5 +291,5 @@ fun ControlPanel(
 }
 
 enum class Screen {
-    PIN, LOCK, DESKTOP
+    PAIRING, LOCK, DESKTOP
 }

@@ -17,6 +17,7 @@ use prost::Message;
 const INPUT_BUFFER_MAX: usize = 1000;
 
 fn main() {
+    zc_network::cleanup_legacy_trust();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--forget-pairing") {
         zc_network::delete_trust_data();

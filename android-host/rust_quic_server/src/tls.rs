@@ -99,10 +99,10 @@ mod tests {
         let dir = temp_dir("stable");
         let store = SecureStore::open(&dir).expect("open store");
 
-        build_server_config(&store, &[b"androiddex"]).expect("first start");
+        build_server_config(&store, &[b"androiddex-v2"]).expect("first start");
         let first = store.load_tls_identity().expect("identity persisted").cert_der;
 
-        build_server_config(&store, &[b"androiddex"]).expect("second start");
+        build_server_config(&store, &[b"androiddex-v2"]).expect("second start");
         let second = store.load_tls_identity().expect("identity still there").cert_der;
 
         assert_eq!(first, second, "the certificate must not change between launches");
@@ -114,7 +114,7 @@ mod tests {
         let dir = temp_dir("corrupt");
         let store = SecureStore::open(&dir).expect("open store");
 
-        build_server_config(&store, &[b"androiddex"]).expect("first start");
+        build_server_config(&store, &[b"androiddex-v2"]).expect("first start");
         let original = store.load_tls_identity().expect("identity").cert_der;
 
         // Well-formed envelope, garbage DER inside: load_tls_identity succeeds but rustls
@@ -123,7 +123,7 @@ mod tests {
             .store_tls_identity(&TlsIdentity { cert_der: vec![0xAA; 16], key_der: vec![0xBB; 16] })
             .expect("write garbage");
 
-        build_server_config(&store, &[b"androiddex"]).expect("recovers");
+        build_server_config(&store, &[b"androiddex-v2"]).expect("recovers");
         let replacement = store.load_tls_identity().expect("identity").cert_der;
 
         assert_ne!(replacement, vec![0xAA; 16], "garbage must have been replaced");

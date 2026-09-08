@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::{Psk, PSK_LEN};
 
-const PSK_FILE: &str = "pairing.psk";
-const CERT_FILE: &str = "tls_identity.bin";
+pub const PSK_V2_FILE: &str = "pairing_v2.psk";
+pub const LEGACY_PSK_FILE: &str = "pairing.psk";
+pub const CERT_FILE: &str = "tls_identity.bin";
 
 /// A DER certificate chain element plus its PKCS#8 private key.
 pub struct TlsIdentity {
@@ -26,11 +27,21 @@ pub struct SecureStore {
 }
 
 impl SecureStore {
-    /// Creates the directory if needed and tightens its permissions.
+    /// Creates the directory if needed, tightens its permissions, and deletes any legacy
+    /// pairing file from the broken v1 scheme.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
         restrict_dir(&dir)?;
+
+        let legacy = dir.join(LEGACY_PSK_FILE);
+        if legacy.exists() {
+            match fs::remove_file(&legacy) {
+                Ok(()) => crate::log_i!("legacy pairing.psk deleted at startup; re-pair required for protocol v2"),
+                Err(e) => crate::log_w!("could not delete legacy pairing.psk at startup: {e}"),
+            }
+        }
+
         Ok(Self { dir })
     }
 
@@ -41,7 +52,7 @@ impl SecureStore {
     // -- PSK ---------------------------------------------------------------
 
     pub fn load_psk(&self) -> Option<Psk> {
-        let mut file = fs::File::open(self.path(PSK_FILE)).ok()?;
+        let mut file = fs::File::open(self.path(PSK_V2_FILE)).ok()?;
         let mut psk = [0u8; PSK_LEN];
         file.read_exact(&mut psk).ok()?;
 
@@ -55,15 +66,20 @@ impl SecureStore {
     }
 
     pub fn store_psk(&self, psk: &Psk) -> io::Result<()> {
-        write_private(&self.path(PSK_FILE), &[psk.as_slice()])
+        write_private(&self.path(PSK_V2_FILE), &[psk.as_slice()])
     }
 
     pub fn clear_psk(&self) {
-        let path = self.path(PSK_FILE);
-        match fs::remove_file(&path) {
+        let path_v2 = self.path(PSK_V2_FILE);
+        match fs::remove_file(&path_v2) {
             Ok(()) => crate::log_i!("cleared stored pairing key"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => crate::log_w!("could not clear stored pairing key: {e}"),
+        }
+
+        let path_legacy = self.path(LEGACY_PSK_FILE);
+        if path_legacy.exists() {
+            let _ = fs::remove_file(&path_legacy);
         }
     }
 
@@ -191,7 +207,7 @@ mod tests {
     fn truncated_psk_is_rejected() {
         let dir = temp_dir("trunc");
         let store = SecureStore::open(&dir).expect("open store");
-        fs::write(dir.join(PSK_FILE), [1u8; 16]).expect("write short file");
+        fs::write(dir.join(PSK_V2_FILE), [1u8; 16]).expect("write short file");
         assert!(store.load_psk().is_none());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -200,8 +216,22 @@ mod tests {
     fn oversized_psk_is_rejected() {
         let dir = temp_dir("over");
         let store = SecureStore::open(&dir).expect("open store");
-        fs::write(dir.join(PSK_FILE), [1u8; 33]).expect("write long file");
+        fs::write(dir.join(PSK_V2_FILE), [1u8; 33]).expect("write long file");
         assert!(store.load_psk().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_psk_deleted_at_startup() {
+        let dir = temp_dir("legacy");
+        fs::create_dir_all(&dir).expect("create dir");
+        let legacy_file = dir.join(LEGACY_PSK_FILE);
+        fs::write(&legacy_file, [99u8; 32]).expect("write legacy");
+        assert!(legacy_file.exists());
+
+        let store = SecureStore::open(&dir).expect("open store");
+        assert!(!legacy_file.exists(), "legacy pairing.psk must be deleted at startup");
+        assert!(store.load_psk().is_none(), "no v2 psk loaded from deleted legacy file");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -238,7 +268,7 @@ mod tests {
         let store = SecureStore::open(&dir).expect("open store");
         store.store_psk(&[0u8; PSK_LEN]).expect("store psk");
 
-        let mode = fs::metadata(dir.join(PSK_FILE)).expect("stat").permissions().mode();
+        let mode = fs::metadata(dir.join(PSK_V2_FILE)).expect("stat").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "psk file must not be group/world readable");
 
         let dir_mode = fs::metadata(&dir).expect("stat dir").permissions().mode();
