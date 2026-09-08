@@ -24,6 +24,7 @@ import android.app.Application
 import com.example.androidhost.DesktopShell
 
 import com.example.androidhost.input.LocalInputDispatcher
+import com.example.androidhost.quic.QuicServer
 
 class DesktopPresentation(
     context: Context,
@@ -40,7 +41,9 @@ class DesktopPresentation(
     private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
-            contentView?.invalidate()
+            if (QuicServer.getConnectionState() == 2) {
+                contentView?.invalidate()
+            }
             heartbeatHandler.postDelayed(this, 500)
         }
     }

@@ -22,7 +22,7 @@ use crate::pairing::PinChannel;
 use crate::store::SecureStore;
 use crate::{
     accept_loop, bind_endpoint, Server, ALPN_PAIRING, ALPN_STREAM, AUDIO_QUEUE_DEPTH,
-    STATE_AUTHENTICATED, STATE_IDLE, VIDEO_QUEUE_DEPTH,
+    STATE_AUTHENTICATED, STATE_IDLE, STATE_PAIRING, VIDEO_QUEUE_DEPTH,
 };
 
 // -- Test harness -----------------------------------------------------------------------
@@ -62,6 +62,7 @@ impl Harness {
             psk: Mutex::new(persisted),
             sessions: AtomicUsize::new(0),
             session_lock: tokio::sync::Mutex::new(()),
+            pairing_cooldowns: Mutex::new(std::collections::HashMap::new()),
         });
 
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
@@ -538,3 +539,38 @@ async fn video_backlog_is_bounded_and_drops_are_counted() {
 
     h.cleanup();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_is_refused_when_already_paired_and_psk_is_unchanged() {
+    println!("\n=== Refuse pairing when already paired ===");
+    let h = Harness::fresh("already_paired_refuse");
+    let original_psk: Psk = derive_psk("123456", &ephemeral_key(0x77));
+    h.server.store.store_psk(&original_psk).expect("seed pairing");
+    h.server.set_psk(original_psk);
+    assert!(h.server.is_paired());
+
+    // An attacker / new client attempts ALPN_PAIRING while a pairing key is on record
+    let client = TestClient::connect(h.addr, ALPN_PAIRING).await.expect("quic connect");
+    
+    // Connection must be closed with application close code (CLOSE_ALREADY_PAIRED) and pairing stream fails
+    let pubkey = ephemeral_key(0x88);
+    let send_result = client.send_pairing_hello(&pubkey).await;
+    assert!(send_result.is_err(), "pairing stream must fail when server is already paired");
+
+    // Must not enter STATE_PAIRING
+    assert_ne!(h.state(), STATE_PAIRING, "state must never enter STATE_PAIRING");
+    assert!(!h.server.pins.is_awaiting(), "PIN channel must not be armed");
+
+    // Stored PSK in memory and on disk must remain unchanged
+    assert_eq!(h.server.psk(), Some(original_psk), "in-memory PSK must be unchanged");
+    assert_eq!(h.server.store.load_psk(), Some(original_psk), "on-disk PSK must be unchanged");
+
+    // The genuine paired PC can still authenticate normally
+    let valid_client = TestClient::connect(h.addr, ALPN_STREAM).await.expect("valid client connect");
+    valid_client.send_auth(&auth_token(&original_psk)).await.expect("genuine token accepted");
+    assert!(eventually(|| h.state() == STATE_AUTHENTICATED).await);
+
+    println!("  RESULT: pairing refused, PSK untouched, genuine client authenticated\n");
+    h.cleanup();
+}
+

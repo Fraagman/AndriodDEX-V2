@@ -44,8 +44,8 @@ class EncoderStats {
      * @return the snapshot if this call closed a window, otherwise null. Callers use the
      *         return value to log without having to track timing themselves.
      */
-    fun record(sizeBytes: Int, isKeyframe: Boolean): Snapshot? {
-        val now = SystemClock.elapsedRealtime()
+    fun record(sizeBytes: Int, isKeyframe: Boolean, nowMs: Long = SystemClock.elapsedRealtime()): Snapshot? {
+        val now = nowMs
         if (windowStartMs == 0L) windowStartMs = now
 
         windowFrames++

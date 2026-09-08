@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 zc-protocol = { path = "../zc-protocol" }
-prost = "0.13"
-winit = "0.29.15"
+prost = "=0.13.5"
+winit = "=0.29.15"

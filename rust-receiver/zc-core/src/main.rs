@@ -17,6 +17,13 @@ use prost::Message;
 const INPUT_BUFFER_MAX: usize = 1000;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--forget-pairing") {
+        zc_network::delete_trust_data();
+        println!("Stored pairing and trust data cleared successfully.");
+        return;
+    }
+
     if cfg!(windows) {
         let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("AndroidDex.exe"));
         let exe_str = exe_path.to_str().unwrap_or("AndroidDex.exe");
@@ -196,29 +203,7 @@ fn main() {
                     is_connected_loop.store(false, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    println!("Connection failed: {}. Falling back to mock 1kHz audio...", e);
-                    if let Some(ref ap) = audio_sender_loop {
-                        let ap = ap.clone();
-                        std::thread::spawn(move || {
-                            let mut phase: f32 = 0.0;
-                            let phase_inc = 1000.0 * 2.0 * std::f32::consts::PI / 48000.0;
-                            // Only play fallback for 3 seconds before next connection attempt
-                            for _ in 0..60 {
-                                let mut buffer = Vec::with_capacity(4800);
-                                for _ in 0..2400 {
-                                    let sample = (phase.sin() * 30000.0) as i16;
-                                    buffer.push(sample); // Left
-                                    buffer.push(sample); // Right
-                                    phase += phase_inc;
-                                    if phase > 2.0 * std::f32::consts::PI {
-                                        phase -= 2.0 * std::f32::consts::PI;
-                                    }
-                                }
-                                ap.play_pcm(&buffer);
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                            }
-                        });
-                    }
+                    eprintln!("Connection failed: {}", e);
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

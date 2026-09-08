@@ -48,3 +48,4 @@ android-host/.kotlin/
 android-host/.idea/
 /protoc/
 
+AndroidDEX-Core/build/

@@ -37,8 +37,6 @@ object InputManager {
                     val bytesRead = QuicServer.pollInput(buffer)
                     if (bytesRead > 0) {
                         handleInputEvent(buffer, bytesRead)
-                    } else {
-                        Thread.sleep(1)
                     }
                 } catch (e: InterruptedException) {
                     break

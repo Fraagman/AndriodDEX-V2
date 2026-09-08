@@ -53,6 +53,46 @@ object FrameSender {
      * @param isKeyframe whether this access unit is an IDR
      * @param ptsUs presentation timestamp in microseconds
      */
+    /**
+     * Serializes a HybridFrame protobuf preceded by the MSG_TYPE_VIDEO (0x01) header byte.
+     */
+    internal fun serializeFrame(
+        payload: ByteString,
+        isKeyframe: Boolean,
+        ptsUs: Long,
+        width: Int,
+        height: Int
+    ): ByteArray {
+        val hybrid = HybridFrame.newBuilder()
+            .setVideo(
+                VideoFrame.newBuilder()
+                    .setNalData(payload)
+                    .setIsKeyframe(isKeyframe)
+                    .setPtsUs(ptsUs)
+                    .setWidth(width)
+                    .setHeight(height)
+            )
+            .build()
+
+        val size = hybrid.serializedSize
+        val out = ByteArray(size + 1)
+        out[0] = MSG_TYPE_VIDEO
+        val stream = CodedOutputStream.newInstance(out, 1, size)
+        hybrid.writeTo(stream)
+        stream.flush()
+        return out
+    }
+
+    /**
+     * Sends one encoded access unit.
+     *
+     * @param nal   the encoder's output buffer, positioned at the payload. Consumed
+     *              in place; the caller still owns it and must release it afterwards.
+     * @param csd   cached SPS/PPS, non-null on keyframes. Prepended to [nal] so a
+     *              client that joins mid-session can start decoding immediately.
+     * @param isKeyframe whether this access unit is an IDR
+     * @param ptsUs presentation timestamp in microseconds
+     */
     fun sendEncodedFrame(
         nal: ByteBuffer,
         csd: ByteArray?,
@@ -70,26 +110,7 @@ object FrameSender {
                 ByteString.copyFrom(nal)
             }
 
-            val hybrid = HybridFrame.newBuilder()
-                .setVideo(
-                    VideoFrame.newBuilder()
-                        .setNalData(payload)
-                        .setIsKeyframe(isKeyframe)
-                        .setPtsUs(ptsUs)
-                        .setWidth(width)
-                        .setHeight(height)
-                )
-                .build()
-
-            // Serialize straight into a buffer that already has room for the type byte,
-            // so the frame is copied once rather than twice.
-            val size = hybrid.serializedSize
-            val out = ByteArray(size + 1)
-            out[0] = MSG_TYPE_VIDEO
-            val stream = CodedOutputStream.newInstance(out, 1, size)
-            hybrid.writeTo(stream)
-            stream.flush()
-
+            val out = serializeFrame(payload, isKeyframe, ptsUs, width, height)
             QuicServer.sendFrame(out)
             framesSent.incrementAndGet()
         } catch (e: Exception) {

@@ -19,8 +19,8 @@ android {
         applicationId = "com.example.androidhost"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0.0"
         ndk {
             abiFilters.add("arm64-v8a")
             abiFilters.add("x86_64")

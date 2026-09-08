@@ -126,6 +126,30 @@ impl OverlayUi {
                     Color32::WHITE,
                 );
             }
+            ConnectionPhase::CertificateChanged => {
+                painter.rect(
+                    banner_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgb(40, 10, 10),
+                    Stroke::new(2.0, Color32::RED),
+                );
+                
+                painter.text(
+                    banner_rect.center() - Vec2::new(0.0, 24.0),
+                    egui::Align2::CENTER_CENTER,
+                    "SECURITY WARNING: Device Identity Changed",
+                    FontId::proportional(28.0),
+                    Color32::from_rgb(255, 80, 80),
+                );
+
+                painter.text(
+                    banner_rect.center() + Vec2::new(0.0, 24.0),
+                    egui::Align2::CENTER_CENTER,
+                    "The device certificate does not match the paired device. The connection may be intercepted.\nTo re-pair with a new device, run the receiver with --forget-pairing.",
+                    FontId::proportional(16.0),
+                    Color32::from_rgb(230, 230, 230),
+                );
+            }
             other_phase => {
                 let msg = match other_phase {
                     ConnectionPhase::Idle => "Connect USB cable and enable USB tethering.".to_string(),

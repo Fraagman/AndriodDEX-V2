@@ -77,6 +77,13 @@ const CLOSE_BAD_ALPN: u32 = 2;
 const CLOSE_NOT_PAIRED: u32 = 3;
 const CLOSE_AUTH_FAILED: u32 = 4;
 const CLOSE_PAIRING_FAILED: u32 = 5;
+const CLOSE_ALREADY_PAIRED: u32 = 6;
+const CLOSE_RATE_LIMITED: u32 = 7;
+
+/// Cooldown between pairing attempts from the same remote IP address.
+const PAIRING_COOLDOWN: Duration = Duration::from_millis(500);
+/// Maximum tracked remote IPs in the pairing cooldown map.
+const MAX_COOLDOWN_ENTRIES: usize = 64;
 
 // -- Shared server state ---------------------------------------------------------------
 
@@ -95,6 +102,8 @@ struct Server {
     /// Only one connection streams at a time; a second one waits rather than stealing
     /// frames out of the queue.
     session_lock: tokio::sync::Mutex<()>,
+    /// Remote address rate limiter for pairing attempts.
+    pairing_cooldowns: Mutex<std::collections::HashMap<std::net::IpAddr, tokio::time::Instant>>,
 }
 
 impl Server {
@@ -122,6 +131,28 @@ impl Server {
 
     fn is_paired(&self) -> bool {
         self.psk().is_some()
+    }
+
+    fn check_pairing_rate_limit(&self, ip: std::net::IpAddr, now: Instant) -> bool {
+        let mut map = match self.pairing_cooldowns.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if map.len() >= MAX_COOLDOWN_ENTRIES {
+            map.retain(|_, last_attempt| now.saturating_duration_since(*last_attempt) < PAIRING_COOLDOWN);
+        }
+        if map.len() >= MAX_COOLDOWN_ENTRIES {
+            if let Some(oldest_key) = map.keys().next().copied() {
+                map.remove(&oldest_key);
+            }
+        }
+        if let Some(last_attempt) = map.get(&ip) {
+            if now.saturating_duration_since(*last_attempt) < PAIRING_COOLDOWN {
+                return false;
+            }
+        }
+        map.insert(ip, now);
+        true
     }
 
     /// Returns the reported state to a resting value once nothing is streaming.
@@ -267,6 +298,7 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
         psk: Mutex::new(persisted_psk),
         sessions: AtomicUsize::new(0),
         session_lock: tokio::sync::Mutex::new(()),
+        pairing_cooldowns: Mutex::new(std::collections::HashMap::new()),
     });
 
     if SERVER.set(server.clone()).is_err() {
@@ -374,6 +406,18 @@ fn printable(bytes: &[u8]) -> String {
 // -- Pairing (ALPN androiddex-pairing) --------------------------------------------------
 
 async fn pair_and_serve(server: Arc<Server>, conn: Connection, remote: std::net::SocketAddr) {
+    if server.is_paired() {
+        log_w!("rejecting pairing attempt from {remote}: device is already paired");
+        conn.close(VarInt::from_u32(CLOSE_ALREADY_PAIRED), b"already paired");
+        return;
+    }
+
+    if !server.check_pairing_rate_limit(remote.ip(), Instant::now()) {
+        log_w!("rejecting pairing attempt from {remote}: rate limit in effect");
+        conn.close(VarInt::from_u32(CLOSE_RATE_LIMITED), b"rate limited");
+        return;
+    }
+
     log_i!("pairing attempt from {remote}");
     server.state.store(STATE_PAIRING, Ordering::SeqCst);
 
@@ -690,7 +734,7 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         return 0;
     };
 
-    let Ok(data) = ctx.input_rx.try_recv() else {
+    let Ok(data) = ctx.input_rx.recv_timeout(Duration::from_millis(20)) else {
         return 0;
     };
     if data.is_empty() {

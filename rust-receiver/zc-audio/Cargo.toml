@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.102"
-cpal = "0.15"
-crossbeam-queue = "0.3"
-rubato = "0.14.1"
+anyhow = "=1.0.102"
+cpal = "=0.15.3"
+crossbeam-queue = "=0.3.12"
+rubato = "=0.14.1"

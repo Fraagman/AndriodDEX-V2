@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu = "0.19"
+wgpu = "=0.19.4"
 zc-protocol = { path = "../zc-protocol" }
-openh264 = "0.6.2"
+openh264 = "=0.6.6"

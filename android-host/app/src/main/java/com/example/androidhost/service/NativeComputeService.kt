@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import java.security.SecureRandom
 import java.util.zip.ZipInputStream
 
 class NativeComputeService : Service() {
@@ -53,7 +54,8 @@ class NativeComputeService : Service() {
                 spawnCodeServer(applicationContext)
                 _nclState.value = ComputeState.RUNNING
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start NCL", e)
+                Log.e(TAG, "Failed to start NCL (termux.zip asset missing or extraction/execution failed)", e)
+                _codeServerPassword.value = null
                 _nclState.value = ComputeState.STOPPED
             }
         }
@@ -62,6 +64,7 @@ class NativeComputeService : Service() {
     fun stopNcl() {
         codeServerProcess?.destroy()
         codeServerProcess = null
+        _codeServerPassword.value = null
         _nclState.value = ComputeState.STOPPED
     }
 
@@ -81,25 +84,43 @@ class NativeComputeService : Service() {
         Log.i(TAG, "Extracting Termux environment...")
         termuxDir.mkdirs()
         
+        val canonicalDestDir = termuxDir.canonicalFile
+        val canonicalDestDirPath = canonicalDestDir.path + File.separator
+
+        val assetManager = context.assets
+        val inputStream = assetManager.open("termux.zip")
+        val zipInputStream = ZipInputStream(inputStream)
+        
         try {
-            val assetManager = context.assets
-            val inputStream = assetManager.open("termux.zip")
-            val zipInputStream = ZipInputStream(inputStream)
-            
             var entry = zipInputStream.nextEntry
             while (entry != null) {
                 val newFile = File(termuxDir, entry.name)
+                val canonicalEntry = newFile.canonicalFile
+                if (!canonicalEntry.path.startsWith(canonicalDestDirPath) && canonicalEntry != canonicalDestDir) {
+                    throw SecurityException("Zip entry '${entry.name}' attempts directory traversal outside destination directory")
+                }
+
                 if (entry.isDirectory) {
                     newFile.mkdirs()
                 } else {
-                    newFile.parentFile?.mkdirs()
-                    val fos = FileOutputStream(newFile)
-                    val buffer = ByteArray(1024)
-                    var len: Int
-                    while (zipInputStream.read(buffer).also { len = it } > 0) {
-                        fos.write(buffer, 0, len)
+                    val parentFile = newFile.parentFile
+                    if (parentFile != null) {
+                        val canonicalParent = parentFile.canonicalFile
+                        if (!canonicalParent.path.startsWith(canonicalDestDirPath) && canonicalParent != canonicalDestDir) {
+                            throw SecurityException("Zip entry parent '${parentFile.path}' attempts directory traversal outside destination directory")
+                        }
+                        parentFile.mkdirs()
                     }
-                    fos.close()
+                    val fos = FileOutputStream(newFile)
+                    try {
+                        val buffer = ByteArray(1024)
+                        var len: Int
+                        while (zipInputStream.read(buffer).also { len = it } > 0) {
+                            fos.write(buffer, 0, len)
+                        }
+                    } finally {
+                        fos.close()
+                    }
                     // Android FileOutputStream strips POSIX permissions, restore execute bits
                     if (newFile.parentFile?.name == "bin" || newFile.parentFile?.name == "libexec" || newFile.name.endsWith(".sh")) {
                         newFile.setExecutable(true)
@@ -108,17 +129,9 @@ class NativeComputeService : Service() {
                 zipInputStream.closeEntry()
                 entry = zipInputStream.nextEntry
             }
-            zipInputStream.close()
             Log.i(TAG, "Termux environment extracted successfully")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to extract termux.zip from assets, assuming testing mock environment: ${e.message}")
-            // Fallback for missing asset in dev
-            val mockBin = File(termuxDir, "usr/bin")
-            mockBin.mkdirs()
-            File(mockBin, "code-server").writeText("#!/system/bin/sh\necho 'Mock code-server started'\nsleep 3600")
-            File(mockBin, "bash").writeText("#!/system/bin/sh\nsh")
-            File(mockBin, "code-server").setExecutable(true)
-            File(mockBin, "bash").setExecutable(true)
+        } finally {
+            zipInputStream.close()
         }
     }
 
@@ -126,14 +139,20 @@ class NativeComputeService : Service() {
         val termuxDir = File(context.filesDir, "termux")
         val codeServerBin = File(termuxDir, "usr/bin/code-server")
         
+        val randomBytes = ByteArray(16)
+        SecureRandom().nextBytes(randomBytes)
+        val password = randomBytes.joinToString("") { "%02x".format(it) }
+        _codeServerPassword.value = password
+
         val processBuilder = ProcessBuilder()
         processBuilder.command(
             codeServerBin.absolutePath,
             "--bind-addr", "127.0.0.1:18080",
-            "--auth", "none"
+            "--auth", "password"
         )
         
         val env = processBuilder.environment()
+        env["PASSWORD"] = password
         env["PREFIX"] = File(termuxDir, "usr").absolutePath
         env["HOME"] = File(termuxDir, "home").absolutePath
         env["PATH"] = "${File(termuxDir, "usr/bin").absolutePath}:${System.getenv("PATH")}"
@@ -153,5 +172,8 @@ class NativeComputeService : Service() {
         private const val TAG = "NativeComputeService"
         private val _nclState = MutableStateFlow(ComputeState.OFF)
         val nclState: StateFlow<ComputeState> = _nclState.asStateFlow()
+        
+        private val _codeServerPassword = MutableStateFlow<String?>(null)
+        val codeServerPassword: StateFlow<String?> = _codeServerPassword.asStateFlow()
     }
 }

@@ -44,7 +44,7 @@ object LocalInputDispatcher {
     private const val WIRE_BUTTON_RIGHT = 2
     private const val WIRE_BUTTON_MIDDLE = 4
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     /**
      * Weak so a dismissed Presentation can be collected even if [detach] is missed.
@@ -309,11 +309,15 @@ object LocalInputDispatcher {
         return state
     }
 
-    private fun scaleX(wireX: Int): Float =
-        (wireX.coerceIn(0, WIRE_WIDTH.toInt() - 1) / WIRE_WIDTH) * DisplayService.CAPTURE_WIDTH
+    internal fun scaleCoordinate(wireVal: Int, wireMax: Float, targetDimension: Int): Float {
+        return (wireVal.coerceIn(0, wireMax.toInt() - 1) / wireMax) * targetDimension
+    }
 
-    private fun scaleY(wireY: Int): Float =
-        (wireY.coerceIn(0, WIRE_HEIGHT.toInt() - 1) / WIRE_HEIGHT) * DisplayService.CAPTURE_HEIGHT
+    internal fun scaleX(wireX: Int, targetWidth: Int = DisplayService.CAPTURE_WIDTH): Float =
+        scaleCoordinate(wireX, WIRE_WIDTH, targetWidth)
+
+    internal fun scaleY(wireY: Int, targetHeight: Int = DisplayService.CAPTURE_HEIGHT): Float =
+        scaleCoordinate(wireY, WIRE_HEIGHT, targetHeight)
 
     /** Sends ACTION_CANCEL if a gesture is mid-flight, so Compose does not hang on it. */
     private fun cancelActiveGesture() {
