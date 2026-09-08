@@ -47,7 +47,7 @@ import kotlinx.coroutines.delay
 fun DesktopShell(
     viewModel: ConnectionViewModel = viewModel(),
     displayViewModel: DisplayViewModel = viewModel(),
-    shellViewModel: ShellViewModel = viewModel(),
+    shellViewModel: ShellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel,
     onLockSession: () -> Unit = {},
     onRequestAudioCapture: (Boolean) -> Unit = {},
     displayId: Int = android.view.Display.DEFAULT_DISPLAY

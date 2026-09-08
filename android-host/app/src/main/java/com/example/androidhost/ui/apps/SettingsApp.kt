@@ -148,10 +148,19 @@ private fun DisplaySection() {
 private fun InputSection() {
     val context = LocalContext.current
     val isImeEnabled = remember { 
-        Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_INPUT_METHODS)?.contains("com.example.androidhost") == true 
+        try {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+            imm?.enabledInputMethodList?.any { it.packageName == context.packageName } == true
+        } catch (e: Exception) {
+            false
+        }
     }
     val isA11yEnabled = remember { 
-        Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)?.contains("com.example.androidhost") == true 
+        try {
+            com.example.androidhost.service.DesktopAccessibilityService.isEnabled(context)
+        } catch (e: Exception) {
+            false
+        }
     }
 
     SectionCard(title = "Input & Accessibility") {
@@ -160,7 +169,12 @@ private fun InputSection() {
             status = if (isImeEnabled) "Enabled" else "Disabled",
             statusColor = if (isImeEnabled) Color.Green else Color.Red,
             actionText = "Open Settings",
-            onAction = { context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) }
+            onAction = {
+                val intent = Intent(Settings.ACTION_INPUT_METHOD_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
         )
         Spacer(modifier = Modifier.height(8.dp))
         SettingRow(
@@ -168,7 +182,12 @@ private fun InputSection() {
             status = if (isA11yEnabled) "Enabled" else "Disabled",
             statusColor = if (isA11yEnabled) Color.Green else Color.Red,
             actionText = "Open Settings",
-            onAction = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+            onAction = {
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
         )
     }
 }

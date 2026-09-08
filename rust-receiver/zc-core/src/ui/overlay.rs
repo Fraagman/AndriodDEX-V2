@@ -5,6 +5,47 @@ use egui_winit::State;
 use winit::window::Window;
 use zc_network::ConnectionPhase;
 
+/// Returns the status line text, RGB color tuple, and central banner message for a given ConnectionPhase.
+/// Deriving both from this single function guarantees the status line and the central message come from
+/// the same ConnectionPhase and cannot contradict each other.
+pub fn phase_display_info(phase: &ConnectionPhase) -> (&'static str, (u8, u8, u8), String) {
+    match phase {
+        ConnectionPhase::Connected => ("Status: Connected", (0, 255, 0), String::new()),
+        ConnectionPhase::Handshaking => ("Status: Handshaking...", (255, 200, 50), "Handshaking...".to_string()),
+        ConnectionPhase::WaitingForSas(_) => ("Status: Pairing...", (100, 200, 255), "Pairing Code".to_string()),
+        ConnectionPhase::PhoneForgotPairing => (
+            "Status: Pairing again...",
+            (255, 200, 50),
+            "The phone forgot this PC, pairing again...".to_string(),
+        ),
+        ConnectionPhase::Scanning(subnet, attempt) => (
+            "Status: Scanning...",
+            (255, 200, 50),
+            format!("Scanning {}... (attempt {})", subnet, attempt),
+        ),
+        ConnectionPhase::Found(addr) => (
+            "Status: Connecting...",
+            (100, 200, 255),
+            format!("Found AndroidDex phone at {}. Connecting...", addr),
+        ),
+        ConnectionPhase::CertificateChanged => (
+            "Status: Device Identity Changed",
+            (255, 80, 80),
+            "SECURITY WARNING: Device Identity Changed".to_string(),
+        ),
+        ConnectionPhase::Failed(reason) => (
+            "Status: Connection Failed",
+            (255, 80, 80),
+            format!("Connection failed: {}. Retrying...", reason),
+        ),
+        ConnectionPhase::Idle => (
+            "Status: Disconnected",
+            (255, 80, 80),
+            "Connect USB cable and enable USB tethering.".to_string(),
+        ),
+    }
+}
+
 pub struct OverlayUi {
     pub context: egui::Context,
     pub state: State,
@@ -57,8 +98,6 @@ impl OverlayUi {
         decode_us: u64,
     ) {
         let raw_input = self.state.take_egui_input(window);
-        
-        let is_connected = matches!(phase, ConnectionPhase::Connected);
         
         let (mx, my) = mouse_pos;
         let is_hovered = mx >= 0.0 && mx <= 250.0 && my >= 0.0 && my <= 120.0;
@@ -166,16 +205,8 @@ impl OverlayUi {
                     Color32::from_rgb(230, 230, 230),
                 );
             }
-            other_phase => {
-                let msg = match other_phase {
-                    ConnectionPhase::Idle => "Connect USB cable and enable USB tethering.".to_string(),
-                    ConnectionPhase::Scanning(subnet, attempt) => format!("Scanning {}... (attempt {})", subnet, attempt),
-                    ConnectionPhase::Found(addr) => format!("Found AndroidDex phone at {}. Connecting...", addr),
-                    ConnectionPhase::Handshaking => "Handshaking...".to_string(),
-                    ConnectionPhase::Failed(reason) => format!("Connection failed: {}. Retrying...", reason),
-                    _ => "".to_string(),
-                };
-                
+            _ => {
+                let (_, _, msg) = phase_display_info(phase);
                 painter.rect(
                     banner_rect,
                     Rounding::ZERO,
@@ -212,12 +243,13 @@ impl OverlayUi {
                 Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8),
             );
 
-            let status_text = if is_connected { "Status: Connected" } else { "Status: Disconnected" };
-            let status_color = if is_connected { 
-                Color32::from_rgba_premultiplied(0, 255, 0, (255.0 * alpha) as u8) 
-            } else { 
-                Color32::from_rgba_premultiplied(255, 0, 0, (255.0 * alpha) as u8) 
-            };
+            let (status_text, (r, g, b), _) = phase_display_info(phase);
+            let status_color = Color32::from_rgba_premultiplied(
+                (r as f32 * alpha) as u8,
+                (g as f32 * alpha) as u8,
+                (b as f32 * alpha) as u8,
+                (255.0 * alpha) as u8,
+            );
             
             painter.text(
                 rect.min + Vec2::new(10.0, 30.0),
@@ -306,3 +338,65 @@ impl OverlayUi {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phase_display_info_consistency() {
+        // Handshaking: status and message must agree (not Disconnected)
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Handshaking);
+        assert_eq!(status, "Status: Handshaking...");
+        assert_eq!(msg, "Handshaking...");
+        assert_ne!(status, "Status: Disconnected");
+        assert_eq!(rgb, (255, 200, 50));
+
+        // PhoneForgotPairing: distinct phase and message
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::PhoneForgotPairing);
+        assert_eq!(status, "Status: Pairing again...");
+        assert_eq!(msg, "The phone forgot this PC, pairing again...");
+        assert_eq!(rgb, (255, 200, 50));
+
+        // Connected
+        let (status, rgb, _) = phase_display_info(&ConnectionPhase::Connected);
+        assert_eq!(status, "Status: Connected");
+        assert_eq!(rgb, (0, 255, 0));
+
+        // WaitingForSas
+        let (status, rgb, _) = phase_display_info(&ConnectionPhase::WaitingForSas("123456".to_string()));
+        assert_eq!(status, "Status: Pairing...");
+        assert_eq!(rgb, (100, 200, 255));
+
+        // Scanning
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Scanning("192.168.1.0/24".to_string(), 1));
+        assert_eq!(status, "Status: Scanning...");
+        assert_eq!(msg, "Scanning 192.168.1.0/24... (attempt 1)");
+        assert_eq!(rgb, (255, 200, 50));
+
+        // Found
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Found("192.168.1.2".to_string()));
+        assert_eq!(status, "Status: Connecting...");
+        assert_eq!(msg, "Found AndroidDex phone at 192.168.1.2. Connecting...");
+        assert_eq!(rgb, (100, 200, 255));
+
+        // CertificateChanged
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::CertificateChanged);
+        assert_eq!(status, "Status: Device Identity Changed");
+        assert_eq!(msg, "SECURITY WARNING: Device Identity Changed");
+        assert_eq!(rgb, (255, 80, 80));
+
+        // Failed
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Failed("test error".to_string()));
+        assert_eq!(status, "Status: Connection Failed");
+        assert_eq!(msg, "Connection failed: test error. Retrying...");
+        assert_eq!(rgb, (255, 80, 80));
+
+        // Idle
+        let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Idle);
+        assert_eq!(status, "Status: Disconnected");
+        assert_eq!(msg, "Connect USB cable and enable USB tethering.");
+        assert_eq!(rgb, (255, 80, 80));
+    }
+}
+

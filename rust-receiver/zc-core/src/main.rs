@@ -67,9 +67,13 @@ fn main() {
             let window_for_callback_loop = window_for_quic.clone();
 
             match zc_network::connect(4433, move |phase| {
-                *phase_clone.lock().unwrap() = phase.clone();
-                if let Some(w) = window_for_callback_loop.lock().unwrap().as_ref() {
-                    w.request_redraw();
+                if let Ok(mut p) = phase_clone.lock() {
+                    *p = phase.clone();
+                }
+                if let Ok(w_guard) = window_for_callback_loop.lock() {
+                    if let Some(w) = w_guard.as_ref() {
+                        w.request_redraw();
+                    }
                 }
                 if matches!(phase, zc_network::ConnectionPhase::Connected) {
                     println!("ConnectionPhase updated to Connected");
@@ -157,8 +161,11 @@ fn main() {
                                     println!("Opened input stream to server");
                                     loop {
                                         let events: Vec<Vec<u8>> = {
-                                            let mut buf = input_buffer_loop.lock().unwrap();
-                                            buf.drain(..).collect()
+                                            if let Ok(mut buf) = input_buffer_loop.lock() {
+                                                buf.drain(..).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
                                         };
 
                                         if events.is_empty() {
@@ -208,7 +215,9 @@ fn main() {
         .build(&event_loop)
         .unwrap());
 
-    *window_for_callback.lock().unwrap() = Some(window.clone());
+    if let Ok(mut w) = window_for_callback.lock() {
+        *w = Some(window.clone());
+    }
 
     let mut renderer = pollster::block_on(renderer::Renderer::new(window.clone()));
     
@@ -405,9 +414,10 @@ fn main() {
                             let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
-                                let mut buf = input_buffer_for_poll.lock().unwrap();
-                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
-                                buf.push_back(serialized);
+                                if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                    buf.push_back(serialized);
+                                }
                             }
                         }
                     }
@@ -429,9 +439,10 @@ fn main() {
                             );
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
-                                let mut buf = input_buffer_for_poll.lock().unwrap();
-                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
-                                buf.push_back(serialized);
+                                if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                    buf.push_back(serialized);
+                                }
                             }
                         }
                     }
@@ -454,9 +465,10 @@ fn main() {
                             let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
-                                let mut buf = input_buffer_for_poll.lock().unwrap();
-                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
-                                buf.push_back(serialized);
+                                if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                    buf.push_back(serialized);
+                                }
                             }
                         }
                     }
@@ -468,9 +480,10 @@ fn main() {
                             let ev = zc_input::create_mouse_event(mouse_pos.0, mouse_pos.1, inner_size.width, inner_size.height, mouse_buttons, wire_mods);
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
-                                let mut buf = input_buffer_for_poll.lock().unwrap();
-                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
-                                buf.push_back(serialized);
+                                if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                    buf.push_back(serialized);
+                                }
                             }
                         }
                     }
@@ -496,6 +509,9 @@ fn main() {
 
                                                 let w = decoded.width;
                                                 let h = decoded.height;
+                                                if w == 0 || h == 0 {
+                                                    continue;
+                                                }
                                                 let cw = (w + 1) / 2; // chroma width
                                                 let ch = (h + 1) / 2; // chroma height
 
@@ -602,9 +618,10 @@ fn main() {
                                                 let ev = zc_input::create_keyframe_request();
                                                 let mut serialized = Vec::new();
                                                 if prost::Message::encode(&ev, &mut serialized).is_ok() {
-                                                    let mut buf = input_buffer_for_poll.lock().unwrap();
-                                                    if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
-                                                    buf.push_back(serialized);
+                                                    if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                                        if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                                        buf.push_back(serialized);
+                                                    }
                                                 }
                                             }
                                         }
@@ -648,7 +665,7 @@ fn main() {
                                 // 2. Render Overlay on top
                                 {
                                     let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Overlay Encoder") });
-                                    let phase = connection_phase.lock().unwrap().clone();
+                                    let phase = connection_phase.lock().map(|p| p.clone()).unwrap_or(zc_network::ConnectionPhase::Connected);
                                     overlay_ui.render(
                                         &window,
                                         renderer.device(),

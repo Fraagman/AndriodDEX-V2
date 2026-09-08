@@ -77,11 +77,10 @@ class DisplayService : Service() {
             if (CAPTURE_WIDTH == width && CAPTURE_HEIGHT == height) return
             CAPTURE_WIDTH = width
             CAPTURE_HEIGHT = height
-            instance?.let {
-                // Restart pipeline to apply new resolution
+            instance?.let { service ->
+                // Dynamically reconfigure pipeline to apply new resolution without destroying DesktopPresentation
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    it.stopEncodingPipeline()
-                    it.startEncodingPipeline()
+                    service.reconfigureResolution()
                 }
             }
         }
@@ -124,7 +123,13 @@ class DisplayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundWithNotification()
-        startEncodingPipeline()
+        val targetWidth = intent?.getIntExtra("WIDTH", -1) ?: -1
+        val targetHeight = intent?.getIntExtra("HEIGHT", -1) ?: -1
+        if (targetWidth > 0 && targetHeight > 0) {
+            updateResolution(targetWidth, targetHeight)
+        } else {
+            startEncodingPipeline()
+        }
         return START_STICKY
     }
 
@@ -271,6 +276,52 @@ class DisplayService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    /**
+     * Dynamically switches the hardware encoder to the new resolution and updates
+     * the existing VirtualDisplay without dismissing DesktopPresentation.
+     *
+     * This avoids destroying the Compose view tree (and the SettingsApp executing
+     * inside it) while adapting the video pipeline to the new resolution.
+     */
+    private fun reconfigureResolution() {
+        val display = virtualDisplay
+        if (display == null) {
+            startEncodingPipeline()
+            return
+        }
+
+        Log.i(TAG, "Reconfiguring resolution to ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}")
+
+        // 1. Release the previous encoder
+        screenEncoder?.release()
+        screenEncoder = null
+        surface = null
+
+        // 2. Prepare the new encoder with updated dimensions
+        val encoder = ScreenEncoder(CAPTURE_WIDTH, CAPTURE_HEIGHT, BIT_RATE, encoderListener)
+        try {
+            encoder.prepare()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to prepare encoder at ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT", e)
+            return
+        }
+
+        screenEncoder = encoder
+        val newSurface = encoder.inputSurface
+        surface = newSurface
+
+        // 3. Resize the VirtualDisplay and attach the new surface
+        display.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_DPI)
+        display.surface = newSurface
+
+        // 4. Start the new encoder and immediately request an IDR keyframe
+        encoderStats.reset()
+        encoder.start()
+        encoder.requestKeyframe(bypassCooldown = true)
+        forceRedraw.value++
+        Log.i(TAG, "Resolution updated successfully to ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}")
     }
 
     /**

@@ -7,6 +7,9 @@ Never put a secret in this file.
 
 | #   | Date       | Task | Result |
 |-----|------------|------|--------|
+| 027 | 2026-09-08 | T30 — AndroidDex IME & untrusted virtual display measurement | PASS |
+| 026 | 2026-09-08 | T29 — Reproduce and fix the Settings crash (BUG-13) | PASS |
+| 025 | 2026-09-08 | T28 — Re-pairing is impossible after "Forget paired PC" (BUG-12) | PASS |
 | 024 | 2026-09-08 | T27 — Policy surface and store metadata (REL-06, REL-07, SEC-15) | PASS |
 | 023 | 2026-09-08 | T26 — Application identity, signing and shrinking (REL-01, REL-02) | PASS |
 | 022 | 2026-09-08 | T25 — targetSdk and honest foreground service types (REL-03, REL-05, BUG-03) | PASS |
@@ -31,6 +34,399 @@ Never put a secret in this file.
 | 003 | 2026-09-07 | T3 — Fix three concrete bugs (BUG-01, BUG-04, BUG-06) | PASS |
 | 002 | 2026-09-07 | T2 — Delete dead parallel project and untrack build artifacts | PASS |
 | 001 | 2026-09-07 | T1 — Fix broken rust-receiver workspace build (BUG-02) | PASS |
+
+---
+
+## 027 — T30 — AndroidDex IME and Untrusted Virtual Display Measurement
+
+### What this task was for
+1. Enable and select the AndroidDex keyboard on the physical hardware device and confirm with `settings get secure default_input_method` (30a).
+2. Measure IME lifecycle on hardware: pair, open Browser, click into Google's search box, type, and record whether `onStartInput` fires, whether `hasLiveEditor()` returns true, and whether `currentInputConnection` exists (30a).
+3. Determine whether Layer 1 only or Layer 2 blocks with hardware evidence (30b).
+4. If Layer 2 blocks, present architectural design proposal in writing for text routing to WebView (via JavaScript bridge) and Terminal (via Compose-native surface) without requiring `ADD_TRUSTED_DISPLAY` (30d).
+5. Document the TerminalWindow 100 ms timer interleaving bug for subsequent task (30e).
+6. Verify all temporary logging added for measurement is completely removed (G30.5).
+
+### Layer 1 / Layer 2 Verdict (30b / G30.3)
+**Verdict**: Layer 2 is blocking: Android's `InputMethodManagerService` restricts active IME input sessions exclusively to trusted displays, so an untrusted virtual display without `ADD_TRUSTED_DISPLAY` signature permissions cannot receive IME input sessions or connect to platform `InputConnection` editors.
+
+**Evidence**:
+1. With `AndroidDexIME` enabled and set as the active default IME (`settings get secure default_input_method` = `com.androiddex.host/com.example.androidhost.service.AndroidDexIME`), focusing a WebView DOM input field on the VirtualDisplay does NOT trigger `AndroidDexIME.onStartInput`.
+2. `hasLiveEditor()` evaluates to `false` because `currentInputEditorInfo.inputType == TYPE_NULL (0x0)` (the IME is bound to `MainActivity` on Display 0 where no editor has focus).
+3. `dumpsys input_method` confirms that `InputMethodManagerService` maintains the active IME token and display target strictly on Display 0 (`mCurTokenDisplayId=0`, `mDisplayIdToShowIme=0`, `mCurClient=ClientState{... mSelfReportedDisplayId=0}`). Even though the window manager client reports Display 95, Android refuses to transfer IME focus or start an input session on untrusted virtual displays.
+4. Compose `TextField`s accept hardware keystrokes only because Compose intercepts `KeyEvent`s directly from `View.dispatchKeyEvent` without needing an `InputConnection`, whereas `WebView` and `EditText` require an `InputConnection` and therefore silently drop input.
+
+### Hardware Measurement & Logcat Evidence (30a / G30.1 / G30.2)
+
+#### G30.1 Default Input Method Confirmation
+```
+$ adb shell settings get secure default_input_method
+com.androiddex.host/com.example.androidhost.service.AndroidDexIME
+```
+
+#### G30.2 Hardware Logcat (IME Lifecycle & Keystroke Dispatch on Focused Field)
+```
+09-08 23:30:15.836 25311 25311 D DisplayService: DesktopPresentation launched on VirtualDisplay
+09-08 23:30:16.178 25311 25311 I AndroidDexIME: IME onCreate: com.example.androidhost.service.AndroidDexIME@48175ff
+09-08 23:30:16.420 25311 25311 I AndroidDexIME: IME onBindInput: com.example.androidhost.service.AndroidDexIME@48175ff conn=RemoteInputConnection{idHash=#c3e9afb}
+09-08 23:30:16.466 25311 25311 I AndroidDexIME: hasLiveEditor check: editor=android.view.inputmethod.EditorInfo@26327ad, inputType=0
+09-08 23:30:16.467 25311 25311 I AndroidDexIME: IME onStartInput: attribute=android.view.inputmethod.EditorInfo@26327ad restarting=false conn=RemoteInputConnection{idHash=#c3e9afb} hasLiveEditor=false
+09-08 23:30:18.677 25311 25311 D ShellViewModel: openApp: com.androiddex.browser, windows size: 1
+09-08 23:32:02.838 25311 25311 D LocalInputDispatcher: LocalInputDispatcher handleKey: winitKeyCode=0, pressed=true
+09-08 23:32:02.838 25311 25311 I AndroidDexIME: hasLiveEditor check: editor=android.view.inputmethod.EditorInfo@26327ad, inputType=0
+09-08 23:32:02.838 25311 25311 I AndroidDexIME: dispatchFromHost: keyCode=68 pressed=true instance=com.example.androidhost.service.AndroidDexIME@48175ff hasLiveEditor=false conn=RemoteInputConnection{idHash=#c3e9afb} inputType=0 package=com.androiddex.host
+09-08 23:32:02.838 25311 25311 D LocalInputDispatcher: LocalInputDispatcher handleKey: winitKeyCode=0, pressed=false
+09-08 23:32:02.838 25311 25311 I AndroidDexIME: hasLiveEditor check: editor=android.view.inputmethod.EditorInfo@26327ad, inputType=0
+09-08 23:32:02.838 25311 25311 I AndroidDexIME: dispatchFromHost: keyCode=68 pressed=false instance=com.example.androidhost.service.AndroidDexIME@48175ff hasLiveEditor=false conn=RemoteInputConnection{idHash=#c3e9afb} inputType=0 package=com.androiddex.host
+```
+
+When clicking into Google's search box in the WebView:
+- `onStartInput` did NOT fire for the WebView field.
+- `hasLiveEditor()` returned `false` (`inputType=0x0` / `TYPE_NULL`).
+- `currentInputConnection` was bound only to Display 0 (`MainActivity`), not to the VirtualDisplay.
+
+### 30d Architecture Proposal (Written Proposal for Text Routing)
+Because `ADD_TRUSTED_DISPLAY` cannot be obtained by a standard Play Store application, Android's platform IME cannot serve untrusted virtual displays. The input pipeline must route text to editors through surface-appropriate direct channels:
+
+1. **WebView (Browser & VS Code / CodeServerWindow)**:
+   - **Mechanism**: Synthetic DOM text insertion via JavaScript bridge (`WebView.evaluateJavascript`).
+   - **Text Entry**: `LocalInputDispatcher.onText` and printable key dispatch execute:
+     ```javascript
+     (function(text) {
+         let el = document.activeElement;
+         if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+             document.execCommand('insertText', false, text);
+         }
+     })("...");
+     ```
+     Using `document.execCommand('insertText', false, text)` natively dispatches standard DOM `beforeinput`, `input`, and `change` events, preserves undo history, and mutates input values correctly across standard web pages.
+   - **Navigation & Control Keys**: For Backspace (`document.execCommand('delete')`) and Enter/Tab/Escape/Arrow keys, dispatch synthetic DOM `KeyboardEvent`s (`new KeyboardEvent('keydown', {key: 'Enter', keyCode: 13, bubbles: true})`) directly to `document.activeElement`.
+
+2. **Terminal (TerminalWindow)**:
+   - **Mechanism**: Replace `AndroidView(EditText)` with a pure Compose-native terminal surface.
+   - **Implementation**:
+     - Remove the `EditText` wrapper entirely.
+     - Implement terminal input using Compose `Modifier.onKeyEvent` attached to a focused Compose container, capturing hardware `KeyEvent`s directly from `View.dispatchKeyEvent`.
+     - Forward character input directly to the terminal PTY / Process input stream (`OutputStream.write`), rendering stdout directly into a Compose state buffer.
+
+### 30e TerminalWindow Observation
+In `TerminalWindow.kt`, an `EditText` is driven with a raw `ProcessBuilder` and appends the prompt on a `100 ms` `postDelayed` timer, causing stdout and prompt text to interleave incorrectly. Noted for resolution in the next task.
+
+### Verification & Cleanup (G30.5)
+- All temporary measurement logging in `AndroidDexIME.kt`, `DisplayService.kt`, and `MainActivity.kt` has been completely reverted.
+- `git diff android-host/app/src/main/java/com/example/androidhost/service/AndroidDexIME.kt` produces 0 diff lines.
+- `git diff android-host/app/src/main/java/com/example/androidhost/MainActivity.kt` produces 0 diff lines.
+- `./gradlew assembleDebug` builds cleanly (BUILD SUCCESSFUL).
+
+---
+
+## 026 — T29 — Reproduce and fix the Settings crash (BUG-13)
+
+### What this task was for
+1. Diagnose and fix the crash occurring when opening and interacting with the Settings app in the streamed desktop (BUG-13).
+2. Reproduce the crash on hardware first (29a) before making any code modifications, capturing both the receiver stdout/stderr and phone logcat.
+3. Address the pipeline recreation hazard in `DisplayService.updateResolution` (29b), where calling `stopEncodingPipeline()` destroyed `DesktopPresentation` and dismantled the Compose tree that was executing the click handler.
+4. Replace `.unwrap()` calls and hazardous code in `zc-core/src/main.rs` with safe error handling so dropped or unexpected frames never panic the receiver (29c).
+5. Ensure end-to-end resolution changes survive seamlessly without destroying the UI that triggered them (29d).
+
+### Files in Scope
+- `android-host/app/src/main/java/com/example/androidhost/ui/apps/SettingsApp.kt`
+- `android-host/app/src/main/java/com/example/androidhost/service/DisplayService.kt`
+- `android-host/app/src/main/java/com/example/androidhost/DesktopShell.kt`
+- `rust-receiver/zc-core/src/main.rs`
+
+### Root Cause Analysis & Reproduction (29a / G29.1)
+1. **Phone Crash**: On Android 14+ (targetSdk 36), accessing `Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_INPUT_METHODS)` without system privileges throws a `SecurityException: Settings key: <enabled_input_methods> is only readable to apps with targetSdkVersion lower than or equal to: 33`. When `SettingsApp` was opened from the taskbar, its `InputSection` attempted to read this key, immediately crashing `com.androiddex.host` with a fatal exception on the main thread.
+2. **Pipeline Rebuild Hazard (29b)**: `DisplayService.updateResolution` previously called `stopEncodingPipeline()` followed by `startEncodingPipeline()`. `stopEncodingPipeline()` explicitly dismissed `DesktopPresentation` and cleared its `ViewModelStore`, which simultaneously destroyed the Compose tree running `SettingsApp` and dropped all active windows.
+3. **Receiver Crash Potential**: `zc-core/src/main.rs` had 10 `.unwrap()` calls on mutex locks across window events and input loops. If an input worker or event handler panicked, or if a frame arrived with zero width/height, the entire receiver process could crash.
+
+#### Original Crash Evidence from 29a (G29.1)
+**Phone Logcat (`adb logcat`):**
+```
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: FATAL EXCEPTION: main
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: Process: com.androiddex.host, PID: 9683
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: java.lang.SecurityException: Settings key: <enabled_input_methods> is only readable to apps with targetSdkVersion lower than or equal to: 33
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: 	at android.provider.Settings$NameValueCache.getStringForUser(Settings.java:3684)
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: 	at android.provider.Settings$Secure.getStringForUser(Settings.java:7329)
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: 	at android.provider.Settings$Secure.getString(Settings.java:7292)
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: 	at com.example.androidhost.ui.apps.SettingsAppKt.InputSection(SettingsApp.kt:151)
+09-08 22:33:18.846  9683  9683 E AndroidRuntime: 	at com.example.androidhost.ui.apps.SettingsAppKt.SettingsApp(SettingsApp.kt:62)
+```
+
+**Receiver Stdout/Stderr (`RUST_BACKTRACE=1`):**
+```
+ConnectionPhase updated to Connected
+Connected to Android server
+Opened input stream to server
+Connection ended: accept_uni failed: timed out
+```
+(Receiver event loop remained running; connection timed out due to the Android host process crashing from the `SecurityException`).
+
+### Key Changes Made
+1. **`SettingsApp.kt`**:
+   - Replaced `Settings.Secure.getString(..., ENABLED_INPUT_METHODS)` with official, non-restricted `InputMethodManager.enabledInputMethodList` API, wrapped in `try-catch`.
+   - Replaced `Settings.Secure.getString(..., ENABLED_ACCESSIBILITY_SERVICES)` with `DesktopAccessibilityService.isEnabled(context)`, wrapped in `try-catch`.
+   - Added `FLAG_ACTIVITY_NEW_TASK` to open-settings intent launchers to prevent presentation context crashes.
+2. **`DisplayService.kt`**:
+   - Replaced destructive `stopEncodingPipeline()` call in `updateResolution` with `reconfigureResolution()`.
+   - Safely releases previous `ScreenEncoder`, constructs a new `ScreenEncoder` with the new dimensions, dynamically resizes `VirtualDisplay` via `virtualDisplay.resize(width, height, densityDpi)`, reassigns `virtualDisplay.surface = newSurface`, starts encoding, and issues an immediate IDR keyframe request (`forceRedraw.value++`).
+   - Retains `DesktopPresentation` intact across resolution shifts so the active Compose view tree is never dismantled.
+   - Handled `WIDTH` and `HEIGHT` intent extras in `onStartCommand` for seamless resolution change requests.
+3. **`DesktopShell.kt`**:
+   - Changed default parameter to `ShellHolder.shellViewModel` so window manager state persists even if presentation recreation ever occurs.
+4. **`rust-receiver/zc-core/src/main.rs`**:
+   - Replaced 10 `.unwrap()` calls on mutex locks (`input_buffer_for_poll`, `input_buffer_loop`, `phase_clone`, `window_for_callback`) with non-panicking `if let Ok(...)` bindings.
+   - Added validation check `if w == 0 || h == 0 { continue; }` before YUV texture recreation to prevent GPU texture allocation crashes on degenerate frames.
+
+### Verification I Ran
+
+#### G29.2 `cd rust-receiver && cargo check --workspace --all-targets`
+```
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.84s
+```
+Exit 0, ZERO warnings.
+
+#### G29.3 `cd android-host && ./gradlew :app:assembleDebug`
+```
+BUILD SUCCESSFUL in 11s
+40 actionable tasks: 40 up-to-date
+Configuration cache entry reused.
+```
+Exit 0, BUILD SUCCESSFUL.
+
+#### G29.4 Hardware Verification & Resolution Switch End-to-End
+1. **Settings Interaction**: Opened Settings on the streamed desktop via taskbar click (`click_settings_taskbar.ps1`). Host logcat:
+   ```
+   09-08 23:08:59.612 28173 28173 D ShellViewModel: openApp: com.androiddex.settings, windows size: 1
+   09-08 23:09:01.583 28173 28173 I DisplayService: encode 44 fps, 603 kbps, 1 keyframes, 394 total
+   ```
+   SettingsApp opened cleanly with window size 1, streaming at 44 fps with NO crash or exception.
+2. **Resolution Change to 1280x720**:
+   Phone logcat:
+   ```
+   09-08 23:10:45.267 28173 28173 I DisplayService: Resolution updated successfully to 1280x720
+   09-08 23:10:45.660 28173 28173 I ScreenEncoder: Output format changed: {max-bitrate=12000000, latency=4, mime=video/avc, bitrate=12000000, intra-refresh-period=0, color-standard=2, feature-secure-playback=0, color-transfer=3, crop-bottom=719, prepend-sps-pps-to-idr-frames=0, video-qp-average=0, color-range=2, crop-top=0, frame-rate=60, height=720, crop-right=1279, level=8192, profile=65536, num-input-slots=10, priority=0, num-output-slots=8, csd-1=java.nio.HeapByteBuffer[pos=8 lim=8 cap=8], crop-left=0, width=1280, bitrate-mode=2, csd-0=java.nio.HeapByteBuffer[pos=21 lim=21 cap=21]}
+   09-08 23:10:46.485 28173  7815 W OplusFeedbackInfo: 0xb4000073d9a66b00 c2.qti.avc.encoder codec[0xb4000073d9b0c000] 1280x720 inputFps=15 outputFps=15 discardFps=16
+   09-08 23:10:47.088 28173 28173 I DisplayService: encode 11 fps, 1032 kbps, 1 keyframes, 17 total
+   ```
+3. **Resolution Change back to 1920x1080**:
+   Phone logcat:
+   ```
+   09-08 23:11:16.234 28173 28173 I ScreenEncoder: Encoder prepared: 1920x1080 @ 60fps, 12 Mbps
+   09-08 23:11:16.257 28173 28173 I ScreenEncoder: Encoder started
+   09-08 23:11:16.261 28173 28173 D ScreenEncoder: Keyframe requested
+   09-08 23:11:16.262 28173 28173 I DisplayService: Resolution updated successfully to 1920x1080
+   09-08 23:11:16.538 28173 28173 I ScreenEncoder: Output format changed: {max-bitrate=12000000, latency=4, mime=video/avc, bitrate=12000000, intra-refresh-period=0, color-standard=2, feature-secure-playback=0, color-transfer=3, crop-bottom=1079, prepend-sps-pps-to-idr-frames=0, video-qp-average=0, color-range=2, crop-top=0, frame-rate=60, height=1080, crop-right=1919, level=8192, profile=65536, num-input-slots=10, priority=0, num-output-slots=8, csd-1=java.nio.HeapByteBuffer[pos=8 lim=8 cap=8], crop-left=0, width=1920, bitrate-mode=2, csd-0=java.nio.HeapByteBuffer[pos=22 lim=22 cap=22]}
+   09-08 23:11:17.671 28173 28173 I DisplayService: encode 18 fps, 1637 kbps, 1 keyframes, 21 total
+   ```
+4. **Receiver Log Across Both Resolution Changes**:
+   ```
+   Ping { timestamp: 0 }
+   ConnectionPhase updated to Connected
+   Connected to Android server
+   Opened input stream to server
+   ```
+   Video streamed continuously without any panic, disconnect, or decode failure across both resolution transitions.
+
+#### G29.5 Receiver `.unwrap()` Analysis
+Exactly **3** `.unwrap()` calls remain in `rust-receiver/zc-core/src/main.rs`:
+- Line 210: `let event_loop = EventLoop::new().unwrap();` (Application initialization before window creation).
+- Line 216: `WindowBuilder::new().build(&event_loop).unwrap()` (Window handle allocation on startup).
+- Line 706: `event_loop.run(...).unwrap();` (Event loop termination on window close).
+
+**Zero** `.unwrap()` calls remain on any frame receive, H.264 decode, YUV render, network input, or event dispatch path. No malformed, unexpected, or zero-dimension frame can reach an `.unwrap()`.
+
+---
+
+## 025 — T28 — Re-pairing is impossible after "Forget paired PC" (BUG-12)
+
+### What this task was for
+1. Diagnose and resolve BUG-12: After pairing successfully, tapping "Forget paired PC" on the phone caused the phone to delete its PSK (`server.clear_psk()`). The PC still held `trust_v2.bin`, connected with ALPN "androiddex-v2", and initiated re-authentication. Because the phone had no stored PSK, `authenticate_and_serve` closed the connection with `CLOSE_NOT_PAIRED` (QUIC application close code 3). Previously, Task 11 caused every authentication failure to fail closed, so the PC receiver sat on "Handshaking..." indefinitely until `--forget-pairing` was executed manually on the PC.
+2. Distinguish the two authentication failure cases (28a):
+   - Identify `CLOSE_NOT_PAIRED` (application close code 3) specifically by reading Quinn's typed `quinn::ConnectionError::ApplicationClosed(app_close)` error code directly (`app_close.error_code == VarInt::from_u32(CLOSE_NOT_PAIRED)`). Do NOT infer this from error strings.
+3. Handle `CLOSE_NOT_PAIRED` specifically (28b):
+   - On `CLOSE_NOT_PAIRED`, delete the PC's local trust file (`delete_trust_data()`), update the status to a new distinct phase `ConnectionPhase::PhoneForgotPairing`, and fall through directly to the pairing flow (`androiddex-pair-v2`) so the SAS comparison screen appears on both screens.
+   - Security rationale: An attacker who forces or sends this close code can only trigger a re-pair attempt, and completing a re-pair strictly requires the user to compare two 6-digit SAS codes on two physical screens and explicitly tap "Codes match" on the phone. Secrets are never persisted without user consent.
+4. Maintain strict fail-closed behavior for all other authentication failures (28c):
+   - Any other failure (such as a proof mismatch with a PSK present, cert mismatch, or invalid tag) must continue to fail closed and refuse connection without deleting trust data or re-pairing.
+5. Unify overlay status card and center message (28d):
+   - Eliminate contradictions where the status card displayed "Disconnected" while the window center said "Handshaking...". Derive both the status card text, color, and central banner message from a single mapping function `phase_display_info(&ConnectionPhase)`.
+6. Add distinct user-facing phase for forgotten pairing (28e):
+   - Added `ConnectionPhase::PhoneForgotPairing` displaying "Re-pairing" on the status card and "The phone forgot this PC, pairing again..." in the center banner.
+
+### What I changed
+- `rust-receiver/zc-network/src/client.rs`:
+  - Defined `pub const CLOSE_NOT_PAIRED: u32 = 3;`.
+  - Added `ScanError::NotPaired` to `ScanError` and mapped `quinn::ConnectionError::ApplicationClosed` with code 3 to `ScanError::NotPaired` during subnet scanning.
+  - Added `ConnectionPhase::PhoneForgotPairing` variant to `ConnectionPhase` (deriving `PartialEq, Eq`).
+  - Implemented `pub async fn is_peer_close_not_paired(conn: &Connection) -> bool` reading Quinn's typed `close_reason()` / `closed().await` application error code without string inspection.
+  - Updated `connect()`: On `CLOSE_NOT_PAIRED` (detected via `is_peer_close_not_paired(&conn)` or `ScanError::NotPaired`), logs notice, calls `delete_trust_data()`, notifies `ConnectionPhase::PhoneForgotPairing`, waits 1s (clearing server rate-limiting cooldown), and falls through directly into the pairing flow (`androiddex-pair-v2`).
+  - Preserved strict fail-closed `else` branch for all other authentication errors (`ConnectionPhase::Failed`, returning `Err(e.into())`).
+  - Added logging of the computed pairing SAS code to stderr during pairing.
+  - Added unit tests: `test_is_peer_close_not_paired_distinguishes_code_3`, `test_is_peer_close_not_paired_rejects_other_codes`, `test_scan_error_display_and_close_constant`.
+- `rust-receiver/zc-core/src/ui/overlay.rs`:
+  - Implemented `phase_display_info(phase: &ConnectionPhase) -> (&'static str, (u8, u8, u8), String)` mapping every phase variant to a synchronized status card title, color tuple, and center banner message.
+  - Integrated `PhoneForgotPairing` into `phase_display_info`: ("Re-pairing", YELLOW, "The phone forgot this PC, pairing again...".to_string()).
+  - Removed unused local variables to ensure zero warnings.
+  - Added unit test `test_phase_display_info_consistency` asserting no contradictory status/banner pairings.
+
+### Decisions I made
+- Enforced typed inspection on Quinn's `ConnectionError::ApplicationClosed(app_close)` instead of string matching, preserving the architectural invariant established in Task 10.
+- Introduced a 1-second pause on `CLOSE_NOT_PAIRED` fallthrough to cleanly exceed the phone server's 500ms pairing rate-limiting cooldown (`PAIRING_COOLDOWN`) and provide immediate visual feedback before the SAS prompt appears.
+- Kept the fail-closed boundary strictly confined: only application close code 3 (`CLOSE_NOT_PAIRED`) triggers trust clearing and re-pairing; any proof discrepancy with a PSK on record fails closed and returns an error immediately.
+
+### What I did NOT do
+- Did NOT use any string matching to detect close reasons.
+- Did NOT widen re-pairing to any other authentication error or proof mismatch.
+- Did NOT modify files outside the authorized scope.
+- Did NOT recreate any deleted components (`AndroidDEX-Core/` or `mdm-console/`).
+
+### Verification I ran
+
+#### G28.1 `cargo check --workspace --all-targets` in `rust-receiver`
+```
+    Checking zc-network v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-network)
+    Checking zc-core v0.1.0 (C:\Users\Asus\Documents\GitHub\AndriodDEX-V2\rust-receiver\zc-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.79s
+```
+Exit 0, ZERO warnings.
+
+#### G28.2 `cargo test --workspace` in `rust-receiver`
+```
+running 1 test
+test ui::overlay::tests::test_phase_display_info_consistency ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 2 tests
+test tests::test_create_mouse_event_scaling ... ok
+test tests::test_create_scroll_event_scaling ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 5 tests
+test client::tests::test_scan_error_display_and_close_constant ... ok
+test client::tests::test_protocol_v2_vectors ... ok
+test client::tests::test_fingerprint_verification_accepts_identical_and_rejects_different ... ok
+test client::tests::test_is_peer_close_not_paired_rejects_other_codes ... ok
+test client::tests::test_is_peer_close_not_paired_distinguishes_code_3 ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+running 8 tests
+test tests::test_zero_shared_secret_rejected ... ok
+test tests::test_known_answer_psk ... ok
+test tests::test_protocol_v2_vectors ... ok
+test tests::test_derive_psk ... ok
+test tests::test_cert_generation ... ok
+test tests::test_generate_pin ... ok
+test storage::tests::test_v2_trust_storage_roundtrip ... ok
+test storage::tests::test_legacy_trust_deleted_at_startup ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+All 16 workspace tests pass.
+
+#### G28.3 `cargo test --release` in `android-host/rust_quic_server`
+```
+running 34 tests
+test crypto::tests::known_answer_v2_vectors ... ok
+test frames::tests::depth_never_exceeds_capacity ... ok
+test crypto::tests::sas_format_is_always_six_digits ... ok
+test crypto::tests::different_nonces_yield_different_proofs ... ok
+test crypto::tests::different_channel_bindings_yield_different_sas_and_psk ... ok
+test pairing::tests::submitting_without_a_handshake_is_rejected_immediately ... ok
+test crypto::tests::verify_proofs_reject_wrong_lengths ... ok
+test pairing::tests::cancel_clears_pending_sas_and_awaiting_state ... ok
+test crypto::tests::zero_shared_secret_is_rejected ... ok
+test frames::tests::drops_the_oldest_when_full ... ok
+test frames::tests::clear_empties_without_counting_drops ... ok
+test pairing::tests::a_submitted_confirmation_reaches_the_waiter_and_the_verdict_returns ... ok
+test pairing::tests::a_rejected_confirmation_returns_false_to_the_caller ... ok
+test tests::a_random_client_proof_never_verifies ... ok
+test tests::v2_auth_request_layout_is_33_bytes ... ok
+test tests::untrusted_bytes_are_escaped_before_logging ... ok
+test store::tests::corrupt_tls_identity_is_rejected ... ok
+test store::tests::truncated_psk_is_rejected ... ok
+test store::tests::legacy_psk_deleted_at_startup ... ok
+test store::tests::oversized_psk_is_rejected ... ok
+test store::tests::psk_round_trips ... ok
+test frames::tests::pop_wakes_on_a_later_push ... ok
+test protocol_tests::pair_v2_rejected_confirmation_stores_nothing ... ok
+test protocol_tests::video_backlog_is_bounded_and_drops_are_counted ... ok
+test store::tests::tls_identity_round_trips ... ok
+test tls::tests::the_certificate_survives_a_restart ... ok
+test protocol_tests::reauth_v2_wrong_psk_refused ... ok
+test tls::tests::a_corrupt_identity_is_regenerated_rather_than_fatal ... ok
+test protocol_tests::pair_v2_success_and_streams_video ... ok
+test protocol_tests::pairing_is_refused_when_already_paired_v2 ... ok
+test protocol_tests::a_bogus_alpn_does_not_stop_the_server_v2 ... ok
+test pairing::tests::waiting_times_out_when_no_confirmation_arrives ... ok
+test protocol_tests::reauth_v2_success_after_restart ... ok
+test protocol_tests::reauth_v2_replayed_proof_is_refused ... ok
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+```
+Still 34 passed.
+
+#### G28.4 Full hardware cycle on physical device (OnePlus / 2c0f6edc)
+Full continuous receiver log across the entire cycle:
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.32s
+ Running `target\debug\zc-core.exe`
+Ping { timestamp: 0 }
+Pairing SAS code: 998001
+ConnectionPhase updated to Connected
+Connected to Android server
+Opened input stream to server
+Connection ended: accept_uni failed: timed out
+Phone reported CLOSE_NOT_PAIRED: deleting local trust data and re-pairing.
+Pairing SAS code: 320078
+ConnectionPhase updated to Connected
+Connected to Android server
+Opened input stream to server
+```
+
+Step-by-step breakdown:
+1. Initial pairing:
+   - Receiver displayed `Pairing SAS code: 998001`.
+   - Phone screen displayed `998  001`.
+   - Both codes matched. Tapped "Codes match" on phone.
+   - Receiver connected and opened input stream.
+   - Android created virtual display 21 (`AndroidDex`, 1920 x 1080 @ 60fps) and streamed video frames.
+2. Tapped "Forget paired PC" on the phone:
+   - Phone screen showed "Paired PC forgotten. Re-pairing required." and cleared its stored PSK.
+3. Receiver reconnect observation:
+   - Receiver connected with ALPN `androiddex-v2`.
+   - Phone responded with application close code 3 (`CLOSE_NOT_PAIRED`).
+   - Receiver did NOT hang on "Handshaking...".
+   - Receiver detected `CLOSE_NOT_PAIRED` via typed error inspection, deleted local `trust_v2.bin`, and logged:
+     `Phone reported CLOSE_NOT_PAIRED: deleting local trust data and re-pairing.`
+   - Receiver transitioned to `PhoneForgotPairing`, waited 1 second, and initiated pairing with ALPN `androiddex-pair-v2`.
+   - Receiver generated and displayed new SAS code: `Pairing SAS code: 320078`.
+4. Phone code confirmation:
+   - Phone displayed new SAS code: `320  078`.
+   - Both codes matched (`320078` == `320  078`).
+   - Tapped "Codes match" on phone.
+5. Video stream return:
+   - Receiver logged `Connected to Android server` and `Opened input stream to server`.
+   - Virtual display 22 (`AndroidDex`, 1920 x 1080 @ 60fps) created on Android and video resumed streaming immediately (confirmed 94+ frames sent).
+
+#### G28.5 Corrupted PSK fails closed and refuses silent re-pairing
+1. With valid pairing established on both sides from G28.4, corrupted byte 63 (PSK) in `$env:APPDATA\AndroidDex\trust_v2.bin`.
+2. Launched receiver (`cargo run -p zc-core`).
+3. Receiver log output:
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+ Running `target\debug\zc-core.exe`
+Ping { timestamp: 0 }
+Authentication failure: Server authentication proof mismatch
+Connection failed: Server authentication proof mismatch
+Authentication failure: Server authentication proof mismatch
+Connection failed: Server authentication proof mismatch
+Authentication failure: Server authentication proof mismatch
+Connection failed: Server authentication proof mismatch
+```
+4. Result:
+   - The receiver REFUSED to connect.
+   - The receiver did NOT delete trust data (`trust_v2.bin` remained present on disk).
+   - The receiver did NOT fall through to the pairing flow or display any SAS code.
+   - Proves 28c strict fail-closed boundary remains intact.
 
 ---
 

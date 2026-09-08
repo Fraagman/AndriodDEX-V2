@@ -2,7 +2,7 @@ use std::sync::Arc;
 use quinn::{Connection, Endpoint, ClientConfig};
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier, HandshakeSignatureValid};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use zc_security::storage::{load_trust_data, store_trust_data, Fingerprint};
+use zc_security::storage::{delete_trust_data, load_trust_data, store_trust_data, Fingerprint};
 use zc_security::pairing::{
     client_proof, derive_pairing_v2, verify_server_proof,
 };
@@ -17,6 +17,9 @@ use futures_util::StreamExt;
 
 pub type QuinnError = Box<dyn std::error::Error + Send + Sync>;
 
+/// QUIC application close code sent by the phone when it has no stored pairing PSK.
+pub const CLOSE_NOT_PAIRED: u32 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanError {
     FingerprintMismatch {
@@ -25,6 +28,7 @@ pub enum ScanError {
     },
     HostUnreachable,
     MissingCertificate,
+    NotPaired,
     Other(String),
 }
 
@@ -36,6 +40,7 @@ impl std::fmt::Display for ScanError {
             }
             ScanError::HostUnreachable => write!(f, "Host unreachable or no response"),
             ScanError::MissingCertificate => write!(f, "Certificate missing from peer identity"),
+            ScanError::NotPaired => write!(f, "Phone reported not paired (CLOSE_NOT_PAIRED)"),
             ScanError::Other(msg) => write!(f, "Connection error: {}", msg),
         }
     }
@@ -43,16 +48,34 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionPhase {
     Idle,
     Scanning(String, u32),
     Found(String),
     Handshaking,
     WaitingForSas(String),
+    PhoneForgotPairing,
     Connected,
     CertificateChanged,
     Failed(String),
+}
+
+/// Checks if a QUIC connection was closed by the peer with application close code CLOSE_NOT_PAIRED (3).
+///
+/// Reads directly from Quinn's typed ConnectionError::ApplicationClosed without string matching.
+pub async fn is_peer_close_not_paired(conn: &Connection) -> bool {
+    if let Some(quinn::ConnectionError::ApplicationClosed(app_close)) = conn.close_reason() {
+        return app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED);
+    }
+    // If a stream operation failed because the peer closed the connection, wait up to 500ms
+    // for the CONNECTION_CLOSE frame to be processed into the connection state.
+    match tokio::time::timeout(Duration::from_millis(500), conn.closed()).await {
+        Ok(quinn::ConnectionError::ApplicationClosed(app_close)) => {
+            app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -177,18 +200,26 @@ async fn scan_rndis_subnet(
             let addr = SocketAddr::new(IpAddr::V4(gw), port);
             if let Ok(connecting) = endpoint.connect(addr, "localhost") {
                 if let Ok(res) = tokio::time::timeout(Duration::from_millis(400), connecting).await {
-                    if let Ok(conn) = res {
-                        let actual_fp = extract_peer_fingerprint(&conn)?;
-                        if let Some(expected) = expected_fp {
-                            if actual_fp != expected {
-                                return Err(ScanError::FingerprintMismatch {
-                                    expected,
-                                    actual: actual_fp,
-                                });
+                    match res {
+                        Ok(conn) => {
+                            let actual_fp = extract_peer_fingerprint(&conn)?;
+                            if let Some(expected) = expected_fp {
+                                if actual_fp != expected {
+                                    return Err(ScanError::FingerprintMismatch {
+                                        expected,
+                                        actual: actual_fp,
+                                    });
+                                }
+                            }
+                            status_callback(ConnectionPhase::Found(gw.to_string()));
+                            return Ok((conn, actual_fp));
+                        }
+                        Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
+                            if app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED) {
+                                return Err(ScanError::NotPaired);
                             }
                         }
-                        status_callback(ConnectionPhase::Found(gw.to_string()));
-                        return Ok((conn, actual_fp));
+                        Err(_) => {}
                     }
                 }
             }
@@ -213,21 +244,29 @@ async fn scan_rndis_subnet(
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
                     if let Ok(connecting) = ep.connect(addr, "localhost") {
                         if let Ok(res) = tokio::time::timeout(Duration::from_millis(400), connecting).await {
-                            if let Ok(conn) = res {
-                                match extract_peer_fingerprint(&conn) {
-                                    Ok(actual_fp) => {
-                                        if let Some(expected) = expected_fp {
-                                            if actual_fp != expected {
-                                                return Some(Err(ScanError::FingerprintMismatch {
-                                                    expected,
-                                                    actual: actual_fp,
-                                                }));
+                            match res {
+                                Ok(conn) => {
+                                    match extract_peer_fingerprint(&conn) {
+                                        Ok(actual_fp) => {
+                                            if let Some(expected) = expected_fp {
+                                                if actual_fp != expected {
+                                                    return Some(Err(ScanError::FingerprintMismatch {
+                                                        expected,
+                                                        actual: actual_fp,
+                                                    }));
+                                                }
                                             }
+                                            return Some(Ok((ip, conn, actual_fp)));
                                         }
-                                        return Some(Ok((ip, conn, actual_fp)));
+                                        Err(e) => return Some(Err(e)),
                                     }
-                                    Err(e) => return Some(Err(e)),
                                 }
+                                Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
+                                    if app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED) {
+                                        return Some(Err(ScanError::NotPaired));
+                                    }
+                                }
+                                Err(_) => {}
                             }
                         }
                     }
@@ -243,6 +282,9 @@ async fn scan_rndis_subnet(
                     }
                     Some(Err(ScanError::FingerprintMismatch { expected, actual })) => {
                         return Err(ScanError::FingerprintMismatch { expected, actual });
+                    }
+                    Some(Err(ScanError::NotPaired)) => {
+                        return Err(ScanError::NotPaired);
                     }
                     Some(Err(e)) => return Err(e),
                     None => {}
@@ -284,50 +326,91 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
             Ok((conn, _)) => {
                 status_callback(ConnectionPhase::Handshaking);
                 
-                // Export TLS channel binding: 32 bytes via export_keying_material
-                let mut binding = [0u8; 32];
-                conn.export_keying_material(&mut binding, b"androiddex-auth-v2", b"")
-                    .map_err(|e| format!("export_keying_material failed: {e:?}"))?;
+                let reauth_result = async {
+                    // Export TLS channel binding: 32 bytes via export_keying_material
+                    let mut binding = [0u8; 32];
+                    conn.export_keying_material(&mut binding, b"androiddex-auth-v2", b"")
+                        .map_err(|e| format!("export_keying_material failed: {e:?}"))?;
 
-                let rng = SystemRandom::new();
-                let mut client_nonce = [0u8; 32];
-                rng.fill(&mut client_nonce).map_err(|_| "CSPRNG failure generating client nonce")?;
+                    let rng = SystemRandom::new();
+                    let mut client_nonce = [0u8; 32];
+                    rng.fill(&mut client_nonce).map_err(|_| "CSPRNG failure generating client nonce".to_string())?;
 
-                let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
+                    let (mut auth_send, mut auth_recv) = conn.open_bi().await
+                        .map_err(|e| format!("open_bi failed: {e}"))?;
 
-                // 1. PC sends 'C' || client_nonce (33 bytes)
-                let mut req = [0u8; 33];
-                req[0] = b'C';
-                req[1..].copy_from_slice(&client_nonce);
-                auth_send.write_all(&req).await?;
+                    // 1. PC sends 'C' || client_nonce (33 bytes)
+                    let mut req = [0u8; 33];
+                    req[0] = b'C';
+                    req[1..].copy_from_slice(&client_nonce);
+                    auth_send.write_all(&req).await
+                        .map_err(|e| format!("write client nonce failed: {e}"))?;
 
-                // 2. Phone replies 'S' || server_nonce || server_proof (1 + 32 + 32 = 65 bytes)
-                let mut resp = [0u8; 65];
-                auth_recv.read_exact(&mut resp).await?;
-                if resp[0] != b'S' {
-                    status_callback(ConnectionPhase::Failed("Invalid auth response tag from phone".into()));
-                    return Err("Invalid auth response tag from phone".into());
+                    // 2. Phone replies 'S' || server_nonce || server_proof (1 + 32 + 32 = 65 bytes)
+                    let mut resp = [0u8; 65];
+                    auth_recv.read_exact(&mut resp).await
+                        .map_err(|e| format!("read server response failed: {e}"))?;
+                    if resp[0] != b'S' {
+                        return Err("Invalid auth response tag from phone".to_string());
+                    }
+                    let mut server_nonce = [0u8; 32];
+                    server_nonce.copy_from_slice(&resp[1..33]);
+                    let presented_server_proof = &resp[33..65];
+
+                    // 3. PC verifies server_proof in CONSTANT TIME
+                    if !verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, presented_server_proof) {
+                        return Err("Server authentication proof mismatch".to_string());
+                    }
+
+                    // Send 'D' || client_proof (33 bytes)
+                    let my_client_proof = client_proof(&psk, &client_nonce, &server_nonce, &binding);
+                    let mut client_resp = [0u8; 33];
+                    client_resp[0] = b'D';
+                    client_resp[1..].copy_from_slice(&my_client_proof);
+                    auth_send.write_all(&client_resp).await
+                        .map_err(|e| format!("write client proof failed: {e}"))?;
+                    auth_send.finish()
+                        .map_err(|e| format!("finish auth stream failed: {e}"))?;
+
+                    Ok::<(), String>(())
+                }.await;
+
+                match reauth_result {
+                    Ok(()) => {
+                        status_callback(ConnectionPhase::Connected);
+                        return Ok(conn);
+                    }
+                    Err(e) => {
+                        if is_peer_close_not_paired(&conn).await {
+                            // On CLOSE_NOT_PAIRED specifically: delete the local trust data and fall through to
+                            // the pairing flow, so the SAS comparison screen appears on both ends. This is safe.
+                            // An attacker who can force this code can only cause a re-pair, and a re-pair still
+                            // requires the user to compare two codes on two screens.
+                            eprintln!("Phone reported CLOSE_NOT_PAIRED: deleting local trust data and re-pairing.");
+                            delete_trust_data();
+                            status_callback(ConnectionPhase::PhoneForgotPairing);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            // Fall through to pairing flow below
+                        } else {
+                            // Every OTHER authentication failure keeps failing closed exactly as it does today.
+                            // Do not widen this. A wrong proof with a PSK present is still an attack.
+                            eprintln!("Authentication failure: {}", e);
+                            status_callback(ConnectionPhase::Failed(e.clone()));
+                            return Err(e.into());
+                        }
+                    }
                 }
-                let mut server_nonce = [0u8; 32];
-                server_nonce.copy_from_slice(&resp[1..33]);
-                let presented_server_proof = &resp[33..65];
-
-                // 3. PC verifies server_proof in CONSTANT TIME
-                if !verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, presented_server_proof) {
-                    status_callback(ConnectionPhase::Failed("Server authentication proof mismatch".into()));
-                    return Err("Server authentication proof mismatch".into());
-                }
-
-                // Send 'D' || client_proof (33 bytes)
-                let my_client_proof = client_proof(&psk, &client_nonce, &server_nonce, &binding);
-                let mut client_resp = [0u8; 33];
-                client_resp[0] = b'D';
-                client_resp[1..].copy_from_slice(&my_client_proof);
-                auth_send.write_all(&client_resp).await?;
-                auth_send.finish()?;
-
-                status_callback(ConnectionPhase::Connected);
-                return Ok(conn);
+            }
+            Err(ScanError::NotPaired) => {
+                // On CLOSE_NOT_PAIRED specifically: delete the local trust data and fall through to
+                // the pairing flow, so the SAS comparison screen appears on both ends. This is safe.
+                // An attacker who can force this code can only cause a re-pair, and a re-pair still
+                // requires the user to compare two codes on two screens.
+                eprintln!("Phone reported CLOSE_NOT_PAIRED during scan: deleting local trust data and re-pairing.");
+                delete_trust_data();
+                status_callback(ConnectionPhase::PhoneForgotPairing);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                // Fall through to pairing flow below
             }
             Err(ScanError::FingerprintMismatch { expected, actual }) => {
                 eprintln!("SECURITY ALERT: Certificate fingerprint mismatch! Expected {:?}, got {:?}", expected, actual);
@@ -419,6 +502,7 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
     .map_err(|_| "X25519 key agreement failed")??;
 
     // 10. Display 6-digit SAS to user
+    eprintln!("Pairing SAS code: {}", sas);
     status_callback(ConnectionPhase::WaitingForSas(sas.clone()));
 
     // 11-12. User confirms or rejects on phone; phone sends 'Y' on match, 'N' otherwise.
@@ -510,5 +594,118 @@ mod tests {
         assert_eq!(c_proof, expected_client_proof);
 
         assert!(verify_server_proof(&psk, &client_nonce, &server_nonce, &binding, &s_proof));
+    }
+
+    #[tokio::test]
+    async fn test_is_peer_close_not_paired_distinguishes_code_3() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let keypair = KeyPair::generate().expect("keypair");
+        let params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        let cert = params.self_signed(&keypair).expect("cert");
+        let cert_der = cert.der().to_vec();
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(keypair.serialize_der());
+
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.into()], key_der.into())
+            .expect("server config");
+        server_crypto.alpn_protocols = vec![b"test-alpn".to_vec()];
+
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).expect("quic config"),
+        ));
+
+        let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server ep");
+        let server_addr = server_endpoint.local_addr().unwrap();
+
+        // Spawn server task that accepts and closes with CLOSE_NOT_PAIRED (3)
+        let server_task = tokio::spawn(async move {
+            let incoming = server_endpoint.accept().await.expect("accept");
+            let conn = incoming.await.expect("incoming await");
+            conn.close(quinn::VarInt::from_u32(CLOSE_NOT_PAIRED), b"not paired");
+            server_endpoint.wait_idle().await;
+        });
+
+        // Client connects
+        let verifier = AcceptAnyCertVerifier;
+        let mut client_crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![b"test-alpn".to_vec()];
+
+        let client_config = ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).expect("client quic"),
+        ));
+        let mut client_endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).expect("client ep");
+        client_endpoint.set_default_client_config(client_config);
+
+        let connecting = client_endpoint.connect(server_addr, "localhost").expect("connect");
+        let conn = connecting.await.expect("conn");
+
+        // Assert peer close code 3 is correctly identified
+        let not_paired = is_peer_close_not_paired(&conn).await;
+        assert!(not_paired, "is_peer_close_not_paired must return true for close code 3");
+
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_is_peer_close_not_paired_rejects_other_codes() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let keypair = KeyPair::generate().expect("keypair");
+        let params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        let cert = params.self_signed(&keypair).expect("cert");
+        let cert_der = cert.der().to_vec();
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(keypair.serialize_der());
+
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.into()], key_der.into())
+            .expect("server config");
+        server_crypto.alpn_protocols = vec![b"test-alpn-2".to_vec()];
+
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).expect("quic config"),
+        ));
+
+        let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server ep");
+        let server_addr = server_endpoint.local_addr().unwrap();
+
+        // Server closes with code 4 (CLOSE_AUTH_FAILED)
+        let server_task = tokio::spawn(async move {
+            let incoming = server_endpoint.accept().await.expect("accept");
+            let conn = incoming.await.expect("incoming await");
+            conn.close(quinn::VarInt::from_u32(4), b"auth failed");
+            server_endpoint.wait_idle().await;
+        });
+
+        let verifier = AcceptAnyCertVerifier;
+        let mut client_crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![b"test-alpn-2".to_vec()];
+
+        let client_config = ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).expect("client quic"),
+        ));
+        let mut client_endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).expect("client ep");
+        client_endpoint.set_default_client_config(client_config);
+
+        let connecting = client_endpoint.connect(server_addr, "localhost").expect("connect");
+        let conn = connecting.await.expect("conn");
+
+        let not_paired = is_peer_close_not_paired(&conn).await;
+        assert!(!not_paired, "is_peer_close_not_paired must return false for code 4 (CLOSE_AUTH_FAILED)");
+
+        let _ = server_task.await;
+    }
+
+    #[test]
+    fn test_scan_error_display_and_close_constant() {
+        assert_eq!(CLOSE_NOT_PAIRED, 3);
+        let err = ScanError::NotPaired;
+        assert_eq!(format!("{}", err), "Phone reported not paired (CLOSE_NOT_PAIRED)");
     }
 }
