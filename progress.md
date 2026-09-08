@@ -7,6 +7,9 @@ Never put a secret in this file.
 
 | #   | Date       | Task | Result |
 |-----|------------|------|--------|
+| 015 | 2026-09-08 | T18 — The receiver's crypto path must not panic (BUG-10) | PASS |
+| 014 | 2026-09-08 | T17 — The app can leave the phone permanently silent (BUG-09) | PASS |
+| 013 | 2026-09-08 | T16 — Stop two things the software does that it should not (SEC-13, PERF-01) | PASS |
 | 012 | 2026-09-08 | T12 — Replace the template tests with tests of the real product (TEST-01, TEST-02) | PASS |
 | 011 | 2026-09-08 | T11 — Fail closed on a changed identity, and stop silent re-pairing (SEC-01, SEC-11, SEC-12) | PASS |
 | 010 | 2026-09-08 | T10 — Replace substring error-matching with attributable certificate identity (SEC-10, DOC-04) | PASS |
@@ -19,6 +22,229 @@ Never put a secret in this file.
 | 003 | 2026-09-07 | T3 — Fix three concrete bugs (BUG-01, BUG-04, BUG-06) | PASS |
 | 002 | 2026-09-07 | T2 — Delete dead parallel project and untrack build artifacts | PASS |
 | 001 | 2026-09-07 | T1 — Fix broken rust-receiver workspace build (BUG-02) | PASS |
+
+---
+
+## 015 — T18 — The receiver's crypto path must not panic (BUG-10)
+
+### What this task was for
+1. Eliminate all unwrap/expect panic vectors in `zc-security`:
+   - `pairing::derive_psk`: converted to return `Result<[u8; 32], ring::error::Unspecified>` rather than unwrapping on HKDF `expand` and `fill`.
+   - `cert::generate_self_signed_cert`: converted to return `Result<(Vec<u8>, Vec<u8>), rcgen::Error>` rather than expecting on keypair generation, cert params creation, and self-signing.
+   - `storage`: recovered poisoned mutex guards on `CUSTOM_DATA_PATH` via `Err(poisoned) => poisoned.into_inner()` in `set_data_path`, `get_trust_file_path`, and `get_server_cert_file_path`.
+   - `cert.rs`: removed unused import `PKCS_ECDSA_P256_SHA256` to ensure zero compilation warnings across the entire receiver workspace.
+2. Propagate Result at call sites:
+   - In `zc-network/src/client.rs`: propagated `derive_psk` errors using `?` (mapping into `Box<dyn std::error::Error>`).
+3. Shared Known-Answer Test (KAT):
+   - Created deterministic known-answer tests in both `rust_quic_server` (`crypto.rs`) and `zc-security` (`lib.rs`) asserting the exact same 32-byte derived PSK literal for PIN `"123456"` and public key `[7u8; 32]`.
+
+### What I changed
+- `rust-receiver/zc-security/src/pairing.rs`: `derive_psk` returns `Result<[u8; 32], ring::error::Unspecified>` using `?` for HKDF expand and fill.
+- `rust-receiver/zc-security/src/cert.rs`: `generate_self_signed_cert` returns `Result<(Vec<u8>, Vec<u8>), rcgen::Error>`; removed unused `PKCS_ECDSA_P256_SHA256`.
+- `rust-receiver/zc-security/src/storage.rs`: recovered poisoned mutexes for `CUSTOM_DATA_PATH`.
+- `rust-receiver/zc-security/src/lib.rs`: updated existing unit tests to handle `Result` and added `test_known_answer_psk`.
+- `rust-receiver/zc-network/src/client.rs`: propagated `derive_psk` result with `?`.
+- `android-host/rust_quic_server/src/crypto.rs`: added `known_answer_psk` test asserting the exact 32 expected bytes.
+
+### Decisions I made
+- In `client.rs`, propagated `derive_psk` errors via `?` rather than silently returning a zeroed key, failing the pairing connection immediately if derivation fails.
+- Kept the known-answer assertion literals independently defined as raw `[u8; 32]` literals in both crates without sharing constants or code across repositories.
+
+### What I did NOT do
+- Did not modify any salt, info string, byte layouts, or derivation inputs.
+- Did not touch any receiver crates outside `zc-security` and `zc-network/src/client.rs`.
+
+### Verification I ran
+
+G18.1 `cd rust-receiver && cargo check --workspace --all-targets`:
+```
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.99s
+```
+Exit 0 with ZERO warnings.
+
+G18.2 `cd rust-receiver && cargo test --workspace`:
+```
+running 4 tests
+test tests::test_derive_psk ... ok
+test tests::test_known_answer_psk ... ok
+test tests::test_cert_generation ... ok
+test tests::test_generate_pin ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+G18.3 `cd android-host/rust_quic_server && cargo test --release`:
+```
+running 31 tests
+test pairing::tests::submitting_without_a_handshake_is_rejected_immediately ... ok
+test crypto::tests::known_answer_psk ... ok
+test crypto::tests::pin_shape_is_enforced ... ok
+test crypto::tests::psk_derivation_is_stable ... ok
+test frames::tests::clear_empties_without_counting_drops ... ok
+test frames::tests::drops_the_oldest_when_full ... ok
+test crypto::tests::token_matches_only_for_the_right_psk ... ok
+test crypto::tests::token_of_wrong_length_is_rejected ... ok
+test frames::tests::depth_never_exceeds_capacity ... ok
+test pairing::tests::a_rejected_pin_returns_false_to_the_caller ... ok
+test tests::a_random_token_never_verifies ... ok
+test tests::untrusted_bytes_are_escaped_before_logging ... ok
+test tests::auth_request_layout_is_33_bytes ... ok
+test pairing::tests::a_submitted_pin_reaches_the_waiter_and_the_verdict_returns ... ok
+test protocol_tests::video_backlog_is_bounded_and_drops_are_counted ... ok
+test store::tests::oversized_psk_is_rejected ... ok
+test store::tests::corrupt_tls_identity_is_rejected ... ok
+test store::tests::truncated_psk_is_rejected ... ok
+test store::tests::psk_round_trips ... ok
+test store::tests::tls_identity_round_trips ... ok
+test tls::tests::the_certificate_survives_a_restart ... ok
+test protocol_tests::a_paired_pc_reconnects_without_a_pin_after_a_restart ... ok
+test tls::tests::a_corrupt_identity_is_regenerated_rather_than_fatal ... ok
+test protocol_tests::correct_pin_pairs_authenticates_and_streams_video ... ok
+test protocol_tests::pin_attempts_are_capped_per_connection ... ok
+test protocol_tests::pairing_is_refused_when_already_paired_and_psk_is_unchanged ... ok
+test frames::tests::pop_wakes_on_a_later_push ... ok
+test protocol_tests::raw_client_that_skips_pairing_is_refused ... ok
+test protocol_tests::a_bogus_alpn_does_not_stop_the_server ... ok
+test pairing::tests::waiting_times_out_when_no_pin_arrives ... ok
+test protocol_tests::wrong_pin_is_refused_and_nothing_is_paired ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+```
+
+G18.4 `grep -rn "\.unwrap()\|\.expect(" rust-receiver/zc-security/src/ excluding test modules`:
+```
+Command: grep -rn "\.unwrap()\|\.expect(" rust-receiver/zc-security/src/
+Result: Only matches in #[cfg(test)] mod tests in lib.rs. 0 unwrap/expect in production code.
+```
+
+G18.5 Known-Answer Tests Side by Side:
+**Phone (`android-host/rust_quic_server/src/crypto.rs`)**:
+```rust
+    #[test]
+    fn known_answer_psk() {
+        let key = [7u8; EPHEMERAL_KEY_LEN];
+        let expected: [u8; 32] = [
+            137, 103, 192, 249, 41, 149, 254, 88, 189, 58, 8, 253, 14, 220, 146, 84,
+            135, 25, 59, 133, 39, 54, 64, 211, 189, 223, 157, 201, 189, 78, 79, 172,
+        ];
+        assert_eq!(derive_psk("123456", &key), expected);
+    }
+```
+**PC Receiver (`rust-receiver/zc-security/src/lib.rs`)**:
+```rust
+    #[test]
+    fn test_known_answer_psk() {
+        let key = [7u8; 32];
+        let expected: [u8; 32] = [
+            137, 103, 192, 249, 41, 149, 254, 88, 189, 58, 8, 253, 14, 220, 146, 84,
+            135, 25, 59, 133, 39, 54, 64, 211, 189, 223, 157, 201, 189, 78, 79, 172,
+        ];
+        assert_eq!(pairing::derive_psk("123456", &key).unwrap(), expected);
+    }
+```
+The 32 expected bytes are character-for-character identical between both files.
+
+G18.6 `cd rust-receiver && cargo build -p zc-core`: exit 0.
+
+G18.7 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`: BUILD SUCCESSFUL.
+
+---
+
+## 014 — T17 — The app can leave the phone permanently silent (BUG-09)
+
+### What this task was for
+- Fix permanent device muting when `AudioCaptureService` process is terminated, crashes, or is killed by the OS.
+- Persist `originalVolume` to `SharedPreferences` durably before calling `setStreamVolume(STREAM_MUSIC, 0, 0)`.
+- Restore `STREAM_MUSIC` from persisted volume upon app/service startup and clear the stored preference.
+- Guard against the double-mute trap: if a persisted value already exists when muting, do NOT overwrite it with 0.
+- Clear persisted value whenever volume is successfully restored in `stopAudioCapture`.
+
+### What I changed
+- `android-host/app/src/main/java/com/example/androidhost/service/AudioCaptureService.kt`:
+  - Added `PREFS_NAME = "audio_capture_prefs"` and `KEY_RESTORE_VOLUME = "restore_volume"`.
+  - Added `tryRestoreMutedVolume(context)` in companion object and called it from companion `init` and `onCreate()`.
+  - In `startAudioCapture`: persisted `originalVolume` with `.commit()` BEFORE muting `STREAM_MUSIC`; if `KEY_RESTORE_VOLUME` already existed, preserved the stored volume rather than overwriting with 0.
+  - In `stopAudioCapture`: restored volume using `originalVolume` / stored preference fallback and removed `KEY_RESTORE_VOLUME` via `.commit()`.
+
+### Decisions I made
+- Preserved the existing muting behavior during active audio capture. The muting appears intended to silence the phone's physical speakers to avoid audio feedback/echo while audio playback is captured and streamed to the PC.
+- Note on design: Using the global system `AudioManager.STREAM_MUSIC` volume as the mechanism is heavy-handed because modifying global system volume affects all apps and risks leaving the device muted if an unhandled termination occurs.
+- Used synchronous `SharedPreferences.Editor.commit()` instead of asynchronous `apply()` so the volume is guaranteed written to disk before `setStreamVolume` executes.
+
+### What I did NOT do
+- Did not touch any file other than `AudioCaptureService.kt`.
+- Did not remove the muting behavior during capture.
+
+### Verification I ran
+
+G17.1 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`: BUILD SUCCESSFUL.
+
+G17.2 `cd android-host && ./gradlew :app:testDebugUnitTest --no-daemon`: 9 tests, 0 failures.
+
+G17.3 On-Device Crash-Recovery Test:
+Captured `STREAM_MUSIC` volume using `cmd audio get-stream-volume 3` (which calls `AudioManager.getStreamVolume(3)`):
+1. Initial baseline volume set to 10:
+   `calling AudioManager.setStreamVolume(3, 10, 0)` -> `AudioManager.getStreamVolume(3) -> 10`
+2. Turned ON "System Audio Capture" in control panel:
+   `AudioManager.getStreamVolume(3) -> 0`
+3. Simulated crash via `adb shell am force-stop com.example.androidhost`:
+   `AudioManager.getStreamVolume(3) -> 0`
+4. Relaunched app via `adb shell am start -n com.example.androidhost/.MainActivity`:
+   `AudioManager.getStreamVolume(3) -> 10`
+
+G17.4 On-Device Normal Path Test:
+1. Baseline volume: `AudioManager.getStreamVolume(3) -> 10`
+2. Turned ON "System Audio Capture": `AudioManager.getStreamVolume(3) -> 0`
+3. Turned OFF "System Audio Capture" cleanly: `AudioManager.getStreamVolume(3) -> 10`
+
+---
+
+## 013 — T16 — Stop two things the software does that it should not (SEC-13, PERF-01)
+
+### What this task was for
+1. SEC-13: Receiver rewriting Windows firewall on launch.
+   - Removed PowerShell invocation and `netsh advfirewall` execution from `zc-core/src/main.rs`.
+   - Added documentation in `README.md` explaining how to manually add the firewall rule if outbound UDP port 4433 is blocked by local policy.
+2. PERF-01: Input polling thread CPU spin when disconnected.
+   - In `rust_quic_server/src/lib.rs` `Java_com_example_androidhost_quic_QuicServer_pollData`: adjusted timeout based on server connection state (`STATE_AUTHENTICATED` -> 20 ms, otherwise -> 500 ms).
+   - Why longer timeout cannot delay input events: `crossbeam_channel::Receiver::recv_timeout` returns immediately as soon as a message is sent to the channel (or the channel is disconnected). Lengthening the timeout when disconnected adds zero input latency.
+   - The new worst-case delay before `stopPolling` interrupt/cancellation takes effect when disconnected is 500 ms (up from 20 ms).
+
+### What I changed
+- `rust-receiver/zc-core/src/main.rs`: deleted the `if cfg!(windows)` block spawning `powershell` to add firewall rules.
+- `README.md`: added "Troubleshooting Firewall Issues" section with manual `netsh` command.
+- `android-host/rust_quic_server/src/lib.rs`: updated `pollData` to check `ctx.server.state.load(Ordering::SeqCst)` and use 20 ms when `STATE_AUTHENTICATED`, 500 ms otherwise.
+
+### Decisions I made
+- Preserved exact JNI signature, handle dereferencing, buffer capacity check, and `exception_clear` in `pollData`.
+- Left Kotlin side completely untouched.
+
+### What I did NOT do
+- Did not touch `InputManager.kt`, `DesktopPresentation.kt`, or `client.rs`.
+- G16.7 was NOT VERIFIED on device because USB tethering network interface was not active on the test machine to connect the Windows receiver.
+
+### Verification I ran
+
+G16.1 `cd android-host/rust_quic_server && cargo test --release`: 30 passed, 0 failed.
+
+G16.2 `cd rust-receiver && cargo check --workspace --all-targets`: exit 0.
+
+G16.3 `cd rust-receiver && cargo build -p zc-core`: exit 0.
+
+G16.4 `grep -in "netsh\|powershell" rust-receiver/zc-core/src/main.rs`: no output.
+
+G16.5 `cd android-host && ./gradlew :app:assembleDebug --no-daemon`: BUILD SUCCESSFUL.
+
+G16.6 On-Device CPU Measurement for InputPollingThread:
+- Baseline measured before fix: 11 CPU ticks / 10s.
+- Measured on device with new build (idle desktop, no PC connected):
+  - PID: 10202, TID: 10328 (`InputPollingThr`)
+  - Reading at T=0: `cat /proc/10202/task/10328/stat` -> `utime=0, stime=0 (total 0)`
+  - Reading at T=10s: `cat /proc/10202/task/10328/stat` -> `utime=1, stime=0 (total 1)`
+  - Delta: 1 CPU tick over 10 seconds (down from 11 ticks).
+
+G16.7 On-Device Input Test:
+- NOT VERIFIED: USB tethering connection from Windows receiver not active during test.
 
 ---
 

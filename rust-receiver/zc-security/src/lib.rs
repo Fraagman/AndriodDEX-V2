@@ -31,17 +31,27 @@ mod tests {
     fn test_derive_psk() {
         let pin = "123456";
         let pk = [1u8; 32];
-        let psk1 = pairing::derive_psk(pin, &pk);
-        let psk2 = pairing::derive_psk(pin, &pk);
+        let psk1 = pairing::derive_psk(pin, &pk).unwrap();
+        let psk2 = pairing::derive_psk(pin, &pk).unwrap();
         assert_eq!(psk1, psk2);
 
-        let psk3 = pairing::derive_psk("654321", &pk);
+        let psk3 = pairing::derive_psk("654321", &pk).unwrap();
         assert_ne!(psk1, psk3);
+    }
+
+    #[test]
+    fn test_known_answer_psk() {
+        let key = [7u8; 32];
+        let expected: [u8; 32] = [
+            137, 103, 192, 249, 41, 149, 254, 88, 189, 58, 8, 253, 14, 220, 146, 84,
+            135, 25, 59, 133, 39, 54, 64, 211, 189, 223, 157, 201, 189, 78, 79, 172,
+        ];
+        assert_eq!(pairing::derive_psk("123456", &key).unwrap(), expected);
     }
     
     #[test]
     fn test_cert_generation() {
-        let (cert_pem, key_pem) = cert::generate_self_signed_cert();
+        let (cert_pem, key_pem) = cert::generate_self_signed_cert().unwrap();
         assert!(cert_pem.starts_with(b"-----BEGIN CERTIFICATE-----"));
         assert!(key_pem.starts_with(b"-----BEGIN PRIVATE KEY-----"));
     }

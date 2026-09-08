@@ -24,19 +24,6 @@ fn main() {
         return;
     }
 
-    if cfg!(windows) {
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("AndroidDex.exe"));
-        let exe_str = exe_path.to_str().unwrap_or("AndroidDex.exe");
-        let command_str = format!("netsh advfirewall firewall add rule name=\"AndroidDex QUIC\" dir=out action=allow protocol=udp localport=any remoteport=4433 program=\"{}\" enable=yes", exe_str);
-        
-        if let Ok(output) = std::process::Command::new("powershell")
-            .args(&["-Command", &command_str])
-            .output() {
-            if !output.status.success() {
-                eprintln!("Failed to add firewall rule. Please run as administrator if connection fails.");
-            }
-        }
-    }
 
     let ping = Ping { timestamp: 0 };
     println!("{:?}", ping);

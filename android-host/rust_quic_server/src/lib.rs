@@ -734,7 +734,13 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         return 0;
     };
 
-    let Ok(data) = ctx.input_rx.recv_timeout(Duration::from_millis(20)) else {
+    let timeout = if ctx.server.state.load(Ordering::SeqCst) == STATE_AUTHENTICATED {
+        Duration::from_millis(20)
+    } else {
+        Duration::from_millis(500)
+    };
+
+    let Ok(data) = ctx.input_rx.recv_timeout(timeout) else {
         return 0;
     };
     if data.is_empty() {

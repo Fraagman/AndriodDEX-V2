@@ -78,3 +78,11 @@ The compiled receiver binary will be located at `rust-receiver/target/release/zc
    cargo run --release -p zc-core
    ```
 4. Complete first-time pairing by entering the 6-digit PIN displayed by the Windows receiver into the Android app.
+
+### Troubleshooting Firewall Issues
+
+Windows Defender Firewall permits outbound traffic by default. If outbound UDP port 4433 is blocked by restrictive local group policy or a third-party firewall, you can manually allow outbound traffic for the receiver by running the following command in an elevated (Administrator) Command Prompt or PowerShell:
+
+```cmd
+netsh advfirewall firewall add rule name="AndroidDex QUIC" dir=out action=allow protocol=udp localport=any remoteport=4433 enable=yes
+```

@@ -361,7 +361,8 @@ pub async fn connect(port: u16, status_callback: impl Fn(ConnectionPhase) + Send
         return Err("Pairing rejected".into());
     }
 
-    let psk = derive_psk(&pin, public.as_bytes());
+    let psk = derive_psk(&pin, public.as_bytes())
+        .map_err(|e| format!("Failed to derive PSK: {:?}", e))?;
     
     let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
     let mut hasher = Sha256::new();

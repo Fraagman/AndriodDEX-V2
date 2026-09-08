@@ -117,6 +117,16 @@ mod tests {
     }
 
     #[test]
+    fn known_answer_psk() {
+        let key = [7u8; EPHEMERAL_KEY_LEN];
+        let expected: [u8; 32] = [
+            137, 103, 192, 249, 41, 149, 254, 88, 189, 58, 8, 253, 14, 220, 146, 84,
+            135, 25, 59, 133, 39, 54, 64, 211, 189, 223, 157, 201, 189, 78, 79, 172,
+        ];
+        assert_eq!(derive_psk("123456", &key), expected);
+    }
+
+    #[test]
     fn token_matches_only_for_the_right_psk() {
         let key = [3u8; EPHEMERAL_KEY_LEN];
         let good = derive_psk("482915", &key);

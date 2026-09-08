@@ -7,7 +7,7 @@ pub fn generate_pin() -> String {
     format!("{:06}", num)
 }
 
-pub fn derive_psk(pin: &str, ephemeral_public_key: &[u8; 32]) -> [u8; 32] {
+pub fn derive_psk(pin: &str, ephemeral_public_key: &[u8; 32]) -> Result<[u8; 32], ring::error::Unspecified> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"androiddex-v1");
     let mut ikm = Vec::new();
     ikm.extend_from_slice(pin.as_bytes());
@@ -15,8 +15,8 @@ pub fn derive_psk(pin: &str, ephemeral_public_key: &[u8; 32]) -> [u8; 32] {
     let prk = salt.extract(&ikm);
     
     let info = [b"psk".as_slice()];
-    let okm = prk.expand(&info, hkdf::HKDF_SHA256).unwrap();
+    let okm = prk.expand(&info, hkdf::HKDF_SHA256)?;
     let mut psk = [0u8; 32];
-    okm.fill(&mut psk).unwrap();
-    psk
+    okm.fill(&mut psk)?;
+    Ok(psk)
 }

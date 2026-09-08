@@ -34,9 +34,41 @@ class AudioCaptureService : Service() {
         private const val TAG = "AudioCaptureService"
         private const val CHANNEL_ID = "audio_capture_channel"
         private const val NOTIFICATION_ID = 2
+        private const val PREFS_NAME = "audio_capture_prefs"
+        private const val KEY_RESTORE_VOLUME = "restore_volume"
 
         // Flow to communicate service status to Compose UI
         val isServiceRunning = MutableStateFlow(false)
+
+        init {
+            tryRestoreMutedVolume()
+        }
+
+        fun tryRestoreMutedVolume(context: Context? = null) {
+            try {
+                val ctx = context ?: try {
+                    val activityThreadClass = Class.forName("android.app.ActivityThread")
+                    val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
+                    currentApplicationMethod.invoke(null) as? Context
+                } catch (e: Exception) {
+                    null
+                }
+                if (ctx != null) {
+                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    if (prefs.contains(KEY_RESTORE_VOLUME)) {
+                        val volumeToRestore = prefs.getInt(KEY_RESTORE_VOLUME, -1)
+                        if (volumeToRestore >= 0) {
+                            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                            am?.setStreamVolume(AudioManager.STREAM_MUSIC, volumeToRestore, 0)
+                            Log.d(TAG, "Restored leftover muted volume from previous run: $volumeToRestore")
+                        }
+                        prefs.edit().remove(KEY_RESTORE_VOLUME).commit()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore muted volume", e)
+            }
+        }
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -49,6 +81,7 @@ class AudioCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        tryRestoreMutedVolume(this)
         createNotificationChannel()
     }
 
@@ -91,7 +124,17 @@ class AudioCaptureService : Service() {
         isCapturing = true
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        originalVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: -1
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_RESTORE_VOLUME)) {
+            val currentVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: -1
+            if (currentVol >= 0) {
+                originalVolume = currentVol
+                prefs.edit().putInt(KEY_RESTORE_VOLUME, currentVol).commit()
+            }
+        } else {
+            originalVolume = prefs.getInt(KEY_RESTORE_VOLUME, -1)
+        }
+
         if (originalVolume != -1) {
             audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
         }
@@ -232,10 +275,13 @@ class AudioCaptureService : Service() {
         captureThread?.interrupt()
         captureThread = null
 
-        if (originalVolume != -1) {
-            audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0)
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val restoreVol = if (originalVolume != -1) originalVolume else prefs.getInt(KEY_RESTORE_VOLUME, -1)
+        if (restoreVol >= 0) {
+            audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, restoreVol, 0)
             originalVolume = -1
         }
+        prefs.edit().remove(KEY_RESTORE_VOLUME).commit()
 
         try {
             audioRecord?.stop()

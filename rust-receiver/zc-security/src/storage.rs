@@ -11,11 +11,19 @@ lazy_static::lazy_static! {
 }
 
 pub fn set_data_path(path: PathBuf) {
-    *CUSTOM_DATA_PATH.lock().unwrap() = Some(path);
+    let mut guard = match CUSTOM_DATA_PATH.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some(path);
 }
 
 fn get_trust_file_path() -> Option<PathBuf> {
-    let mut path = if let Some(p) = CUSTOM_DATA_PATH.lock().unwrap().clone() {
+    let custom_path = match CUSTOM_DATA_PATH.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let mut path = if let Some(p) = custom_path {
         p
     } else {
         let appdata = std::env::var("APPDATA").ok()?;
@@ -54,7 +62,11 @@ pub fn delete_trust_data() {
 }
 
 fn get_server_cert_file_path() -> Option<PathBuf> {
-    let mut path = if let Some(p) = CUSTOM_DATA_PATH.lock().unwrap().clone() {
+    let custom_path = match CUSTOM_DATA_PATH.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let mut path = if let Some(p) = custom_path {
         p
     } else {
         let appdata = std::env::var("APPDATA").ok()?;
