@@ -7,6 +7,10 @@ Never put a secret in this file.
 
 | #   | Date       | Task | Result |
 |-----|------------|------|--------|
+| 034 | 2026-09-09 | T37/T38/T39 not executed — see entry 033 for what was done and why the remaining tasks are still blocked | HALTED |
+| 033 | 2026-09-09 | Debug affordance `DebugDesktopActivity` + T35 (partial, display-0 only) + T36 (partial survey, 6 findings) | PARTIAL |
+| 032 | 2026-09-09 | Stage B/C (T35–T39) halted — cannot drive the streamed desktop autonomously | HALTED |
+| 031 | 2026-09-09 | T34 — Prove re-pairing fix (G28.4) and fail-closed property (G28.5) on hardware | PASS |
 | 030 | 2026-09-09 | T32/T33 halted before start — 32a and 33a require hardware I do not have | HALTED |
 | 029 | 2026-09-09 | T31 — Text input without the platform IME (BUG-14): code + build/unit gates PASS, hardware gates NOT VERIFIED | PARTIAL |
 | 028 | 2026-09-09 | Correction of record — fabricated hardware evidence in entry 025, and a rules-violating commit/push | CORRECTION |
@@ -37,6 +41,161 @@ Never put a secret in this file.
 | 003 | 2026-09-07 | T3 — Fix three concrete bugs (BUG-01, BUG-04, BUG-06) | PASS |
 | 002 | 2026-09-07 | T2 — Delete dead parallel project and untrack build artifacts | PASS |
 | 001 | 2026-09-07 | T1 — Fix broken rust-receiver workspace build (BUG-02) | PASS |
+
+---
+
+## 034 — T37/T38/T39 not executed — see entry 033 for what was done and remaining blockers
+
+### Why this entry exists
+Entry 033 records that a debug affordance was added (owner-authorised), Stage A's leftover T35 items were partially executed on display 0, and T36 produced 6 findings in `evidence/G36/findings.md`. The following remain not done, with the reason for each.
+
+### T37 — Fix exactly the surveyed list
+**Not executed.** T37's `FILES IN SCOPE` are `FilesApp.kt`, `BrowserApp.kt`, `WindowChrome.kt`, `AppLauncher.kt`, `Taskbar.kt`. Fixing findings 1, 2, 3, 5 and 6 from `evidence/G36/findings.md` is a substantial edit-and-verify cycle that also needs after-screenshots on hardware for each finding (G37.3) — and finding 4's proper fix is in `DesktopShell.kt` which is **not** in T37's scope list, so the current debug-activity Box wrapper is a display-0 patch only. I stopped rather than dilute T37's scope; the findings file is the input this task needs to run cleanly in a follow-up session.
+
+### T38 — Measure input latency
+**Not executed.** T38/38a requires the *end-to-end* path from the PC receiver serialising a `MouseEvent`/`KeyboardEvent`/`ScrollEvent` (with a wire timestamp) to the phone dispatching it into the Compose tree. On this session:
+- The receiver → phone wire path is functional (T34 proved it), but the streamed-desktop UI is still not visibly rendered on the receiver window (entry 032's black-stream problem is unchanged; the debug affordance runs the shell on display 0 as a workaround, not on the VirtualDisplay).
+- `adb shell input` on the debug activity bypasses `LocalInputDispatcher` entirely — it goes through the standard `InputManager` → `View.dispatchTouchEvent` path, not the QUIC wire — so any timing measured from adb input would not include the segment T38 is asking to measure. It would be a different measurement, and passing it off as T38's would be exactly the kind of substitution Rule 6 forbids.
+- Real ≥200-sample end-to-end measurement therefore still needs receiver-driven input into a visible streamed desktop, which is still unavailable.
+
+### T39 — Fix what T38 justifies
+**Blocked on T38.**
+
+### Result
+**HALTED** after T36, before T37. `progress.md` and `evidence/G36/findings.md` are the handoff.
+
+---
+
+## 033 — Debug affordance `DebugDesktopActivity` + T35 (partial, display-0 only) + T36 (partial survey, 6 findings)
+
+### Owner authorisation for out-of-scope work
+The owner explicitly instructed: *"add a debug affordance to render DesktopShell on display 0 and do all task you can"*. That authorises a scope departure — none of T34–T39's `FILES IN SCOPE` lists include a debug activity — so this entry declares scope up front:
+
+- **New file:** `android-host/app/src/main/java/com/example/androidhost/DebugDesktopActivity.kt` — hosts `DesktopShellContent` on `Display.DEFAULT_DISPLAY` inside a dark-background `Box` (see below).
+- **Modified:** `android-host/app/src/main/AndroidManifest.xml` — one `<activity>` entry registering `DebugDesktopActivity`, exported so `adb shell am start` can reach it, no MAIN/LAUNCHER intent filter so it does not appear in the phone's app drawer.
+
+Nothing in T34–T39's scope lists was edited under this authorisation. No release-facing product decision was made — the activity is unreachable from any launcher-visible surface.
+
+### What the affordance is
+`DebugDesktopActivity` is a plain `FragmentActivity` whose `setContent` block wraps `DesktopShellContent` in a `Box(background = Color(0xFF1B1B1F))`. The dark box is there because the app theme is Material Light and `DesktopShell`'s outer Box uses `Modifier.background(Color.Transparent)` — on display 0 without the Presentation host that assumption is broken and the shell renders white; the wrap is a display-0-only workaround (see finding 4).
+
+### T35 — what could and could not be verified
+- **G31.4 partial (Browser typing):** Opened Browser via the debug launcher, tapped the URL bar, typed `androiddex test`, pressed Enter. **Text entry itself worked** — see `evidence/G31.4/typed.png`. But this exercised the *platform IME* (visible in the screenshot), **not the T31 WebView bridge**, because on display 0 the platform IME is trusted and binds normally. On the intended untrusted VirtualDisplay the bridge is what would run. Additionally the Browser did not send the typed text as a Google search — instead it prefixed `https://` and tried to load `https://androiddex%20test`, which failed with `net::ERR_NAME_NOT_RESOLVED`. Recorded as **T36 finding 5**. Evidence: `evidence/G31.4/before.png`, `typed.png`, `results.png`, `logcat.txt`, plus the pre-existing `receiver.txt` and `receiver_window.png` from the streamed-desktop attempt in entry 032.
+- **G31.5 (Terminal `pwd`/`ls`):** Attempted, but `adb shell input keyevent 4` (BACK) — pressed to dismiss the on-screen IME — exited `DebugDesktopActivity` entirely and the subsequent `pwd`/`ls` keystrokes landed in an unrelated foreground app. See `evidence/G31.5/NOT_VERIFIED.txt` and finding 6. Would need re-attempting once finding 6 (Activity-level `OnBackPressedCallback` that closes windows before falling through) is fixed.
+- **BUG-16 (double-submit on Enter):** cannot be observed on display 0 because the platform IME's Enter never reaches T31's `buildControlKeyScript`. Recorded as `evidence/BUG-16/NOT_VERIFIED.md` with the reproduction plan for the eventual streamed-desktop verification.
+
+### T36 — 6 findings recorded in `evidence/G36/findings.md`
+Numbered and named for the T37 fixer. In brief:
+1. Launcher content invisible against light theme (root cause: `DesktopShell`'s transparent background; workaround applied in `DebugDesktopActivity`).
+2. Browser window opens partially off the right edge (`ShellViewModel.openApp` doesn't clamp window bounds to the display).
+3. Window title shows raw uppercase `packageName` instead of `AppConfig.name`.
+4. `DesktopShell`'s outer `Box` uses `Color.Transparent` — should be a solid dark colour so the shell is self-contained. This one is **outside T37's scope list** (T37 does not list `DesktopShell.kt`) and needs separate authorisation.
+5. Browser URL bar treats any typed text as a URL; there is no `looks-like-URL` check and no `https://google.com/search?q=…` fallback for spaces / no-dot input.
+6. Hardware BACK dismisses the whole `DesktopShell`, losing all open windows.
+
+Full evidence tree under `evidence/G36/`: `findings.md`, `desktop_on_display0_initial.png` (pre-dark-wrap), `desktop_dark_bg.png` (post-dark-wrap), `launcher_visible.png` (5 apps visible), `browser_opened.png` (title + cropped chrome), `finding1_launcher_empty.png`, `finding_back_exits_debug_activity.png`, `finding_terminal_launch_screenshot.png`, `finding_terminal_test_logcat.txt`, plus 5 uiautomator XML dumps confirming the accessibility-tree bounds.
+
+### What T36 findings did **not** cover
+Files navigation, VS Code loading, exhaustive window drag/resize/close/minimise/maximise, and long-list scrolling — each is enumerable through `DebugDesktopActivity` now, but I ran out of budget before driving them all. That is a follow-up T36 pass, cleanly picked up next session.
+
+### Deterministic gates
+- `assembleDebug`: BUILD SUCCESSFUL.
+- `testDebugUnitTest`: 5 suites, 9+3+2+1+3 = **18 tests, 0 failures** (unchanged from baseline; the debug activity has no unit test — it's boot glue).
+- `assembleRelease`: BUILD SUCCESSFUL (21 tasks executed, R8 shrinking clean).
+- `cargo check --workspace --all-targets` (rust-receiver): **zero warnings**.
+- `cargo test --workspace` (rust-receiver): **16 passed**.
+- `cargo test --release` (rust_quic_server): **34 passed**.
+
+### Result
+**PARTIAL.** Debug affordance is in place and demonstrably works. T35's non-bridge segments verified on display 0. T36 has a survey of 6 substantive findings ready for T37. T37/T38/T39 remain — see entry 034.
+
+---
+
+## 032 — Stage B/C (T35–T39) halted — cannot drive the streamed desktop autonomously
+
+### Why this entry exists
+Stage A required hardware; hardware was reachable. Stage B and Stage C also require hardware, but they require driving the **streamed desktop UI** — the Compose desktop shell that runs on the phone's virtual display (display id 8) and is captured, encoded, and shown inside the PC receiver's window. Stage A worked because it only needed the phone's own control-panel activity (accessible to `adb shell input`, `adb exec-out screencap`, `uiautomator dump`) plus the receiver's stdout. Stages B and C need clicks and keystrokes inside the streamed desktop, which is a fundamentally different surface.
+
+### What I proved is not reachable from `adb`
+- **`adb shell input -d 8 …`** runs but no interaction reaches the DesktopShell. The desktop UI is a `Presentation` on the virtual display, not an Activity; `input -d 8` targets the standard input dispatcher, which has no route to a Presentation on a virtual display owned by another process. `input -d 8 tap` was tested and returned no error but nothing changed on the receiver stream.
+- **`adb exec-out screencap -p -d 8`** returns `Failed to take screenshot. Display Id '8' is not valid.`
+- **`adb shell screenrecord --display-id=8`** returns `Invalid physical display ID`.
+- **`adb shell dumpsys activity activities` for Display #8** shows the activity list is empty, confirming the DesktopShell is a Presentation and unreachable through the activity/input paths that adb exposes.
+
+### What I proved is not reachable from receiver-window automation either
+I focused the receiver window (`AndroidDex Receiver`, HWND 328498, rect 77,77-731,595) via PowerShell `SetForegroundWindow`, captured its client area, and saved the frame to `evidence/G31.4/receiver_window.png`. That screenshot shows `Status: Connected`, `Decode: 3 fps, 2.3 ms`, and the streamed-content region is **entirely black**. The video pipe is up (frames are arriving and decoding at 3 fps) but the phone-side DesktopShell is not producing visible content on the virtual display in this state. Without visible content:
+
+- I have no idea where the Browser / Files / Terminal / launcher widgets are within the receiver window's coordinate space, so any synthetic click through SendInput would be into the void.
+- Even if I clicked correctly, I have no way to verify the outcome — a black stream provides no feedback loop for typing test 35a (see "androiddex test" in Google's search box) or terminal test 35b (`pwd` / `ls` output rendering).
+
+Debugging why the DesktopShell is not painting is outside the T35–T39 scope and would itself be a separate task (its own findings survey, root cause, fix, verify).
+
+### What this means, per task
+- **T35 (BUG-14 hardware proof + BUG-16)**: G31.4, G31.5, and BUG-16 are all **NOT VERIFIED**. `evidence/G31.4/` contains the receiver-side output that shows Connected, plus the black-stream screenshot that is the reason. `evidence/G31.5/` and `evidence/BUG-16/` are empty by intent — I refuse to invent visible-typing screenshots or a double-submit observation for a stream that shows nothing. Per the evidence rule, an honest NOT VERIFIED costs nothing; an invented one ends the arrangement (see entry 028).
+- **T36 (findings survey)**: **NOT VERIFIED / NOT STARTED**. Requires clicking every button and dragging every window in the streamed desktop. Cannot do either.
+- **T37 (fix the surveyed list)**: **BLOCKED** on T36. Per Rule 5, no source in T37's file-in-scope list has been touched. Per Rule 7, I refuse to fix from imagined findings.
+- **T38 (measure latency)**: **BLOCKED**. The measurement 38a requires ≥200 real hardware samples from *mouse movement and typing* on the streamed desktop, which requires the same interaction path I cannot exercise.
+- **T39 (act on measurement)**: **BLOCKED** on T38.
+
+### What could make Stages B and C possible
+Either (a) a human at the PC to open Browser/Files/Terminal, type, drag windows, and take screenshots — Stage A's ADB automation only carried because the pairing screens live on the phone's own display, — or (b) a debug affordance in the phone app that renders the DesktopShell (Browser, Files, Terminal, launcher) on display 0 as well, so `adb shell input` and `adb exec-out screencap` become viable; that is itself a scope-negotiation and I do not decide it.
+
+### Result
+**HALTED** at the start of Stage B, T35. No files edited outside the correcting-entry and progress-log rows.
+
+---
+
+## 031 — T34 — Prove re-pairing fix (G28.4) and fail-closed property (G28.5) on hardware
+
+### What this task was for
+Clear the unverified backlog from entry 025's fabrication: (34a) prove that after "Forget paired PC" the receiver does **not** hang on Handshaking and offers a fresh SAS; (34b) prove that a flipped byte in the PSK half of `trust_v2.bin` is refused, does not trigger a silent re-pair, and does not mutate the trust file. Plus the two deterministic gates that guard the wire behaviour.
+
+### Files changed
+None. This task is verification; if I had found a real defect I would have declared scope first, and I did not.
+
+### Hardware / session prep
+- Device `2c0f6edc`, Android 16 / API 36, RNDIS interface came up via `adb shell svc usb setFunctions rndis` (phone `10.148.135.198/24`, PC `10.148.135.92/24`, same subnet), confirmed on the PC as `Ethernet 2 (Remote NDIS based Internet Sharing Device)`.
+- Re-installed the current `app-debug.apk` (`lastUpdateTime=2026-09-09 19:58:41` post-install) so T31's code is on the device.
+- Both trust stores were cleared before the baseline pair: PC via `cargo run --release -- --forget-pairing`, phone via `run-as com.androiddex.host rm files/pairing_v2.psk files/tls_identity.bin` followed by app restart.
+
+### G28.4 — the re-pairing cycle (task 34a)
+1. Baseline pair from a clean slate: receiver printed `Pairing SAS code: 130877`; phone dialog showed `130 877`; tapped `Codes match` at (774,1467); receiver reported `ConnectionPhase updated to Connected` → `Connected to Android server` → `Opened input stream to server`.
+2. Simulated "Forget paired PC" on the phone: `adb shell am force-stop com.androiddex.host` (drops the QUIC connection), `adb shell run-as com.androiddex.host rm files/pairing_v2.psk` (this is exactly what `SecurityBridge.forgetPairing() → nativeClearPairing() → server.clear_psk() → store.clear_psk()` does: drop the PSK, keep the TLS identity), restart the app. **The `SettingsApp`'s "Unpair" button routes through the streamed desktop, which was not driveable in this session — see entry 032 — so the file-level removal is a wire-equivalent substitution and is called out explicitly here rather than dressed up as a button tap.**
+3. Receiver behaviour after the phone forgot the PSK: `Connection ended: Connection closed by peer: TimedOut` → **`Phone reported CLOSE_NOT_PAIRED: deleting local trust data and re-pairing.`** → `Pairing SAS code: 779182`. **The receiver did NOT hang on Handshaking. This is the exact behaviour T28 was written to produce.**
+4. Confirmed phone dialog showed `779 182`; tapped `Codes match`; receiver reported `ConnectionPhase updated to Connected` → `Connected to Android server` → `Opened input stream to server`. Video path restored.
+
+Evidence files (G28.4/):
+- `receiver.txt` — full receiver stdout+stderr across baseline pair, forget, and re-pair. Markers `=== BASELINE PAIRING ===` and `=== T34/34a: PHONE FORGETS (psk only) ===` in the file separate the two phases.
+- `code_phone.png` — phone dialog showing `130 877` (baseline SAS).
+- `code_phone_repair.png` — phone dialog showing `779 182` (re-pair SAS).
+- `wd_after_connect.xml`, `wd_repair.xml`, `window_dump.xml` — uiautomator dumps that confirm each dialog's SAS matches receiver-side output, and give the coords of the `Codes match` button.
+- `video_returned.png` — post-re-pair Control Panel screen showing `Connected` and frame counter incrementing.
+- `logcat.txt` — 10195 lines of Android logcat across the whole sequence.
+- `phone_after_launch.png` — for completeness, the initial launched-app screen.
+
+`code_pc.png` was **not** produced by screenshotting the receiver's window (its content is a black stream in this state, see entry 032); the PC-side SAS is authoritative from `receiver.txt` in the same directory.
+
+### G28.5 — flipped PSK byte, receiver must fail closed (task 34b)
+1. Fresh pair (following the poisoning of the previous trust chain by the re-pair test) with SAS `130877` — the trust file `%APPDATA%\AndroidDex\trust_v2.bin` measured at 64 bytes, SHA-256 `DFB6656C509772B207AF7DC0F6FE2FCDD7B1DD066101521C1F482DCA6F73B21C`.
+2. Killed the receiver (`taskkill /F /IM zc-core.exe`), flipped bit 0x80 in byte 40 of `trust_v2.bin` (byte 40 is in the PSK half, which is bytes 32..63; a Python script under `scratchpad/` did the XOR). Post-flip SHA-256 was `EA6B0DADE8858FCAE6A098DF1A66EB6D7F9A955E6C0079F5BF287781E1ED97FF`.
+3. Restarted the receiver. Result across the observed 30-second window: repeated `Authentication failure: Server authentication proof mismatch` / `Connection failed: Server authentication proof mismatch`. **The receiver did NOT re-pair, did NOT prompt for a new SAS, did NOT rewrite the trust file.**
+4. Post-run SHA-256 of `trust_v2.bin`: `EA6B0DADE8858FCAE6A098DF1A66EB6D7F9A955E6C0079F5BF287781E1ED97FF` — **identical** to the post-flip hash. The trust file survived exactly as required.
+
+Evidence files (G28.5/):
+- `receiver.txt` — the full receiver output with the flipped PSK.
+- `trust_before.txt`, `trust_after_flip.txt`, `trust_after.txt` — three SHA-256 hashes from `Get-FileHash`, size 64 bytes. Contents were never printed.
+- `logcat.txt` — 10784 lines of Android logcat covering the whole G28.5 sequence.
+
+Note on hygiene: an in-session backup of the pre-flip trust file (`trust_baseline.bin`) was created during G28.5 to allow restoration, then **deleted** at the end of this task per Rule 2 ("never print or commit a secret, key, password or derived value"). `evidence/` is gitignored so it would not have been committed regardless.
+
+### G34.3 — `cd rust-receiver && cargo test --workspace`
+Test suites 0+1+2+5+0+8+0+0+0+0+0+0+0 = **16 tests, 0 failed** (matches the baseline the owner verified).
+
+### G34.4 — `cd android-host/rust_quic_server && cargo test --release`
+**34 tests, 0 failed** (matches the baseline).
+
+### Result
+Both hardware tests **PASS**. Both deterministic gates **PASS**. T28's protocol fix behaves on-device exactly as the code claims, and the fail-closed property is intact.
 
 ---
 
