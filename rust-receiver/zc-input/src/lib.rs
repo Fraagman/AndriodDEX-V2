@@ -1,4 +1,4 @@
-use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, ScrollEvent, input_event};
+use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, ScrollEvent, TextEvent, input_event};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VIRTUAL_WIDTH: u32 = 1920;
@@ -54,6 +54,16 @@ pub fn create_keyframe_request() -> InputEvent {
     }
 }
 
+pub fn create_text_event(text: String) -> InputEvent {
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    InputEvent {
+        event: Some(input_event::Event::Text(TextEvent {
+            text,
+            timestamp,
+        })),
+    }
+}
+
 pub fn create_scroll_event(
     x: f64,
     y: f64,
@@ -99,9 +109,32 @@ pub fn winit_modifiers_to_wire(modifiers: &winit::keyboard::ModifiersState) -> u
     wire
 }
 
+pub fn should_route_as_text(pressed: bool, text: Option<&str>, modifiers: &winit::keyboard::ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+        return false;
+    }
+    if let Some(s) = text {
+        if s.is_empty() {
+            return false;
+        }
+        for c in s.chars() {
+            if c < '\x20' || c == '\x7F' {
+                return false;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::keyboard::ModifiersState;
 
     #[test]
     fn test_create_mouse_event_scaling() {
@@ -172,5 +205,29 @@ mod tests {
         } else {
             panic!("Expected ScrollEvent");
         }
+    }
+
+    #[test]
+    fn test_routing_decision() {
+        let mods_empty = ModifiersState::empty();
+        let mut mods_ctrl = ModifiersState::empty();
+        mods_ctrl.set(ModifiersState::CONTROL, true);
+
+        // a plain letter routes to text
+        assert!(should_route_as_text(true, Some("a"), &mods_empty));
+        // an accented character routes to text
+        assert!(should_route_as_text(true, Some("é"), &mods_empty));
+        
+        // Enter, Tab and Backspace route to keycode
+        assert!(!should_route_as_text(true, Some("\r"), &mods_empty)); // Enter
+        assert!(!should_route_as_text(true, Some("\t"), &mods_empty)); // Tab
+        assert!(!should_route_as_text(true, Some("\x08"), &mods_empty)); // Backspace
+        assert!(!should_route_as_text(true, Some("\x7F"), &mods_empty)); // DEL
+        
+        // Ctrl+C routes to keycode
+        assert!(!should_route_as_text(true, Some("c"), &mods_ctrl));
+        
+        // a key release never routes to text
+        assert!(!should_route_as_text(false, Some("a"), &mods_empty));
     }
 }

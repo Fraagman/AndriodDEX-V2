@@ -29,6 +29,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.ui.focus.onFocusChanged
+import com.example.androidhost.input.LocalInputDispatcher
 
 @Composable
 fun FilesApp(
@@ -148,7 +150,12 @@ fun FilesApp(
                 OutlinedTextField(
                     value = folderName,
                     onValueChange = { folderName = it },
-                    singleLine = true
+                    singleLine = true,
+                    modifier = Modifier.onFocusChanged { state ->
+                        LocalInputDispatcher.registerTextInsert(
+                            if (state.isFocused) { text -> folderName += text } else null
+                        )
+                    }
                 )
             },
             confirmButton = {
@@ -176,7 +183,12 @@ fun FilesApp(
                 OutlinedTextField(
                     value = newName,
                     onValueChange = { newName = it },
-                    singleLine = true
+                    singleLine = true,
+                    modifier = Modifier.onFocusChanged { state ->
+                        LocalInputDispatcher.registerTextInsert(
+                            if (state.isFocused) { text -> newName += text } else null
+                        )
+                    }
                 )
             },
             confirmButton = {

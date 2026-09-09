@@ -98,16 +98,12 @@ fun DesktopShellContent(
     // rather than blocking or nagging — desktop control works either way.
     val context = androidx.compose.ui.platform.LocalContext.current
     val a11yEnabled by com.example.androidhost.service.DesktopAccessibilityService.isConnected.collectAsState()
-    var imeSelected by remember {
-        mutableStateOf(com.example.androidhost.service.AndroidDexIME.isSelectedIme(context))
-    }
 
     LaunchedEffect(Unit) {
         // Both settings are toggled in system UI on the phone, out of band from this
         // Presentation, so poll rather than wait for a lifecycle event we never get.
         while (true) {
             com.example.androidhost.service.DesktopAccessibilityService.refresh(context)
-            imeSelected = com.example.androidhost.service.AndroidDexIME.isSelectedIme(context)
             delay(2000)
         }
     }
@@ -178,11 +174,7 @@ fun DesktopShellContent(
                 showNavButtons = a11yEnabled,
                 onBackClick = { com.example.androidhost.service.DesktopAccessibilityService.performBack() },
                 onHomeClick = { com.example.androidhost.service.DesktopAccessibilityService.performHome() },
-                onRecentsClick = { com.example.androidhost.service.DesktopAccessibilityService.performRecents() },
-                showKeyboardPrompt = !imeSelected,
-                onKeyboardPromptClick = {
-                    com.example.androidhost.service.AndroidDexIME.showImePicker(context)
-                }
+                onRecentsClick = { com.example.androidhost.service.DesktopAccessibilityService.performRecents() }
             )
         }
     }

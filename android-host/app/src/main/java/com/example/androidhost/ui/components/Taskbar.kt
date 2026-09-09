@@ -74,10 +74,7 @@ fun Taskbar(
     showNavButtons: Boolean = false,
     onBackClick: () -> Unit = {},
     onHomeClick: () -> Unit = {},
-    onRecentsClick: () -> Unit = {},
-    /** Whether to offer the keyboard picker, i.e. our IME is not the selected one. */
-    showKeyboardPrompt: Boolean = false,
-    onKeyboardPromptClick: () -> Unit = {}
+    onRecentsClick: () -> Unit = {}
 ) {
     var currentTime by remember { mutableStateOf(getCurrentTime()) }
 
@@ -152,20 +149,6 @@ fun Taskbar(
 
         // Right: Connection Status & Waveform & Settings
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Offered only until the AndroidDex keyboard is selected. The picker is a
-            // system dialog and appears on the phone's own screen, not here.
-            if (showKeyboardPrompt) {
-                Icon(
-                    imageVector = Icons.Default.Keyboard,
-                    contentDescription = "Enable AndroidDex keyboard",
-                    tint = Color(0xFF8B949E),
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clickable { onKeyboardPromptClick() }
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-            }
-
             if (isAudioCapturing) {
                 Text(
                     text = "LIVE",

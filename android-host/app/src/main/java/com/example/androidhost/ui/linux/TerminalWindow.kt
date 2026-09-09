@@ -21,6 +21,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -32,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
+import com.example.androidhost.input.LocalInputDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,8 +45,7 @@ import java.io.File
  * Compose receives raw `KeyEvent`s through `View.dispatchKeyEvent` and needs no
  * `InputConnection`, which is what makes this work where the previous
  * `AndroidView(EditText)` did not — an `EditText` on an untrusted virtual display never
- * gets an `InputConnection` and silently swallows every keystroke (see the class comment
- * on `AndroidDexIME`).
+ * gets an `InputConnection` and silently swallows every keystroke.
  *
  * **Scope reduced to line-buffered command/response (task 31e).**
  * Running an interactive `sh` and printing its prompt from the read loop is possible but
@@ -146,6 +147,17 @@ private fun TerminalSurface() {
                 .verticalScroll(scrollState)
                 .focusRequester(focusRequester)
                 .focusable()
+                .onFocusChanged { state ->
+                    LocalInputDispatcher.registerTextInsert(if (state.isFocused) { text ->
+                        // Only add printable characters, same as the onKeyEvent logic below
+                        for (c in text) {
+                            val cp = c.code
+                            if (cp in 0x20..0x10FFFF) {
+                                currentInput += String(Character.toChars(cp))
+                            }
+                        }
+                    } else null)
+                }
                 .onKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                     when (event.key) {

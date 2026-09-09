@@ -22,6 +22,8 @@ import com.example.androidhost.security.SecurityBridge
 import com.example.androidhost.service.DisplayService
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
+import androidx.compose.ui.focus.onFocusChanged
+import com.example.androidhost.input.LocalInputDispatcher
 import kotlinx.coroutines.delay
 
 @Composable
@@ -90,6 +92,11 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
+                    .onFocusChanged { state ->
+                        LocalInputDispatcher.registerTextInsert(
+                            if (state.isFocused) { text -> widthText += text } else null
+                        )
+                    }
             )
             Text(" x ", color = Color.White, modifier = Modifier.padding(horizontal = 8.dp))
             OutlinedTextField(
@@ -103,6 +110,11 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
+                    .onFocusChanged { state ->
+                        LocalInputDispatcher.registerTextInsert(
+                            if (state.isFocused) { text -> heightText += text } else null
+                        )
+                    }
             )
             Spacer(modifier = Modifier.width(16.dp))
             Button(onClick = {
@@ -130,6 +142,11 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
+                    .onFocusChanged { state ->
+                        LocalInputDispatcher.registerTextInsert(
+                            if (state.isFocused) { text -> bitrateText += text } else null
+                        )
+                    }
             )
             Spacer(modifier = Modifier.width(16.dp))
             Button(onClick = {

@@ -46,11 +46,17 @@ message ScrollEvent {
 
 message KeyframeRequest {}
 
+message TextEvent {
+    string text = 1;
+    uint64 timestamp = 2;
+}
+
 message InputEvent {
     oneof event {
         MouseEvent mouse = 1;
         KeyboardEvent keyboard = 2;
         ScrollEvent scroll = 3;
         KeyframeRequest request_keyframe = 4;
+        TextEvent text = 5;
     }
 }

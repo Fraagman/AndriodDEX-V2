@@ -45,15 +45,7 @@
         <service android:name=".service.AudioCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <service android:name=".service.NativeComputeService" android:exported="false" />
         
-        <service android:name=".service.AndroidDexIME"
-            android:label="@string/ime_label"
-            android:permission="android.permission.BIND_INPUT_METHOD"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.view.InputMethod" />
-            </intent-filter>
-            <meta-data android:name="android.view.im" android:resource="@xml/method" />
-        </service>
+
 
         <!--
             Optional. Provides back / home / recents only. The app is fully functional

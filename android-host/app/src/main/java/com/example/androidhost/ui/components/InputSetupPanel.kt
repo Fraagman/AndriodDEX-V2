@@ -33,7 +33,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.example.androidhost.service.AndroidDexIME
 import com.example.androidhost.service.DesktopAccessibilityService
 
 private val READY_GREEN = Color(0xFF4CAF50)
@@ -52,14 +51,12 @@ fun InputSetupPanel() {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var imeSelected by remember { mutableStateOf(AndroidDexIME.isSelectedIme(ctx)) }
     val a11yEnabled by DesktopAccessibilityService.isConnected.collectAsState()
 
     // Both settings are changed in system UI, so re-check whenever we come back.
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                imeSelected = AndroidDexIME.isSelectedIme(ctx)
                 DesktopAccessibilityService.refresh(ctx)
             }
         }
@@ -82,17 +79,6 @@ fun InputSetupPanel() {
             detail = "Mouse, drag, hover and keyboard on the streamed desktop.",
             statusText = "Ready — no setup needed",
             ready = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        CapabilityRow(
-            title = "Keyboard into text fields",
-            detail = "Lets typing reach focused text fields. Enable the AndroidDex keyboard in Languages & input.",
-            statusText = if (imeSelected) "Ready" else "Optional — not enabled",
-            ready = imeSelected,
-            actionLabel = if (imeSelected) null else "Choose keyboard",
-            onAction = { AndroidDexIME.showImePicker(ctx) }
         )
 
         Spacer(modifier = Modifier.height(12.dp))

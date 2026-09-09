@@ -457,12 +457,20 @@ fn main() {
                             }
                         }
                         if is_focused {
-                            let mut keycode = 0u32;
-                            if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
-                                keycode = code as u32;
-                            }
-                            let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
-                            let ev = zc_input::create_keyboard_event(keycode, key_event.state == ElementState::Pressed, wire_mods);
+                            let pressed = key_event.state == ElementState::Pressed;
+                            let text_str = key_event.text.as_ref().map(|s| s.as_str());
+                            
+                            let ev = if zc_input::should_route_as_text(pressed, text_str, &current_modifiers) {
+                                zc_input::create_text_event(text_str.unwrap().to_string())
+                            } else {
+                                let mut keycode = 0u32;
+                                if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
+                                    keycode = code as u32;
+                                }
+                                let wire_mods = zc_input::winit_modifiers_to_wire(&current_modifiers);
+                                zc_input::create_keyboard_event(keycode, pressed, wire_mods)
+                            };
+                            
                             let mut serialized = Vec::new();
                             if ev.encode(&mut serialized).is_ok() {
                                 if let Ok(mut buf) = input_buffer_for_poll.lock() {

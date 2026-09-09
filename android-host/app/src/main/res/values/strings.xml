@@ -4,6 +4,4 @@
     <string name="accessibility_service_description">Optional. Adds back, home and recents buttons to the AndroidDex desktop taskbar. AndroidDex works without this — mouse and keyboard control of the desktop need no permissions.</string>
     <string name="accessibility_disclosure_title">Accessibility Service Notice</string>
     <string name="accessibility_disclosure_summary">AndroidDex uses the Accessibility Service solely to perform system navigation actions (Back, Home, and Recents) from the desktop taskbar.\n\n• It does not read, inspect, or collect screen content.\n• It does not track typing or personal data.\n• It does not perform automated gestures.\n• Enabling this service is optional; full desktop streaming and input work without it.</string>
-    <string name="ime_label">AndroidDex Keyboard</string>
-    <string name="ime_subtype_label">AndroidDex</string>
 </resources>

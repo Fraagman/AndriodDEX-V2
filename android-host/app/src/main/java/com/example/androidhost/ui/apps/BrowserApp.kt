@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -77,6 +78,11 @@ fun BrowserApp(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 8.dp)
+                        .onFocusChanged { state ->
+                            LocalInputDispatcher.registerTextInsert(
+                                if (state.isFocused) { text -> urlInput += text } else null
+                            )
+                        }
                         .onKeyEvent {
                             if (it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_ENTER && it.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
                                 var target = urlInput
@@ -176,7 +182,7 @@ fun BrowserApp(
                         
                         // Route text entry from the PC-side keyboard into the DOM. The
                         // platform IME cannot serve this virtual display (see the class
-                        // comment on AndroidDexIME), so `LocalInputDispatcher` calls back
+                        // comment on LocalInputDispatcher), so `LocalInputDispatcher` calls back
                         // into the WebView while it is focused and injects text via
                         // `evaluateJavascript` targeting `document.activeElement`.
                         val bridge = object : WebViewInputBridge {

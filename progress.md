@@ -3534,3 +3534,13 @@ Checked installed NDKs in the SDK directory. The only installed versions are:
 
 No stable NDK at r27 or later is installed. The owner should install a stable NDK at r27+ (e.g., 27.0.12077973 or later) via SDK manager.
 Execution stopped as instructed.
+
+## 2026-09-09: Direct PC-to-Android Text Injection (Keyboard Issue Resolution)
+
+Completed all 5 parts of the text injection initiative:
+
+1. **Protocol Extension**: Added TextEvent to input.proto carrying raw text characters to bypass Android IME keycode resolution issues.
+2. **Rust Receiver Modification**: Intercepted winit keyboard events in zc-core. Implemented logic to extract printable characters unburdened by modifiers (Ctrl/Alt/Super), dispatching them as TextEvents while falling back to standard KEYBOARD events for control and modifier keys.
+3. **Android Host Bridge**: Created LocalInputDispatcher.registerTextInsert as a global text injection singleton. Wired up BrowserApp, SettingsApp, FilesApp, and TerminalWindow to opt into this channel via onFocusChanged, appending intercepted text directly to their Compose states. This bypasses the uncooperative Compose ACTION_MULTIPLE key events.
+4. **IME Removal**: Completely scrubbed the legacy AndroidDexIME service, Manifest entries, strings.xml definitions, and associated UI polling loops and prompts. The untrusted Virtual Display no longer relies on any Android IME.
+5. **Verification**: Successfully rebuilt both the Android host and Rust eceiver without errors, confirming zero remaining references to the old input path.

@@ -9,7 +9,6 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
-import com.example.androidhost.service.AndroidDexIME
 import com.example.androidhost.service.DisplayService
 import java.lang.ref.WeakReference
 
@@ -99,7 +98,7 @@ object LocalInputDispatcher {
     /**
      * When set, WebView-focused surfaces receive text and control keys through the DOM
      * (via `evaluateJavascript`) instead of via `View.dispatchKeyEvent` or the platform
-     * IME. See [WebViewInputBridge] and the class comment on `AndroidDexIME` for why the
+     * IME. See [WebViewInputBridge] for why the
      * IME route cannot work on our untrusted VirtualDisplay.
      */
     private var webViewBridge: WebViewInputBridge? = null
@@ -420,7 +419,7 @@ object LocalInputDispatcher {
         }
 
         // Route through the WebView bridge when a WebView surface has focus. This is the
-        // replacement for the dead IME path (see AndroidDexIME): our virtual display is
+        // replacement for the dead IME path: our virtual display is
         // untrusted, so `onStartInput` never fires and `InputConnection`-based text entry
         // silently drops. WebViews need text delivered into the DOM instead.
         val bridge = webViewBridge
@@ -447,9 +446,7 @@ object LocalInputDispatcher {
             // shortcuts (Ctrl+F etc.) keep working via View.dispatchKeyEvent.
         }
 
-        // The AndroidDexIME path is retained only for symmetry with historical call
-        // sites; it always returns false on the virtual display (see AndroidDexIME).
-        if (AndroidDexIME.dispatchFromHost(keyCode, pressed, effectiveMeta, downTime, now)) return
+        // The IME path is removed.
 
         val view = targetRef?.get() ?: return
         val event = KeyEvent(
@@ -493,13 +490,18 @@ object LocalInputDispatcher {
         else -> 0
     }
 
+    private var textInsertCallback: ((String) -> Unit)? = null
+
+    fun registerTextInsert(callback: ((String) -> Unit)?) {
+        mainHandler.post { textInsertCallback = callback }
+    }
+
     /**
      * Commits a literal string, bypassing keycode translation. Used for characters the
      * PC resolves itself (dead keys, IME composition, clipboard paste).
      *
-     * Routes through the WebView bridge when one is attached. The IME fallback is
-     * retained for symmetry but is dead on our untrusted virtual display; see
-     * `AndroidDexIME`.
+     * Routes through the WebView bridge when one is attached, or the Compose injection
+     * channel, or the Terminal.
      */
     fun onText(text: CharSequence) {
         if (text.isEmpty()) return
@@ -509,7 +511,7 @@ object LocalInputDispatcher {
                 bridge.insertText(text)
                 return@post
             }
-            AndroidDexIME.commitTextFromHost(text)
+            textInsertCallback?.invoke(text.toString())
         }
     }
 

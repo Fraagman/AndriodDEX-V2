@@ -100,6 +100,10 @@ object InputManager {
                 Log.i(TAG, "Keyframe requested by receiver")
                 DisplayService.requestKeyframe()
             }
+            InputEvent.EventCase.TEXT -> {
+                val t = event.text
+                LocalInputDispatcher.onText(t.text)
+            }
             InputEvent.EventCase.EVENT_NOT_SET, null -> Unit
         }
     }
