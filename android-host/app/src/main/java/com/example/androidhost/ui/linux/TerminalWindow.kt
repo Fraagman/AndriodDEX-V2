@@ -90,6 +90,7 @@ private fun TerminalSurface() {
     val scrollState = rememberScrollState()
     val focusRequester = remember { FocusRequester() }
     val scope = rememberCoroutineScope()
+    val textOwner = remember { Any() }
 
     LaunchedEffect(Unit) {
         scrollback.add("AndroidDex terminal — sandboxed to ${rootDir.absolutePath}")
@@ -148,7 +149,7 @@ private fun TerminalSurface() {
                 .focusRequester(focusRequester)
                 .focusable()
                 .onFocusChanged { state ->
-                    LocalInputDispatcher.registerTextInsert(if (state.isFocused) { text ->
+                    LocalInputDispatcher.registerTextInsert(textOwner, if (state.isFocused) { text ->
                         // Only add printable characters, same as the onKeyEvent logic below
                         for (c in text) {
                             val cp = c.code

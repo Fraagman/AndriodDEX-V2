@@ -109,6 +109,7 @@ dependencies {
 
   // Local tests: jUnit, coroutines, Android runner
   testImplementation(libs.junit)
+  testImplementation("org.robolectric:robolectric:4.11.1")
   testImplementation(libs.kotlinx.coroutines.test)
 
   // Instrumented tests: jUnit rules and runners

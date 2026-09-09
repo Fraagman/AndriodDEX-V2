@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -34,6 +35,7 @@ fun CodeServerWindow(
     onMaximize: () -> Unit
 ) {
     val password by NativeComputeService.codeServerPassword.collectAsState()
+    val bridgeOwner = remember { Any() }
 
     WindowChrome(
         windowState = windowState,
@@ -64,6 +66,9 @@ fun CodeServerWindow(
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.cacheMode = WebSettings.LOAD_NO_CACHE
+                        
+                        isFocusable = true
+                        isFocusableInTouchMode = true
                         webViewClient = object : WebViewClient() {
                             override fun onReceivedError(
                                 view: WebView?,
@@ -96,7 +101,11 @@ fun CodeServerWindow(
                             }
                         }
                         setOnFocusChangeListener { _, hasFocus ->
-                            LocalInputDispatcher.registerWebViewBridge(if (hasFocus) bridge else null)
+                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, if (hasFocus) bridge else null)
+                        }
+                        setOnTouchListener { _, _ ->
+                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge)
+                            false
                         }
 
                         loadUrl("http://127.0.0.1:18080")

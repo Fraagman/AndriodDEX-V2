@@ -40,6 +40,8 @@ fun BrowserApp(
     onMaximize: () -> Unit
 ) {
     var urlInput by remember { mutableStateOf("https://www.google.com") }
+    val textOwner = remember { Any() }
+    val bridgeOwner = remember { Any() }
     var currentUrl by remember { mutableStateOf("https://www.google.com") }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember { mutableStateOf(false) }
@@ -80,6 +82,7 @@ fun BrowserApp(
                         .padding(horizontal = 8.dp)
                         .onFocusChanged { state ->
                             LocalInputDispatcher.registerTextInsert(
+                                textOwner,
                                 if (state.isFocused) { text -> urlInput += text } else null
                             )
                         }
@@ -140,6 +143,9 @@ fun BrowserApp(
                         settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                         settings.cacheMode = WebSettings.LOAD_DEFAULT
                         
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 isLoading = true
@@ -194,7 +200,11 @@ fun BrowserApp(
                             }
                         }
                         setOnFocusChangeListener { _, hasFocus ->
-                            LocalInputDispatcher.registerWebViewBridge(if (hasFocus) bridge else null)
+                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, if (hasFocus) bridge else null)
+                        }
+                        setOnTouchListener { _, _ ->
+                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge)
+                            false
                         }
 
                         webView = this

@@ -76,8 +76,11 @@ fun SettingsApp(
 @Composable
 private fun DisplaySection() {
     var widthText by remember { mutableStateOf(DisplayService.CAPTURE_WIDTH.toString()) }
+    val widthOwner = remember { Any() }
     var heightText by remember { mutableStateOf(DisplayService.CAPTURE_HEIGHT.toString()) }
+    val heightOwner = remember { Any() }
     var bitrateText by remember { mutableStateOf((DisplayService.BIT_RATE / 1000).toString()) }
+    val bitrateOwner = remember { Any() }
 
     SectionCard(title = "Display & Encoding") {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -94,6 +97,7 @@ private fun DisplaySection() {
                 modifier = Modifier.weight(1f)
                     .onFocusChanged { state ->
                         LocalInputDispatcher.registerTextInsert(
+                            widthOwner,
                             if (state.isFocused) { text -> widthText += text } else null
                         )
                     }
@@ -112,6 +116,7 @@ private fun DisplaySection() {
                 modifier = Modifier.weight(1f)
                     .onFocusChanged { state ->
                         LocalInputDispatcher.registerTextInsert(
+                            heightOwner,
                             if (state.isFocused) { text -> heightText += text } else null
                         )
                     }
@@ -144,6 +149,7 @@ private fun DisplaySection() {
                 modifier = Modifier.weight(1f)
                     .onFocusChanged { state ->
                         LocalInputDispatcher.registerTextInsert(
+                            bitrateOwner,
                             if (state.isFocused) { text -> bitrateText += text } else null
                         )
                     }

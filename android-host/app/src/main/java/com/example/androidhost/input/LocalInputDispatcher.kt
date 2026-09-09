@@ -103,13 +103,23 @@ object LocalInputDispatcher {
      */
     private var webViewBridge: WebViewInputBridge? = null
 
+    private var webViewBridgeOwner: Any? = null
+
     /**
      * Registers (or clears) a [WebViewInputBridge]. Call with the bridge on WebView focus
      * gain and with `null` on focus loss. Safe to call from any thread; the swap runs on
      * the main thread. Idempotent.
      */
-    fun registerWebViewBridge(bridge: WebViewInputBridge?) {
-        mainHandler.post { webViewBridge = bridge }
+    fun registerWebViewBridge(owner: Any, bridge: WebViewInputBridge?) {
+        mainHandler.post {
+            if (bridge != null) {
+                webViewBridgeOwner = owner
+                webViewBridge = bridge
+            } else if (webViewBridgeOwner === owner) {
+                webViewBridgeOwner = null
+                webViewBridge = null
+            }
+        }
     }
 
     /**
@@ -490,10 +500,19 @@ object LocalInputDispatcher {
         else -> 0
     }
 
+    private var textInsertOwner: Any? = null
     private var textInsertCallback: ((String) -> Unit)? = null
 
-    fun registerTextInsert(callback: ((String) -> Unit)?) {
-        mainHandler.post { textInsertCallback = callback }
+    fun registerTextInsert(owner: Any, callback: ((String) -> Unit)?) {
+        mainHandler.post {
+            if (callback != null) {
+                textInsertOwner = owner
+                textInsertCallback = callback
+            } else if (textInsertOwner === owner) {
+                textInsertOwner = null
+                textInsertCallback = null
+            }
+        }
     }
 
     /**

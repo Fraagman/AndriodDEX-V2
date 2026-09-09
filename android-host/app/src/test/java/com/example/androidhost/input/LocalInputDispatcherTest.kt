@@ -1,8 +1,13 @@
 package com.example.androidhost.input
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.shadows.ShadowLooper
 
+@RunWith(RobolectricTestRunner::class)
 class LocalInputDispatcherTest {
 
     @Test
@@ -48,5 +53,33 @@ class LocalInputDispatcherTest {
         // Above maximum must clamp to (WIRE_MAX - 1)
         assertEquals(1919.0f, LocalInputDispatcher.scaleX(5000, targetWidth), 0.001f)
         assertEquals(1079.0f, LocalInputDispatcher.scaleY(3000, targetHeight), 0.001f)
+    }
+
+    @Test
+    fun testTextInsertOwnership() {
+        val ownerA = Any()
+        val ownerB = Any()
+        
+        var receivedA: String? = null
+        var receivedB: String? = null
+        
+        // Owner A registers
+        LocalInputDispatcher.registerTextInsert(ownerA) { receivedA = it }
+        ShadowLooper.runUiThreadTasks()
+        
+        // Owner B registers, overwriting A
+        LocalInputDispatcher.registerTextInsert(ownerB) { receivedB = it }
+        ShadowLooper.runUiThreadTasks()
+        
+        // Owner A deregisters (stale blur)
+        LocalInputDispatcher.registerTextInsert(ownerA, null)
+        ShadowLooper.runUiThreadTasks()
+        
+        // B's callback must survive. Let's fire some text and check
+        LocalInputDispatcher.onText("hello")
+        ShadowLooper.runUiThreadTasks()
+        
+        assertNull("A should not receive text", receivedA)
+        assertEquals("B should survive the stale deregistration", "hello", receivedB)
     }
 }

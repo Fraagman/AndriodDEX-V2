@@ -47,7 +47,9 @@ fun FilesApp(
     var viewingFile by remember { mutableStateOf<File?>(null) }
     
     var showCreateFolderDialog by remember { mutableStateOf(false) }
+    val folderOwner = remember { Any() }
     var showRenameDialogFor by remember { mutableStateOf<File?>(null) }
+    val renameOwner = remember { Any() }
     var showDeleteConfirmFor by remember { mutableStateOf<File?>(null) }
 
     // Rerender trigger for directory changes
@@ -153,6 +155,7 @@ fun FilesApp(
                     singleLine = true,
                     modifier = Modifier.onFocusChanged { state ->
                         LocalInputDispatcher.registerTextInsert(
+                            folderOwner,
                             if (state.isFocused) { text -> folderName += text } else null
                         )
                     }
@@ -186,6 +189,7 @@ fun FilesApp(
                     singleLine = true,
                     modifier = Modifier.onFocusChanged { state ->
                         LocalInputDispatcher.registerTextInsert(
+                            renameOwner,
                             if (state.isFocused) { text -> newName += text } else null
                         )
                     }
