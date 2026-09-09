@@ -14,6 +14,31 @@ import com.example.androidhost.service.DisplayService
 import java.lang.ref.WeakReference
 
 /**
+ * Callback for WebView surfaces (BrowserApp, CodeServerWindow) that want key/text events
+ * routed through the DOM instead of the Android IME.
+ *
+ * Registered by the surface when its WebView gains focus and cleared when it loses focus;
+ * see [LocalInputDispatcher.registerWebViewBridge]. Callbacks are invoked on the main
+ * thread. All three methods must be safe to call for non-editable focus targets — the
+ * WebView side is expected to check `document.activeElement` and no-op silently when the
+ * focus is not on an editable element (an INPUT, TEXTAREA or contentEditable node), so the
+ * page's own key-shortcut handling keeps working (31c).
+ */
+interface WebViewInputBridge {
+    /** Insert `text` into the currently focused editable element. */
+    fun insertText(text: CharSequence)
+
+    /**
+     * Handle a control key that should not be routed as text.
+     *
+     * `key` is a DOM-style KeyboardEvent.key value: "Backspace", "Enter", "Tab", "Escape",
+     * "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown". `keyCode` is the legacy DOM
+     * KeyboardEvent.keyCode integer. `pressed` is true for keydown, false for keyup.
+     */
+    fun controlKey(key: String, keyCode: Int, pressed: Boolean)
+}
+
+/**
  * Dispatches input received from the PC directly into the Compose view tree hosted by
  * `DesktopPresentation` on the VirtualDisplay.
  *
@@ -70,6 +95,23 @@ object LocalInputDispatcher {
 
     /** downTime per Android keycode, so KeyEvent UP pairs with its DOWN. */
     private val keyDownTimes = HashMap<Int, Long>()
+
+    /**
+     * When set, WebView-focused surfaces receive text and control keys through the DOM
+     * (via `evaluateJavascript`) instead of via `View.dispatchKeyEvent` or the platform
+     * IME. See [WebViewInputBridge] and the class comment on `AndroidDexIME` for why the
+     * IME route cannot work on our untrusted VirtualDisplay.
+     */
+    private var webViewBridge: WebViewInputBridge? = null
+
+    /**
+     * Registers (or clears) a [WebViewInputBridge]. Call with the bridge on WebView focus
+     * gain and with `null` on focus loss. Safe to call from any thread; the swap runs on
+     * the main thread. Idempotent.
+     */
+    fun registerWebViewBridge(bridge: WebViewInputBridge?) {
+        mainHandler.post { webViewBridge = bridge }
+    }
 
     /**
      * Points the dispatcher at the ComposeView inside `DesktopPresentation`.
@@ -360,13 +402,9 @@ object LocalInputDispatcher {
 
     private fun handleKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
         updateMetaState(winitKeyCode, pressed)
-        Log.d(TAG, "LocalInputDispatcher handleKey: winitKeyCode=$winitKeyCode, pressed=$pressed")
 
         val keyCode = WinitKeyMap.toAndroidKeyCode(winitKeyCode)
-        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
-            Log.d(TAG, "No Android keycode for winit code $winitKeyCode")
-            return
-        }
+        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) return
 
         // When the receiver sends a non-zero modifier bitmask, trust it over the
         // locally-reconstructed state. A missed key-up over the network leaves the
@@ -381,6 +419,36 @@ object LocalInputDispatcher {
             downTime = keyDownTimes.remove(keyCode) ?: now
         }
 
+        // Route through the WebView bridge when a WebView surface has focus. This is the
+        // replacement for the dead IME path (see AndroidDexIME): our virtual display is
+        // untrusted, so `onStartInput` never fires and `InputConnection`-based text entry
+        // silently drops. WebViews need text delivered into the DOM instead.
+        val bridge = webViewBridge
+        if (bridge != null) {
+            val controlName = controlKeyName(keyCode)
+            if (controlName != null) {
+                bridge.controlKey(controlName, controlKeyDomCode(keyCode), pressed)
+                return
+            }
+            // Printable characters: only on key-down, and only when we can resolve one.
+            // Modifier-only combos (Ctrl+A etc.) fall through to `dispatchKeyEvent` so
+            // the WebView still receives them as Chromium key events for page shortcuts.
+            if (pressed && effectiveMeta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) == 0) {
+                val unicode = KeyEvent(
+                    downTime, now, KeyEvent.ACTION_DOWN, keyCode, 0, effectiveMeta,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
+                ).unicodeChar
+                if (unicode != 0) {
+                    bridge.insertText(String(Character.toChars(unicode)))
+                    return
+                }
+            }
+            // Not a printable char and not a listed control — fall through so page-level
+            // shortcuts (Ctrl+F etc.) keep working via View.dispatchKeyEvent.
+        }
+
+        // The AndroidDexIME path is retained only for symmetry with historical call
+        // sites; it always returns false on the virtual display (see AndroidDexIME).
         if (AndroidDexIME.dispatchFromHost(keyCode, pressed, effectiveMeta, downTime, now)) return
 
         val view = targetRef?.get() ?: return
@@ -395,12 +463,54 @@ object LocalInputDispatcher {
     }
 
     /**
+     * Maps Android keycodes for the control keys named in the task-31 spec to their
+     * DOM `KeyboardEvent.key` string. Returns null for keys not covered by 31b, which
+     * are then either injected as text (printable) or fall through to `dispatchKeyEvent`
+     * (modifier combos, function keys).
+     */
+    private fun controlKeyName(keyCode: Int): String? = when (keyCode) {
+        KeyEvent.KEYCODE_DEL -> "Backspace"
+        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "Enter"
+        KeyEvent.KEYCODE_TAB -> "Tab"
+        KeyEvent.KEYCODE_ESCAPE -> "Escape"
+        KeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
+        KeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
+        KeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
+        KeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
+        else -> null
+    }
+
+    /** Legacy DOM keyCode integer for the keys enumerated by [controlKeyName]. */
+    private fun controlKeyDomCode(keyCode: Int): Int = when (keyCode) {
+        KeyEvent.KEYCODE_DEL -> 8
+        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> 13
+        KeyEvent.KEYCODE_TAB -> 9
+        KeyEvent.KEYCODE_ESCAPE -> 27
+        KeyEvent.KEYCODE_DPAD_LEFT -> 37
+        KeyEvent.KEYCODE_DPAD_UP -> 38
+        KeyEvent.KEYCODE_DPAD_RIGHT -> 39
+        KeyEvent.KEYCODE_DPAD_DOWN -> 40
+        else -> 0
+    }
+
+    /**
      * Commits a literal string, bypassing keycode translation. Used for characters the
      * PC resolves itself (dead keys, IME composition, clipboard paste).
+     *
+     * Routes through the WebView bridge when one is attached. The IME fallback is
+     * retained for symmetry but is dead on our untrusted virtual display; see
+     * `AndroidDexIME`.
      */
     fun onText(text: CharSequence) {
         if (text.isEmpty()) return
-        mainHandler.post { AndroidDexIME.commitTextFromHost(text) }
+        mainHandler.post {
+            val bridge = webViewBridge
+            if (bridge != null) {
+                bridge.insertText(text)
+                return@post
+            }
+            AndroidDexIME.commitTextFromHost(text)
+        }
     }
 
     private fun updateMetaState(winitKeyCode: Int, pressed: Boolean) {
@@ -449,4 +559,100 @@ object LocalInputDispatcher {
         if (wireModifiers and 8 != 0) meta = meta or KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON
         return meta
     }
+}
+
+/**
+ * Quotes a string for safe embedding inside a JavaScript string literal in an
+ * `evaluateJavascript` payload.
+ *
+ * The output is a **fully-quoted** JSON string, produced by escaping every character that
+ * can alter script parsing:
+ *
+ *  - `"` and `\` are escaped so the closing quote cannot be reached early and the escape
+ *    character cannot introduce a spurious escape sequence,
+ *  - `\n`, `\r`, `\t`, `\b`, `\f` are escaped so raw control characters cannot terminate
+ *    the string literal or the surrounding line comment,
+ *  - all other control characters (U+0000..U+001F) are `\uXXXX`-escaped for the same
+ *    reason,
+ *  - U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) are `\uXXXX`-escaped
+ *    because they terminate JS string literals even though JSON allows them raw, and
+ *  - a literal `</` is written as `<\/` so the payload cannot terminate an enclosing
+ *    `<script>` element if the JavaScript is ever serialised into HTML.
+ *
+ * `org.json.JSONObject.quote` covers the JSON rules but is stubbed in Android unit tests
+ * (`RuntimeException("Stub!")`), so this pure-Kotlin implementation is used instead. See
+ * task 31a — "use `org.json.JSONObject.quote()` or an equivalent, not manual
+ * quote-doubling. A quote or backslash typed by the user must not be able to alter the
+ * script."
+ */
+internal fun escapeForJsStringLiteral(text: CharSequence): String {
+    val out = StringBuilder(text.length + 2)
+    out.append('"')
+    var i = 0
+    while (i < text.length) {
+        val c = text[i]
+        val code = c.code
+        when {
+            c == '"' -> out.append("\\\"")
+            c == '\\' -> out.append("\\\\")
+            c == '\n' -> out.append("\\n")
+            c == '\r' -> out.append("\\r")
+            c == '\t' -> out.append("\\t")
+            code == 0x08 -> out.append("\\b")
+            code == 0x0C -> out.append("\\f")
+            c == '<' && i + 1 < text.length && text[i + 1] == '/' -> {
+                // Break "</" so the payload cannot close a surrounding <script>.
+                out.append("<\\/")
+                i++
+            }
+            code == 0x2028 -> out.append("\\u2028")
+            code == 0x2029 -> out.append("\\u2029")
+            code < 0x20 -> out.append("\\u").append("%04x".format(code))
+            else -> out.append(c)
+        }
+        i++
+    }
+    out.append('"')
+    return out.toString()
+}
+
+/**
+ * Builds the `evaluateJavascript` payload for inserting `text` at the current DOM
+ * caret via `document.execCommand('insertText', ...)`.
+ *
+ * The IIFE checks that `document.activeElement` is an editable element (INPUT, TEXTAREA,
+ * or contentEditable) and no-ops otherwise, so page-level shortcuts keep working when
+ * focus is on a non-editable element (task 31c). `execCommand('insertText')` is chosen
+ * over assigning to `.value` because it fires `beforeinput`/`input`/`change` events and
+ * preserves undo history (task 31a).
+ */
+internal fun buildInsertTextScript(text: CharSequence): String {
+    return "(function(t){var el=document.activeElement;if(!el)return;var tag=el.tagName;" +
+        "var editable=tag==='INPUT'||tag==='TEXTAREA'||el.isContentEditable;" +
+        "if(!editable)return;" +
+        "try{document.execCommand('insertText',false,t);}catch(e){}" +
+        "})(${escapeForJsStringLiteral(text)});"
+}
+
+/**
+ * Builds the `evaluateJavascript` payload for a synthetic KeyboardEvent on the current
+ * DOM caret. Backspace is delivered as `execCommand('delete')` per task 31b; Enter,
+ * Tab, Escape and the arrow keys as a matching `keydown`/`keyup` pair. When Enter is
+ * pressed on an INPUT inside a form we also call `form.requestSubmit()` so form
+ * submission — Google search being the specific example the owner will test — actually
+ * runs, which synthetic KeyboardEvents alone do not trigger.
+ */
+internal fun buildControlKeyScript(key: String, keyCode: Int, pressed: Boolean): String {
+    val evType = if (pressed) "keydown" else "keyup"
+    return "(function(){var el=document.activeElement;if(!el)return;" +
+        "var tag=el.tagName;" +
+        "var editable=tag==='INPUT'||tag==='TEXTAREA'||el.isContentEditable;" +
+        "if(!editable)return;" +
+        "var k=${escapeForJsStringLiteral(key)};var kc=$keyCode;" +
+        (if (pressed && key == "Backspace") "try{document.execCommand('delete',false,null);}catch(e){}return;" else "") +
+        "try{var ev=new KeyboardEvent('$evType',{key:k,code:k,keyCode:kc,which:kc," +
+        "bubbles:true,cancelable:true});el.dispatchEvent(ev);" +
+        (if (pressed && key == "Enter") "if(tag==='INPUT'&&el.form){if(el.form.requestSubmit){el.form.requestSubmit();}else{el.form.submit();}}" else "") +
+        "}catch(e){}" +
+        "})();"
 }

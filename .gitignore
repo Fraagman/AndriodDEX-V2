@@ -48,3 +48,6 @@ android-host/.idea/
 # Session scratch
 /screen0.png
 /promt.md
+
+# Per-session hardware/artefact evidence — never committed
+/evidence/

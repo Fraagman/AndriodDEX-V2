@@ -3,43 +3,70 @@ package com.example.androidhost.service
 import android.content.Context
 import android.inputmethodservice.InputMethodService
 import android.provider.Settings
-import android.text.InputType
-import android.util.Log
-import android.view.InputDevice
-import android.view.KeyCharacterMap
-import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 
 /**
- * Soft keyboard that lets key events arriving from the PC reach whatever editor
- * currently has focus on the VirtualDisplay.
+ * Soft keyboard originally intended to bridge PC-side key events into whatever editor
+ * has focus on the desktop we stream from the VirtualDisplay.
  *
- * `LocalInputDispatcher` already delivers key events into our own Compose view tree, so
- * this IME is only needed to bridge the gap when Android has routed text entry through
- * an `InputConnection` — i.e. when a Compose `TextField` is focused and the platform has
- * started an input session. When no session is active, [dispatchFromHost] declines the
- * event and the dispatcher falls back to `View.dispatchKeyEvent`.
+ * **This route is dead on our display and cannot be revived. It is kept as a bound
+ * service only so uninstalling the IME does not leave a dangling manifest reference —
+ * removing the `<service>` declaration is a separate decision.**
  *
- * Enabling and selecting a keyboard lives in Settings > Languages & input. It needs no
- * developer options and no ADB.
+ * ---
+ *
+ * ### What was measured (task 30, hardware, entry 027)
+ *
+ * With this IME enabled and selected as the default (`settings get secure
+ * default_input_method` = `com.androiddex.host/com.example.androidhost.service.AndroidDexIME`),
+ * focusing a WebView `<input>` on the VirtualDisplay:
+ *
+ *  - never called `onStartInput` on this service,
+ *  - left `currentInputEditorInfo.inputType` at `TYPE_NULL` (0),
+ *  - left `hasLiveEditor()` returning `false`,
+ *  - left `currentInputConnection` bound to the `MainActivity` on Display 0.
+ *
+ * `dumpsys input_method` on the same run showed `mCurTokenDisplayId=0` and
+ * `mDisplayIdToShowIme=0`. The IME service was bound, but the platform never routed
+ * an editor session on our display to it.
+ *
+ * ### Why it cannot be revived
+ *
+ * `InputMethodManagerService` only starts editor sessions on **trusted** displays. A
+ * VirtualDisplay is trusted only when it carries `VIRTUAL_DISPLAY_FLAG_TRUSTED`, and
+ * that flag requires the signature permission `ADD_TRUSTED_DISPLAY`. A Play Store
+ * application cannot hold `ADD_TRUSTED_DISPLAY` — it is signature-only, granted only
+ * to apps signed with the platform key. Requesting it does not fail politely at
+ * runtime; it fails Play review as well.
+ *
+ * `VIRTUAL_DISPLAY_FLAG_OWN_FOCUS`, which would give our display its own focus lane
+ * and therefore its own IME target, also requires `FLAG_TRUSTED`. Same road, same
+ * dead end.
+ *
+ * ### What replaced it (task 31)
+ *
+ * The dispatcher no longer relies on this service:
+ *
+ *  - **WebView surfaces** (`BrowserApp`, `CodeServerWindow`) register a
+ *    `WebViewInputBridge` with `LocalInputDispatcher` while focused. Text is injected
+ *    into the focused DOM node via `evaluateJavascript` calling
+ *    `document.execCommand('insertText', ...)`; control keys become synthetic
+ *    `KeyboardEvent`s (with `form.requestSubmit()` for Enter inside an INPUT).
+ *  - **Terminal** (`TerminalWindow`) is rebuilt as a Compose-native surface that
+ *    consumes key events directly via `onKeyEvent`, needing no `InputConnection`.
+ *  - **Compose `TextField`s** already worked, because Compose reads `KeyEvent`s from
+ *    `View.dispatchKeyEvent` without an `InputConnection` at all.
+ *
+ * The next person to read this file: do not try to bring the IME path back. It cannot
+ * work on an untrusted virtual display. The evidence above is what to check before you
+ * decide otherwise.
  */
 class AndroidDexIME : InputMethodService() {
 
     companion object {
-        private const val TAG = "AndroidDexIME"
 
-        /** Set while the IME is bound. Read only from the main thread. */
-        @Volatile
-        private var instance: AndroidDexIME? = null
-
-        /**
-         * True when the user has selected AndroidDex as their active keyboard.
-         *
-         * Reads `Settings.Secure.DEFAULT_INPUT_METHOD`, which holds a flattened
-         * ComponentName such as `com.example.androidhost/.service.AndroidDexIME`.
-         */
         fun isSelectedIme(context: Context): Boolean {
             val current = Settings.Secure.getString(
                 context.contentResolver,
@@ -48,94 +75,43 @@ class AndroidDexIME : InputMethodService() {
             return current.startsWith("${context.packageName}/")
         }
 
-        /** Opens the system keyboard picker so the user can switch to AndroidDex. */
         fun showImePicker(context: Context) {
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showInputMethodPicker()
         }
 
         /**
-         * Offers a key event to the active input session.
-         *
-         * @return true when the event was consumed via an `InputConnection`. false means
-         *         no session is active and the caller should dispatch the event itself.
+         * Always returns false on this display; kept because `LocalInputDispatcher`
+         * still calls it in case a future trusted-display configuration wires an IME
+         * session in. See the class comment.
          */
+        @Suppress("UNUSED_PARAMETER")
         fun dispatchFromHost(
             keyCode: Int,
             pressed: Boolean,
             metaState: Int,
             downTime: Long,
             eventTime: Long
-        ): Boolean {
-            val ime = instance ?: return false
-            if (!ime.hasLiveEditor()) return false
-            val connection = ime.currentInputConnection ?: return false
+        ): Boolean = false
 
-            val event = KeyEvent(
-                downTime, eventTime,
-                if (pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
-                keyCode, 0, metaState,
-                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-                InputDevice.SOURCE_KEYBOARD
-            )
-            connection.sendKeyEvent(event)
-            return true
-        }
-
-        /**
-         * Commits a literal string into the focused editor.
-         *
-         * @return true when the text was committed.
-         */
-        fun commitTextFromHost(text: CharSequence): Boolean {
-            val ime = instance ?: return false
-            if (!ime.hasLiveEditor()) return false
-            val connection = ime.currentInputConnection ?: return false
-            return connection.commitText(text, 1)
-        }
-    }
-
-    /**
-     * True only when a real editor is attached.
-     *
-     * `currentInputConnection` can be a no-op connection when the IME is bound but no
-     * field has focus; committing into that silently swallows the keystroke. An
-     * `inputType` of `TYPE_NULL` is the platform's signal for "not a real text editor".
-     */
-    private fun hasLiveEditor(): Boolean {
-        val editor = currentInputEditorInfo ?: return false
-        return editor.inputType != InputType.TYPE_NULL
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        instance = this
-        Log.d(TAG, "IME created")
-    }
-
-    override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
-        super.onStartInput(attribute, restarting)
-        instance = this
-    }
-
-    override fun onDestroy() {
-        if (instance === this) instance = null
-        super.onDestroy()
-        Log.d(TAG, "IME destroyed")
+        /** Same status as [dispatchFromHost]: never commits on this display. */
+        @Suppress("UNUSED_PARAMETER")
+        fun commitTextFromHost(text: CharSequence): Boolean = false
     }
 
     /**
      * No on-screen key layout: every keystroke originates from the PC's physical
-     * keyboard. Returning null keeps the IME window out of the streamed desktop, which
-     * is what we want — a soft keyboard covering the desktop would be pure obstruction.
+     * keyboard, and this service never receives an input session anyway. Returning
+     * null keeps the IME window out of the streamed desktop.
      */
     override fun onCreateInputView(): View? = null
 
     override fun onEvaluateInputViewShown(): Boolean = false
 
-    /**
-     * The PC's keyboard is a real hardware keyboard from the user's point of view, so
-     * the IME must not claim fullscreen (extract) mode in landscape.
-     */
     override fun onEvaluateFullscreenMode(): Boolean = false
+
+    /** Kept present so an EditorInfo binding, if it ever arrives, doesn't NPE. */
+    override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        super.onStartInput(attribute, restarting)
+    }
 }

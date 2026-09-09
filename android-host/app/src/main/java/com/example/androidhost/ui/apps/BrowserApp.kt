@@ -23,6 +23,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.androidhost.input.LocalInputDispatcher
+import com.example.androidhost.input.WebViewInputBridge
+import com.example.androidhost.input.buildControlKeyScript
+import com.example.androidhost.input.buildInsertTextScript
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
 
@@ -170,6 +174,23 @@ fun BrowserApp(
                             }
                         }
                         
+                        // Route text entry from the PC-side keyboard into the DOM. The
+                        // platform IME cannot serve this virtual display (see the class
+                        // comment on AndroidDexIME), so `LocalInputDispatcher` calls back
+                        // into the WebView while it is focused and injects text via
+                        // `evaluateJavascript` targeting `document.activeElement`.
+                        val bridge = object : WebViewInputBridge {
+                            override fun insertText(text: CharSequence) {
+                                evaluateJavascript(buildInsertTextScript(text), null)
+                            }
+                            override fun controlKey(key: String, keyCode: Int, pressed: Boolean) {
+                                evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
+                            }
+                        }
+                        setOnFocusChangeListener { _, hasFocus ->
+                            LocalInputDispatcher.registerWebViewBridge(if (hasFocus) bridge else null)
+                        }
+
                         webView = this
                         loadUrl(currentUrl)
                     }

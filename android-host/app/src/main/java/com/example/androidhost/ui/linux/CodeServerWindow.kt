@@ -18,6 +18,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.androidhost.input.LocalInputDispatcher
+import com.example.androidhost.input.WebViewInputBridge
+import com.example.androidhost.input.buildControlKeyScript
+import com.example.androidhost.input.buildInsertTextScript
 import com.example.androidhost.service.NativeComputeService
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
@@ -81,6 +85,20 @@ fun CodeServerWindow(
                                 )
                             }
                         }
+                        // See BrowserApp for why WebView text entry has to be routed
+                        // through the DOM rather than the platform IME.
+                        val bridge = object : WebViewInputBridge {
+                            override fun insertText(text: CharSequence) {
+                                evaluateJavascript(buildInsertTextScript(text), null)
+                            }
+                            override fun controlKey(key: String, keyCode: Int, pressed: Boolean) {
+                                evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
+                            }
+                        }
+                        setOnFocusChangeListener { _, hasFocus ->
+                            LocalInputDispatcher.registerWebViewBridge(if (hasFocus) bridge else null)
+                        }
+
                         loadUrl("http://127.0.0.1:18080")
                     }
                 }
