@@ -2,13 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
         <!--
-          This exists only in debug builds. It hosts the full desktop shell,
-          including TerminalWindow which spawns a local shell running as this app's uid.
-          It must NEVER be exported or moved to src/main.
+          This manifest is merged into debug builds only, which are never distributed,
+          so exporting this activity is safe for local debugging. The true protection against SEC-17
+          is the source set separation (src/debug vs src/main).
+          Moving this activity or its declaration into src/main would reintroduce SEC-17
+          local privilege escalation, as it hosts a terminal running as this app's uid.
         -->
         <activity
             android:name=".DebugDesktopActivity"
-            android:exported="false"
+            android:exported="true"
             android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

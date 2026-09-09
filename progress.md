@@ -3519,3 +3519,18 @@ Task 40 (SEC-17) FAILED at Gate 40.6 (and step 40d).
 DebugDesktopActivity was moved to the debug source set and removed from the main manifest. A new debug AndroidManifest.xml was created with ndroid:exported="false".
 However, db shell am start -n com.androiddex.host/com.example.androidhost.DebugDesktopActivity failed with a SecurityException: Permission Denial, because it is not exported from uid 10459 to the shell uid (2000), even though it is a debuggable build.
 Stopped execution here as instructed by the rules. Task 41 and 42 were not started.
+
+### Entry 40b
+Task 40b completed successfully. The DebugDesktopActivity in the debug manifest has ndroid:exported="true" to allow m start to work in debug mode. The comment was corrected. 
+RELEASE merged manifest does NOT contain the activity.
+DEBUG merged manifest DOES contain the activity with exported="true".
+All tests passed, and HW launch was successful.
+
+### Entry 41
+Task 41 (REL-08) halted at step 41b.
+Checked installed NDKs in the SDK directory. The only installed versions are:
+- 26.1.10909125 (r26, before r27)
+- 30.0.14904198 (r30-beta1)
+
+No stable NDK at r27 or later is installed. The owner should install a stable NDK at r27+ (e.g., 27.0.12077973 or later) via SDK manager.
+Execution stopped as instructed.
