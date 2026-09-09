@@ -3513,3 +3513,9 @@ False
 
 ### Notes for the next task
 All 5 gate verification checks passed cleanly. Task 2 will remove the dead parallel project, untrack build artifacts, remove the `hello` member from `rust-receiver/Cargo.toml`, and update `.gitignore`.
+
+### Entry 40
+Task 40 (SEC-17) FAILED at Gate 40.6 (and step 40d). 
+DebugDesktopActivity was moved to the debug source set and removed from the main manifest. A new debug AndroidManifest.xml was created with ndroid:exported="false".
+However, db shell am start -n com.androiddex.host/com.example.androidhost.DebugDesktopActivity failed with a SecurityException: Permission Denial, because it is not exported from uid 10459 to the shell uid (2000), even though it is a debuggable build.
+Stopped execution here as instructed by the rules. Task 41 and 42 were not started.

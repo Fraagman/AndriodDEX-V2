@@ -32,16 +32,6 @@
             </intent-filter>
         </activity>
 
-        <!--
-          Debug affordance: hosts the DesktopShell on display 0 so `adb shell input`
-          and `adb exec-out screencap` can drive it. Not exported to the launcher.
-          Reachable only via `adb shell am start -n com.androiddex.host/com.example.androidhost.DebugDesktopActivity`.
-          See DebugDesktopActivity.kt for scope and limitations.
-        -->
-        <activity
-            android:name=".DebugDesktopActivity"
-            android:exported="true"
-            android:windowSoftInputMode="adjustResize" />
 
         <service android:name=".service.TetheringService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service

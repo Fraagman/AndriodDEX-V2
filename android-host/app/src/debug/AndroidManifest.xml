@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+          This exists only in debug builds. It hosts the full desktop shell,
+          including TerminalWindow which spawns a local shell running as this app's uid.
+          It must NEVER be exported or moved to src/main.
+        -->
+        <activity
+            android:name=".DebugDesktopActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>
