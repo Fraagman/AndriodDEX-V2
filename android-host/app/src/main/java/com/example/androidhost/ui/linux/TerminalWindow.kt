@@ -1,7 +1,9 @@
 package com.example.androidhost.ui.linux
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -21,13 +23,10 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import android.view.KeyEvent
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -144,44 +143,49 @@ private fun TerminalSurface() {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { focusRequester.requestFocus() }
                 .padding(12.dp)
                 .verticalScroll(scrollState)
                 .focusRequester(focusRequester)
                 .focusable()
-                .onFocusChanged { state ->
-                    LocalInputDispatcher.registerTextInsert(textOwner, if (state.isFocused) { text ->
-                        // Only add printable characters, same as the onKeyEvent logic below
-                        for (c in text) {
-                            val cp = c.code
-                            if (cp in 0x20..0x10FFFF) {
-                                currentInput += String(Character.toChars(cp))
-                            }
-                        }
-                    } else null)
-                }
-                .onKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                    when (event.key) {
-                        androidx.compose.ui.input.key.Key.Enter,
-                        androidx.compose.ui.input.key.Key.NumPadEnter -> {
-                            val cmd = currentInput
-                            currentInput = ""
-                            runCommand(cmd)
-                            true
-                        }
-                        androidx.compose.ui.input.key.Key.Backspace -> {
-                            if (currentInput.isNotEmpty()) {
-                                currentInput = currentInput.dropLast(1)
-                            }
-                            true
-                        }
-                        else -> {
-                            val cp = event.utf16CodePoint
-                            if (cp in 0x20..0x10FFFF) {
-                                currentInput += String(Character.toChars(cp))
-                                true
-                            } else {
-                                false
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.any { it.pressed }) {
+                                LocalInputDispatcher.registerComposeTarget(
+                                    textOwner,
+                                    onText = { text ->
+                                        // Only add printable characters
+                                        for (c in text) {
+                                            val cp = c.code
+                                            if (cp in 0x20..0x10FFFF) {
+                                                currentInput += String(Character.toChars(cp))
+                                            }
+                                        }
+                                    },
+                                    onKey = { keyCode, pressed ->
+                                        if (pressed) {
+                                            when (keyCode) {
+                                                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                                                    val cmd = currentInput
+                                                    currentInput = ""
+                                                    runCommand(cmd)
+                                                }
+                                                KeyEvent.KEYCODE_DEL -> {
+                                                    if (currentInput.isNotEmpty()) {
+                                                        currentInput = currentInput.dropLast(1)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        true
+                                    }
+                                )
+                                focusRequester.requestFocus()
                             }
                         }
                     }

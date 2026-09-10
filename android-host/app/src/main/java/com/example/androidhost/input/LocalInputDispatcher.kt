@@ -101,25 +101,33 @@ object LocalInputDispatcher {
      * IME. See [WebViewInputBridge] for why the
      * IME route cannot work on our untrusted VirtualDisplay.
      */
-    private var webViewBridge: WebViewInputBridge? = null
+    sealed class InputTarget {
+        class WebViewBridge(val bridge: WebViewInputBridge, val view: android.webkit.WebView) : InputTarget()
+        class ComposeTarget(val onText: (String) -> Unit, val onKey: (Int, Boolean) -> Boolean) : InputTarget()
+    }
 
-    private var webViewBridgeOwner: Any? = null
+    private var currentTargetOwner: Any? = null
+    private var currentTarget: InputTarget? = null
+
+    private fun setTarget(owner: Any, target: InputTarget?) {
+        mainHandler.post {
+            if (target != null) {
+                currentTargetOwner = owner
+                currentTarget = target
+            } else if (currentTargetOwner === owner) {
+                currentTargetOwner = null
+                currentTarget = null
+            }
+        }
+    }
 
     /**
      * Registers (or clears) a [WebViewInputBridge]. Call with the bridge on WebView focus
      * gain and with `null` on focus loss. Safe to call from any thread; the swap runs on
      * the main thread. Idempotent.
      */
-    fun registerWebViewBridge(owner: Any, bridge: WebViewInputBridge?) {
-        mainHandler.post {
-            if (bridge != null) {
-                webViewBridgeOwner = owner
-                webViewBridge = bridge
-            } else if (webViewBridgeOwner === owner) {
-                webViewBridgeOwner = null
-                webViewBridge = null
-            }
-        }
+    fun registerWebViewBridge(owner: Any, bridge: WebViewInputBridge?, view: android.webkit.WebView) {
+        setTarget(owner, bridge?.let { InputTarget.WebViewBridge(it, view) })
     }
 
     /**
@@ -432,8 +440,10 @@ object LocalInputDispatcher {
         // replacement for the dead IME path: our virtual display is
         // untrusted, so `onStartInput` never fires and `InputConnection`-based text entry
         // silently drops. WebViews need text delivered into the DOM instead.
-        val bridge = webViewBridge
-        if (bridge != null) {
+        // the WebView still receives them as Chromium key events for page shortcuts.
+        val target = currentTarget
+        if (target is InputTarget.WebViewBridge) {
+            val bridge = target.bridge
             val controlName = controlKeyName(keyCode)
             if (controlName != null) {
                 bridge.controlKey(controlName, controlKeyDomCode(keyCode), pressed)
@@ -454,19 +464,36 @@ object LocalInputDispatcher {
             }
             // Not a printable char and not a listed control — fall through so page-level
             // shortcuts (Ctrl+F etc.) keep working via View.dispatchKeyEvent.
+        } else if (target is InputTarget.ComposeTarget) {
+            val controlName = controlKeyName(keyCode)
+            if (controlName != null) {
+                if (target.onKey(keyCode, pressed)) return
+            }
+            if (pressed && effectiveMeta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) == 0) {
+                val unicode = KeyEvent(
+                    downTime, now, KeyEvent.ACTION_DOWN, keyCode, 0, effectiveMeta,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
+                ).unicodeChar
+                if (unicode != 0) {
+                    target.onText(String(Character.toChars(unicode)))
+                    return
+                }
+            }
         }
 
         // The IME path is removed.
 
-        val view = targetRef?.get() ?: return
-        val event = KeyEvent(
-            downTime, now,
-            if (pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
-            keyCode, 0, effectiveMeta,
-            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-            InputDevice.SOURCE_KEYBOARD
-        )
-        view.dispatchKeyEvent(event)
+        if (target == null) {
+            val view = targetRef?.get() ?: return
+            val event = KeyEvent(
+                downTime, now,
+                if (pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
+                keyCode, 0, effectiveMeta,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                InputDevice.SOURCE_KEYBOARD
+            )
+            view.dispatchKeyEvent(event)
+        }
     }
 
     /**
@@ -500,19 +527,8 @@ object LocalInputDispatcher {
         else -> 0
     }
 
-    private var textInsertOwner: Any? = null
-    private var textInsertCallback: ((String) -> Unit)? = null
-
-    fun registerTextInsert(owner: Any, callback: ((String) -> Unit)?) {
-        mainHandler.post {
-            if (callback != null) {
-                textInsertOwner = owner
-                textInsertCallback = callback
-            } else if (textInsertOwner === owner) {
-                textInsertOwner = null
-                textInsertCallback = null
-            }
-        }
+    fun registerComposeTarget(owner: Any, onText: ((String) -> Unit)?, onKey: ((Int, Boolean) -> Boolean)?) {
+        setTarget(owner, if (onText != null && onKey != null) InputTarget.ComposeTarget(onText, onKey) else null)
     }
 
     /**
@@ -525,12 +541,13 @@ object LocalInputDispatcher {
     fun onText(text: CharSequence) {
         if (text.isEmpty()) return
         mainHandler.post {
-            val bridge = webViewBridge
-            if (bridge != null) {
-                bridge.insertText(text)
+            val target = currentTarget
+            if (target is InputTarget.WebViewBridge) {
+                target.bridge.insertText(text)
                 return@post
+            } else if (target is InputTarget.ComposeTarget) {
+                target.onText(text.toString())
             }
-            textInsertCallback?.invoke(text.toString())
         }
     }
 

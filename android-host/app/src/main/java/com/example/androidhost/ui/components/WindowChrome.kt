@@ -35,11 +35,17 @@ fun WindowChrome(
     var offsetX by remember { mutableStateOf(windowState.bounds.left.toFloat()) }
     var offsetY by remember { mutableStateOf(windowState.bounds.top.toFloat()) }
 
+    val isMaximized = windowState.isMaximized
+    val currentOffsetX = if (isMaximized) 0f else offsetX
+    val currentOffsetY = if (isMaximized) 0f else offsetY
+    val currentWidth = if (isMaximized) com.example.androidhost.service.DisplayService.CAPTURE_WIDTH.toFloat() else windowState.bounds.width().toFloat()
+    val currentHeight = if (isMaximized) (com.example.androidhost.service.DisplayService.CAPTURE_HEIGHT.toFloat() - 48f) else windowState.bounds.height().toFloat()
+
     Box(
         modifier = Modifier
-            .offset(x = offsetX.dp, y = offsetY.dp)
-            .width(windowState.bounds.width().dp)
-            .height(windowState.bounds.height().dp)
+            .offset(x = currentOffsetX.dp, y = currentOffsetY.dp)
+            .width(currentWidth.dp)
+            .height(currentHeight.dp)
             .background(Color.Black)
             .border(1.dp, Color.White)
     ) {
@@ -50,11 +56,13 @@ fun WindowChrome(
                 .height(32.dp)
                 .background(Color(0xFF2A2A2A))
                 .border(1.dp, Color.White) // Bottom border implied by enclosing box, but let's add specific if needed
-                .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        offsetX += dragAmount.x
-                        offsetY += dragAmount.y
+                .pointerInput(isMaximized) {
+                    if (!isMaximized) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            offsetX += dragAmount.x
+                            offsetY += dragAmount.y
+                        }
                     }
                 },
             verticalAlignment = Alignment.CenterVertically

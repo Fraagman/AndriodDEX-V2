@@ -20,8 +20,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.androidhost.input.LocalInputDispatcher
@@ -80,23 +80,32 @@ fun BrowserApp(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 8.dp)
-                        .onFocusChanged { state ->
-                            LocalInputDispatcher.registerTextInsert(
-                                textOwner,
-                                if (state.isFocused) { text -> urlInput += text } else null
-                            )
-                        }
-                        .onKeyEvent {
-                            if (it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_ENTER && it.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
-                                var target = urlInput
-                                if (!target.startsWith("http://") && !target.startsWith("https://")) {
-                                    target = "https://$target"
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (event.changes.any { it.pressed }) {
+                                        LocalInputDispatcher.registerComposeTarget(
+                                            textOwner,
+                                            onText = { text -> urlInput += text },
+                                            onKey = { keyCode, pressed ->
+                                                if (pressed) {
+                                                    if (keyCode == KeyEvent.KEYCODE_DEL) {
+                                                        if (urlInput.isNotEmpty()) urlInput = urlInput.dropLast(1)
+                                                    } else if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                                                        var target = urlInput
+                                                        if (!target.startsWith("http://") && !target.startsWith("https://")) {
+                                                            target = "https://$target"
+                                                        }
+                                                        currentUrl = target
+                                                        webView?.loadUrl(target)
+                                                    }
+                                                }
+                                                true
+                                            }
+                                        )
+                                    }
                                 }
-                                currentUrl = target
-                                webView?.loadUrl(target)
-                                true
-                            } else {
-                                false
                             }
                         },
                     singleLine = true,
@@ -140,7 +149,8 @@ fun BrowserApp(
                     WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
                         settings.cacheMode = WebSettings.LOAD_DEFAULT
                         
                         isFocusable = true
@@ -199,11 +209,11 @@ fun BrowserApp(
                                 evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
                             }
                         }
-                        setOnFocusChangeListener { _, hasFocus ->
-                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, if (hasFocus) bridge else null)
-                        }
-                        setOnTouchListener { _, _ ->
-                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge)
+                        // Removed focus listener; using touch listener instead.
+                        setOnTouchListener { _, event ->
+                            if (event.action == android.view.MotionEvent.ACTION_DOWN) {
+                                LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge, this)
+                            }
                             false
                         }
 

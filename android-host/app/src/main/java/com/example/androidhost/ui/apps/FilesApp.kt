@@ -29,7 +29,9 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import android.view.KeyEvent
 import com.example.androidhost.input.LocalInputDispatcher
 
 @Composable
@@ -153,11 +155,24 @@ fun FilesApp(
                     value = folderName,
                     onValueChange = { folderName = it },
                     singleLine = true,
-                    modifier = Modifier.onFocusChanged { state ->
-                        LocalInputDispatcher.registerTextInsert(
-                            folderOwner,
-                            if (state.isFocused) { text -> folderName += text } else null
-                        )
+                    modifier = Modifier.pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    LocalInputDispatcher.registerComposeTarget(
+                                        folderOwner,
+                                        onText = { text -> folderName += text },
+                                        onKey = { keyCode, pressed ->
+                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && folderName.isNotEmpty()) {
+                                                folderName = folderName.dropLast(1)
+                                            }
+                                            true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 )
             },
@@ -187,11 +202,24 @@ fun FilesApp(
                     value = newName,
                     onValueChange = { newName = it },
                     singleLine = true,
-                    modifier = Modifier.onFocusChanged { state ->
-                        LocalInputDispatcher.registerTextInsert(
-                            renameOwner,
-                            if (state.isFocused) { text -> newName += text } else null
-                        )
+                    modifier = Modifier.pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    LocalInputDispatcher.registerComposeTarget(
+                                        renameOwner,
+                                        onText = { text -> newName += text },
+                                        onKey = { keyCode, pressed ->
+                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && newName.isNotEmpty()) {
+                                                newName = newName.dropLast(1)
+                                            }
+                                            true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 )
             },

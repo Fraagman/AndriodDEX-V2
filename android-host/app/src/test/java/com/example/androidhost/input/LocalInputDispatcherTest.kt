@@ -6,6 +6,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.shadows.ShadowLooper
+import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class LocalInputDispatcherTest {
@@ -64,15 +65,15 @@ class LocalInputDispatcherTest {
         var receivedB: String? = null
         
         // Owner A registers
-        LocalInputDispatcher.registerTextInsert(ownerA) { receivedA = it }
+        LocalInputDispatcher.registerComposeTarget(ownerA, { receivedA = it }, { _, _ -> true })
         ShadowLooper.runUiThreadTasks()
         
         // Owner B registers, overwriting A
-        LocalInputDispatcher.registerTextInsert(ownerB) { receivedB = it }
+        LocalInputDispatcher.registerComposeTarget(ownerB, { receivedB = it }, { _, _ -> true })
         ShadowLooper.runUiThreadTasks()
         
         // Owner A deregisters (stale blur)
-        LocalInputDispatcher.registerTextInsert(ownerA, null)
+        LocalInputDispatcher.registerComposeTarget(ownerA, null, null)
         ShadowLooper.runUiThreadTasks()
         
         // B's callback must survive. Let's fire some text and check
@@ -81,5 +82,63 @@ class LocalInputDispatcherTest {
         
         assertNull("A should not receive text", receivedA)
         assertEquals("B should survive the stale deregistration", "hello", receivedB)
+    }
+
+    @Test
+    fun testMutualExclusion() {
+        val webViewOwner = Any()
+        val textOwner = Any()
+        
+        var receivedText: String? = null
+        var receivedKey: Int? = null
+        var webViewReceivedText: CharSequence? = null
+
+        val webView = android.webkit.WebView(RuntimeEnvironment.getApplication())
+        val bridge = object : WebViewInputBridge {
+            override fun insertText(text: CharSequence) { webViewReceivedText = text }
+            override fun controlKey(key: String, keyCode: Int, pressed: Boolean) {}
+        }
+        
+        // 1. WebView claims
+        LocalInputDispatcher.registerWebViewBridge(webViewOwner, bridge, webView)
+        ShadowLooper.runUiThreadTasks()
+        
+        // 2. Compose claims
+        LocalInputDispatcher.registerComposeTarget(textOwner, { receivedText = it }, { key, _ -> receivedKey = key; true })
+        ShadowLooper.runUiThreadTasks()
+        
+        // Ensure only Compose receives
+        LocalInputDispatcher.onText("hello")
+        ShadowLooper.runUiThreadTasks()
+        
+        assertNull("WebView should not receive text", webViewReceivedText)
+        assertEquals("Compose should receive text", "hello", receivedText)
+
+        // Ensure only Compose receives key
+        LocalInputDispatcher.onKey(57, true)
+        ShadowLooper.runUiThreadTasks()
+        assertEquals("Compose should receive Enter key", android.view.KeyEvent.KEYCODE_ENTER, receivedKey)
+        
+        // Reset
+        receivedText = null
+        webViewReceivedText = null
+        receivedKey = null
+        
+        // 3. WebView claims again (reverse order)
+        LocalInputDispatcher.registerWebViewBridge(webViewOwner, bridge, webView)
+        ShadowLooper.runUiThreadTasks()
+        
+        LocalInputDispatcher.onText("world")
+        ShadowLooper.runUiThreadTasks()
+        
+        assertNull("Compose should not receive text", receivedText)
+        assertEquals("WebView should receive text", "world", webViewReceivedText)
+
+        // 4. Compose claims again to test repeated alternations
+        LocalInputDispatcher.registerComposeTarget(textOwner, { receivedText = it }, { key, _ -> receivedKey = key; true })
+        ShadowLooper.runUiThreadTasks()
+        LocalInputDispatcher.onText("third")
+        ShadowLooper.runUiThreadTasks()
+        assertEquals("Compose should receive third text", "third", receivedText)
     }
 }

@@ -22,7 +22,9 @@ import com.example.androidhost.security.SecurityBridge
 import com.example.androidhost.service.DisplayService
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import android.view.KeyEvent
 import com.example.androidhost.input.LocalInputDispatcher
 import kotlinx.coroutines.delay
 
@@ -95,11 +97,24 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
-                    .onFocusChanged { state ->
-                        LocalInputDispatcher.registerTextInsert(
-                            widthOwner,
-                            if (state.isFocused) { text -> widthText += text } else null
-                        )
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    LocalInputDispatcher.registerComposeTarget(
+                                        widthOwner,
+                                        onText = { text -> widthText += text },
+                                        onKey = { keyCode, pressed ->
+                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && widthText.isNotEmpty()) {
+                                                widthText = widthText.dropLast(1)
+                                            }
+                                            true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
             )
             Text(" x ", color = Color.White, modifier = Modifier.padding(horizontal = 8.dp))
@@ -114,11 +129,24 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
-                    .onFocusChanged { state ->
-                        LocalInputDispatcher.registerTextInsert(
-                            heightOwner,
-                            if (state.isFocused) { text -> heightText += text } else null
-                        )
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    LocalInputDispatcher.registerComposeTarget(
+                                        heightOwner,
+                                        onText = { text -> heightText += text },
+                                        onKey = { keyCode, pressed ->
+                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && heightText.isNotEmpty()) {
+                                                heightText = heightText.dropLast(1)
+                                            }
+                                            true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
             )
             Spacer(modifier = Modifier.width(16.dp))
@@ -147,11 +175,24 @@ private fun DisplaySection() {
                     unfocusedContainerColor = Color.Transparent
                 ),
                 modifier = Modifier.weight(1f)
-                    .onFocusChanged { state ->
-                        LocalInputDispatcher.registerTextInsert(
-                            bitrateOwner,
-                            if (state.isFocused) { text -> bitrateText += text } else null
-                        )
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    LocalInputDispatcher.registerComposeTarget(
+                                        bitrateOwner,
+                                        onText = { text -> bitrateText += text },
+                                        onKey = { keyCode, pressed ->
+                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && bitrateText.isNotEmpty()) {
+                                                bitrateText = bitrateText.dropLast(1)
+                                            }
+                                            true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
             )
             Spacer(modifier = Modifier.width(16.dp))

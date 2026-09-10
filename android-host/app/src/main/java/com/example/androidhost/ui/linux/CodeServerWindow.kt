@@ -100,11 +100,11 @@ fun CodeServerWindow(
                                 evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
                             }
                         }
-                        setOnFocusChangeListener { _, hasFocus ->
-                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, if (hasFocus) bridge else null)
-                        }
-                        setOnTouchListener { _, _ ->
-                            LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge)
+                        // Removed focus listener; using touch listener instead.
+                        setOnTouchListener { _, event ->
+                            if (event.action == android.view.MotionEvent.ACTION_DOWN) {
+                                LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge, this)
+                            }
                             false
                         }
 
