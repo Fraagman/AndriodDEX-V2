@@ -11,7 +11,7 @@ use winit::{
 use zc_protocol::protocol::Ping;
 use zc_protocol::video::{HybridFrame, hybrid_frame};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU32, Ordering}};
 use prost::Message;
 
 const INPUT_BUFFER_MAX: usize = 1000;
@@ -46,6 +46,8 @@ fn main() {
     
     let connection_phase = Arc::new(Mutex::new(zc_network::ConnectionPhase::Idle));
     let is_connected = Arc::new(AtomicBool::new(false));
+    let is_audio_muted = Arc::new(AtomicBool::new(false));
+    let audio_volume_pct = Arc::new(AtomicU32::new(100));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
 
@@ -56,6 +58,8 @@ fn main() {
     let phase_for_quic = connection_phase.clone();
     let is_connected_quic = is_connected.clone();
     let window_for_quic = window_for_callback.clone();
+    let is_muted_for_quic = is_audio_muted.clone();
+    let audio_vol_for_quic = audio_volume_pct.clone();
     
     rt.spawn(async move {
         loop {
@@ -65,6 +69,8 @@ fn main() {
             let input_buffer_loop = input_buffer_for_quic.clone();
             let is_connected_loop = is_connected_quic.clone();
             let window_for_callback_loop = window_for_quic.clone();
+            let is_muted_loop = is_muted_for_quic.clone();
+            let audio_vol_loop = audio_vol_for_quic.clone();
 
             match zc_network::connect(4433, move |phase| {
                 if let Ok(mut p) = phase_clone.lock() {
@@ -134,16 +140,20 @@ fn main() {
                                                 }
                                             } else if msg_type == 0x02 {
                                                 // Audio
-                                                if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(payload) {
-                                                    if let Some(player) = ap_inner.as_ref() {
-                                                        let pcm_bytes = &audio_packet.pcm_data;
-                                                        if pcm_bytes.len() % 2 == 0 {
-                                                            let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
-                                                            for chunk in pcm_bytes.chunks_exact(2) {
-                                                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                                                i16_samples.push(sample);
+                                                if !is_muted_loop.load(Ordering::Relaxed) {
+                                                    let vol_scale = audio_vol_loop.load(Ordering::Relaxed) as f32 / 100.0;
+                                                    if let Ok(audio_packet) = zc_protocol::audio::AudioPacket::decode(payload) {
+                                                        if let Some(player) = ap_inner.as_ref() {
+                                                            let pcm_bytes = &audio_packet.pcm_data;
+                                                            if pcm_bytes.len() % 2 == 0 {
+                                                                let mut i16_samples = Vec::with_capacity(pcm_bytes.len() / 2);
+                                                                for chunk in pcm_bytes.chunks_exact(2) {
+                                                                    let orig = i16::from_le_bytes([chunk[0], chunk[1]]) as f32;
+                                                                    let sample = (orig * vol_scale).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                                                                    i16_samples.push(sample);
+                                                                }
+                                                                player.play_pcm(&i16_samples);
                                                             }
-                                                            player.play_pcm(&i16_samples);
                                                         }
                                                     }
                                                 }
@@ -381,6 +391,7 @@ fn main() {
         match &event {
             Event::WindowEvent { window_id: id, event: w_event } if *id == window_id => {
                 if overlay_ui.handle_event(&window, w_event) {
+                    window.request_redraw();
                     return; // event consumed by egui
                 }
 
@@ -674,7 +685,7 @@ fn main() {
                                 {
                                     let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Overlay Encoder") });
                                     let phase = connection_phase.lock().map(|p| p.clone()).unwrap_or(zc_network::ConnectionPhase::Connected);
-                                    overlay_ui.render(
+                                    let actions = overlay_ui.render(
                                         &window,
                                         renderer.device(),
                                         renderer.queue(),
@@ -688,6 +699,60 @@ fn main() {
                                         last_decode_us,
                                     );
                                     renderer.queue().submit(std::iter::once(encoder.finish()));
+
+                                    if actions.request_keyframe {
+                                        let ev = zc_input::create_keyframe_request();
+                                        let mut serialized = Vec::new();
+                                        if prost::Message::encode(&ev, &mut serialized).is_ok() {
+                                            if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                                buf.push_back(serialized);
+                                            }
+                                        }
+                                    }
+
+                                    if actions.toggle_fullscreen {
+                                        let is_fullscreen = window.fullscreen().is_some();
+                                        if is_fullscreen {
+                                            window.set_fullscreen(None);
+                                        } else {
+                                            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                                        }
+                                    }
+
+                                    if actions.toggle_mute {
+                                        let curr = is_audio_muted.load(Ordering::Relaxed);
+                                        is_audio_muted.store(!curr, Ordering::Relaxed);
+                                    }
+
+                                    if let Some(vol) = actions.volume {
+                                        let vol_pct = (vol * 100.0).clamp(0.0, 100.0) as u32;
+                                        audio_volume_pct.store(vol_pct, Ordering::Relaxed);
+                                    }
+
+                                    if actions.forget_pairing {
+                                        zc_network::delete_trust_data();
+                                        println!("Trust data erased via UI. Reconnecting to trigger re-pairing...");
+                                    }
+
+                                    if let Some(pkg) = actions.launch_app {
+                                        // 1. Send direct QUIC OpenApp event (instant, reliable, works without ADB)
+                                        let ev = zc_input::create_open_app_event(pkg.to_string());
+                                        let mut serialized = Vec::new();
+                                        if prost::Message::encode(&ev, &mut serialized).is_ok() {
+                                            if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                                buf.push_back(serialized);
+                                            }
+                                        }
+                                        // 2. Also dispatch ADB broadcast as fallback
+                                        launch_android_app(pkg);
+                                        window.request_redraw();
+                                    }
+
+                                    if actions.exit_app && !is_kiosk {
+                                        elwt.exit();
+                                    }
                                 }
                                 
                                 frame.present();
@@ -712,4 +777,16 @@ fn main() {
             _ => (),
         }
     }).unwrap();
+}
+
+fn launch_android_app(pkg: &str) {
+    let adb_path = "C:\\Users\\omrai\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe";
+    let cmd = if std::path::Path::new(adb_path).exists() {
+        adb_path
+    } else {
+        "adb"
+    };
+    let _ = std::process::Command::new(cmd)
+        .args(["shell", "am", "broadcast", "-a", "com.androiddex.host.OPEN_APP", "-p", "com.androiddex.host", "--es", "package", pkg])
+        .spawn();
 }

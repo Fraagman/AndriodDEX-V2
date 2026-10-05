@@ -1,8 +1,16 @@
-use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, ScrollEvent, TextEvent, input_event};
+use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, OpenAppRequest, ScrollEvent, TextEvent, input_event};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VIRTUAL_WIDTH: u32 = 1920;
 pub const VIRTUAL_HEIGHT: u32 = 1080;
+
+pub fn create_open_app_event(package_name: String) -> InputEvent {
+    InputEvent {
+        event: Some(input_event::Event::OpenApp(OpenAppRequest {
+            package_name,
+        })),
+    }
+}
 
 pub fn create_mouse_event(
     x: f64,

@@ -513,6 +513,7 @@ dependencies = [
  "rcgen",
  "ring",
  "rustls",
+ "socket2",
  "tokio",
 ]
 

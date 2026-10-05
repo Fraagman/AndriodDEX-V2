@@ -122,15 +122,10 @@ fun DesktopShellContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Transparent)
+            .background(Color.Black)
     ) {
-        // The desktop content ALWAYS renders the real desktop:
-        // 1. Background (dark wallpaper color, already set on the Box)
-        // 2. Windows layer
-        // 3. Launcher overlay (when toggled)
-        // 4. Taskbar at the bottom
-
-
+        // Windows 10 Hero Wallpaper background
+        Windows10Wallpaper()
 
         // Windows
         windows.forEach { window ->
@@ -160,21 +155,116 @@ fun DesktopShellContent(
                 displayId = displayId
             )
         }
+    }
+}
 
+@Composable
+fun Windows10Wallpaper(modifier: Modifier = Modifier) {
+    androidx.compose.foundation.Canvas(modifier = modifier.fillMaxSize()) {
+        val w = size.width
+        val h = size.height
 
+        // 1. Deep space navy background gradient
+        drawRect(
+            brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF020712),
+                    Color(0xFF001128),
+                    Color(0xFF001A3A),
+                    Color(0xFF010814)
+                )
+            )
+        )
 
-        // Taskbar at bottom
-        Box(modifier = Modifier.align(Alignment.BottomCenter)) {
-            Taskbar(
-                quicState = quicState,
-                isAudioCapturing = isAudioCapturing,
-                computeState = computeState,
-                onLauncherClick = { showLauncher = !showLauncher },
-                onSettingsClick = { shellViewModel?.openApp("com.androiddex.settings") },
-                showNavButtons = a11yEnabled,
-                onBackClick = { com.example.androidhost.service.DesktopAccessibilityService.performBack() },
-                onHomeClick = { com.example.androidhost.service.DesktopAccessibilityService.performHome() },
-                onRecentsClick = { com.example.androidhost.service.DesktopAccessibilityService.performRecents() }
+        // 2. Windows 10 Hero radial luminous bloom centered on right quadrant
+        val heroCenter = androidx.compose.ui.geometry.Offset(w * 0.65f, h * 0.48f)
+        drawCircle(
+            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                colors = listOf(
+                    Color(0x880078D7),
+                    Color(0x44005A9E),
+                    Color(0x18002050),
+                    Color.Transparent
+                ),
+                center = heroCenter,
+                radius = w * 0.45f
+            ),
+            center = heroCenter,
+            radius = w * 0.45f
+        )
+
+        // 3. Volumetric angled light rays
+        val rayPath = androidx.compose.ui.graphics.Path().apply {
+            moveTo(heroCenter.x - 300f, 0f)
+            lineTo(heroCenter.x + 400f, 0f)
+            lineTo(heroCenter.x + 600f, h)
+            lineTo(heroCenter.x - 100f, h)
+            close()
+        }
+        drawPath(
+            path = rayPath,
+            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                colors = listOf(
+                    Color(0x2200C8FF),
+                    Color(0x0C0078D7),
+                    Color.Transparent
+                ),
+                start = androidx.compose.ui.geometry.Offset(heroCenter.x, 0f),
+                end = androidx.compose.ui.geometry.Offset(heroCenter.x + 200f, h)
+            )
+        )
+
+        // 4. Iconic four-quadrant angled Windows 10 logo
+        val logoSize = 130f
+        val gap = 9f
+        val half = logoSize * 0.5f
+        val skewX = -18f
+
+        val quadrants = listOf(
+            listOf(
+                androidx.compose.ui.geometry.Offset(heroCenter.x - half + skewX * 0.7f, heroCenter.y - half),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - gap * 0.5f + skewX * 0.2f, heroCenter.y - half + 6f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - gap * 0.5f, heroCenter.y - gap * 0.5f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - half, heroCenter.y - gap * 0.5f - 4f)
+            ),
+            listOf(
+                androidx.compose.ui.geometry.Offset(heroCenter.x + gap * 0.5f + skewX * 0.2f, heroCenter.y - half + 6f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + half - skewX * 0.4f, heroCenter.y - half + 14f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + half, heroCenter.y - gap * 0.5f + 3f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + gap * 0.5f, heroCenter.y - gap * 0.5f)
+            ),
+            listOf(
+                androidx.compose.ui.geometry.Offset(heroCenter.x - half, heroCenter.y + gap * 0.5f - 4f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - gap * 0.5f, heroCenter.y + gap * 0.5f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - gap * 0.5f - skewX * 0.2f, heroCenter.y + half - 6f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x - half - skewX * 0.7f, heroCenter.y + half)
+            ),
+            listOf(
+                androidx.compose.ui.geometry.Offset(heroCenter.x + gap * 0.5f, heroCenter.y + gap * 0.5f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + half, heroCenter.y + gap * 0.5f + 3f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + half + skewX * 0.4f, heroCenter.y + half - 14f),
+                androidx.compose.ui.geometry.Offset(heroCenter.x + gap * 0.5f - skewX * 0.2f, heroCenter.y + half - 6f)
+            )
+        )
+
+        for (quad in quadrants) {
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(quad[0].x, quad[0].y)
+                lineTo(quad[1].x, quad[1].y)
+                lineTo(quad[2].x, quad[2].y)
+                lineTo(quad[3].x, quad[3].y)
+                close()
+            }
+            drawPath(
+                path = path,
+                brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xEE00D2FF),
+                        Color(0xBB0078D7)
+                    ),
+                    start = quad[0],
+                    end = quad[2]
+                )
             )
         }
     }

@@ -104,6 +104,12 @@ object InputManager {
                 val t = event.text
                 LocalInputDispatcher.onText(t.text)
             }
+            InputEvent.EventCase.OPEN_APP -> {
+                val pkg = event.openApp.packageName
+                Log.i(TAG, "Opening app via QUIC InputEvent: $pkg")
+                com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
+                DisplayService.forceRedraw.value += 1
+            }
             InputEvent.EventCase.EVENT_NOT_SET, null -> Unit
         }
     }

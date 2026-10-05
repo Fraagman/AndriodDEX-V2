@@ -51,6 +51,10 @@ message TextEvent {
     uint64 timestamp = 2;
 }
 
+message OpenAppRequest {
+    string package_name = 1;
+}
+
 message InputEvent {
     oneof event {
         MouseEvent mouse = 1;
@@ -58,5 +62,6 @@ message InputEvent {
         ScrollEvent scroll = 3;
         KeyframeRequest request_keyframe = 4;
         TextEvent text = 5;
+        OpenAppRequest open_app = 6;
     }
 }

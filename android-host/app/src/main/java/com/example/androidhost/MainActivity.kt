@@ -137,6 +137,29 @@ class MainActivity : FragmentActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        val appFilter = android.content.IntentFilter("com.androiddex.host.OPEN_APP")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(appLaunchReceiver, appFilter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(appLaunchReceiver, appFilter)
+        }
+    }
+
+    private val appLaunchReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.androiddex.host.OPEN_APP") {
+                val pkg = intent.getStringExtra("package") ?: return
+                com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(appLaunchReceiver)
+        } catch (_: Exception) {}
     }
 }
 

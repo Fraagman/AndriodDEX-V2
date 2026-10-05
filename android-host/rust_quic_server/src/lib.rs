@@ -303,7 +303,38 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
 
 fn bind_endpoint(server: &Arc<Server>, addr: std::net::SocketAddr) -> Result<Endpoint, String> {
     let config = tls::build_server_config(&server.store, &[ALPN_STREAM, ALPN_PAIRING])?;
-    Endpoint::server(config, addr).map_err(|e| format!("cannot bind {addr}: {e}"))
+
+    // Create a UDP socket with SO_REUSEADDR to avoid "Address already in use" (EADDRINUSE /
+    // OS error 98) after an Android force-stop that leaves the old socket lingering.
+    let socket = std::net::UdpSocket::bind(addr)
+        .or_else(|_first_err| {
+            // If bind fails, try with SO_REUSEADDR via socket2.
+            let sock = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .map_err(|e| format!("socket creation failed: {e}"))?;
+            sock.set_reuse_address(true)
+                .map_err(|e| format!("SO_REUSEADDR failed: {e}"))?;
+            sock.set_nonblocking(true)
+                .map_err(|e| format!("set_nonblocking failed: {e}"))?;
+            let bind_addr: socket2::SockAddr = addr.into();
+            sock.bind(&bind_addr)
+                .map_err(|e| format!("cannot bind {addr} even with SO_REUSEADDR: {e}"))?;
+            Ok(std::net::UdpSocket::from(sock))
+        })
+        .map_err(|e: String| format!("cannot bind {addr}: {e}"))?;
+
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| "no async runtime found for quinn".to_string())?;
+    Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(config),
+        socket,
+        runtime,
+    )
+    .map_err(|e| format!("cannot create endpoint on {addr}: {e}"))
 }
 
 async fn run_endpoint(server: Arc<Server>, port: u16) {

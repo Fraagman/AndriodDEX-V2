@@ -5,6 +5,13 @@ use egui_winit::State;
 use winit::window::Window;
 use zc_network::ConnectionPhase;
 
+use super::action_center::render_action_center;
+use super::dialogs::render_dialogs;
+use super::start_menu::render_start_menu;
+use super::taskbar::render_taskbar;
+use super::theme::*;
+use super::types::{UiActions, UiState};
+
 /// Returns the status line text, RGB color tuple, and central banner message for a given ConnectionPhase.
 /// Deriving both from this single function guarantees the status line and the central message come from
 /// the same ConnectionPhase and cannot contradict each other.
@@ -50,6 +57,8 @@ pub struct OverlayUi {
     pub context: egui::Context,
     pub state: State,
     pub renderer: Renderer,
+    pub ui_state: UiState,
+    pub last_cursor_pos: Option<(f64, f64)>,
 }
 
 impl OverlayUi {
@@ -60,7 +69,7 @@ impl OverlayUi {
     ) -> Self {
         let context = egui::Context::default();
         let viewport_id = context.viewport_id();
-        
+
         let state = State::new(
             context.clone(),
             viewport_id,
@@ -75,12 +84,70 @@ impl OverlayUi {
             context,
             state,
             renderer,
+            ui_state: UiState::default(),
+            last_cursor_pos: None,
         }
     }
 
     pub fn handle_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
         let response = self.state.on_window_event(window, event);
-        response.consumed
+        let wants_pointer = self.context.wants_pointer_input();
+        let wants_keyboard = self.context.wants_keyboard_input();
+
+        let size = window.inner_size();
+        let scale = window.scale_factor();
+        let taskbar_h = 42.0 * scale;
+
+        match event {
+            winit::event::WindowEvent::CursorMoved { position, .. } => {
+                self.last_cursor_pos = Some((position.x, position.y));
+            }
+            winit::event::WindowEvent::CursorLeft { .. } => {
+                self.last_cursor_pos = None;
+            }
+            _ => {}
+        }
+
+        let (cursor_x, cursor_y) = self.last_cursor_pos.unwrap_or((-1.0, -1.0));
+        let is_over_taskbar = cursor_y >= (size.height as f64 - taskbar_h) && cursor_y >= 0.0;
+
+        let is_over_start_menu = if self.ui_state.start_menu_open {
+            let sm_w = 640.0 * scale;
+            let sm_h = 560.0 * scale;
+            cursor_x >= 0.0 && cursor_x <= sm_w && cursor_y >= (size.height as f64 - taskbar_h - sm_h) && cursor_y <= (size.height as f64 - taskbar_h)
+        } else {
+            false
+        };
+
+        let is_over_action_center = if self.ui_state.action_center_open {
+            let ac_w = 380.0 * scale;
+            cursor_x >= (size.width as f64 - ac_w) && cursor_x <= size.width as f64 && cursor_y >= 0.0 && cursor_y <= (size.height as f64 - taskbar_h)
+        } else {
+            false
+        };
+
+        let is_over_modal_ui = self.ui_state.volume_flyout_open
+            || self.ui_state.network_flyout_open
+            || self.ui_state.settings_open
+            || self.ui_state.diagnostics_open;
+
+        let hit_overlay = is_over_taskbar || is_over_start_menu || is_over_action_center || is_over_modal_ui || wants_pointer;
+
+        match event {
+            winit::event::WindowEvent::CursorMoved { .. } => {
+                hit_overlay
+            }
+            winit::event::WindowEvent::MouseInput { .. } => {
+                hit_overlay || response.consumed
+            }
+            winit::event::WindowEvent::MouseWheel { .. } => {
+                hit_overlay || wants_pointer || response.consumed
+            }
+            winit::event::WindowEvent::KeyboardInput { .. } => {
+                wants_keyboard || response.consumed
+            }
+            _ => response.consumed,
+        }
     }
 
     pub fn render(
@@ -91,238 +158,232 @@ impl OverlayUi {
         view: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
         phase: &ConnectionPhase,
-        mouse_pos: (f64, f64),
+        _mouse_pos: (f64, f64),
         has_video: bool,
         is_kiosk: bool,
         decode_fps: u32,
         decode_us: u64,
-    ) {
+    ) -> UiActions {
         let raw_input = self.state.take_egui_input(window);
-        
-        let (mx, my) = mouse_pos;
-        let is_hovered = mx >= 0.0 && mx <= 250.0 && my >= 0.0 && my <= 120.0;
-        
-        // Status rect fades in on hover regardless of connection
-        let alpha = self.context.animate_bool_with_time(
-            egui::Id::new("overlay_fade"),
-            is_hovered,
-            0.3,
-        );
-
         self.context.begin_frame(raw_input);
 
-        let painter = self.context.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("overlay"),
-        ));
-
-        // Decode stats label - always visible in top-right corner if video is running
-        if has_video {
-            let window_size = window.inner_size();
-            let label_rect = Rect::from_min_size(
-                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 - 120.0, 10.0),
-                Vec2::new(110.0, 20.0)
-            );
-            
-            painter.rect(
-                label_rect,
-                Rounding::same(4.0),
-                Color32::from_rgba_premultiplied(0, 50, 0, 200),
-                Stroke::new(1.0, Color32::GREEN),
-            );
-            
-            painter.text(
-                label_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("{} fps  {:.1}ms", decode_fps, decode_us as f64 / 1000.0),
-                FontId::proportional(10.0),
-                Color32::GREEN,
-            );
-        }
+        let mut actions = UiActions::default();
 
         let window_size = window.inner_size();
-        let banner_rect = Rect::from_min_size(
-            Pos2::new(0.0, 0.0),
-            Vec2::new(window_size.width as f32, window_size.height as f32)
+        let window_scale = window.scale_factor() as f32;
+        let screen_w = window_size.width as f32 / window_scale;
+        let screen_h = window_size.height as f32 / window_scale;
+        let banner_rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(screen_w, screen_h));
+
+        let painter = self.context.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("desktop_bg"),
+        ));
+
+        // When not connected or when waiting for video, show Windows 10 Hero Wallpaper background
+        if !has_video || *phase != ConnectionPhase::Connected {
+            // Dark Windows 10 ambient gradient background
+            painter.rect_filled(banner_rect, Rounding::ZERO, Color32::from_rgb(12, 14, 20));
+
+            // Windows 10 Hero light logo in background
+            draw_windows_logo(
+                &painter,
+                banner_rect.center() - Vec2::new(0.0, 60.0),
+                64.0,
+                Color32::from_rgba_premultiplied(0, 120, 215, 60),
+            );
+
+            // Phase cards / Status
+            match phase {
+                ConnectionPhase::Connected => {
+                    painter.text(
+                        banner_rect.center() + Vec2::new(0.0, 20.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Starting Video Stream...",
+                        FontId::proportional(22.0),
+                        Color32::WHITE,
+                    );
+                    painter.text(
+                        banner_rect.center() + Vec2::new(0.0, 50.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Negotiated H.264 over QUIC (10.53.207.237:4433). Waiting for first keyframe.",
+                        FontId::proportional(13.0),
+                        COLOR_TEXT_SECONDARY,
+                    );
+                }
+                ConnectionPhase::WaitingForSas(sas) => {
+                    let card_w = 480.0;
+                    let card_h = 240.0;
+                    let card_rect = Rect::from_center_size(banner_rect.center(), Vec2::new(card_w, card_h));
+                    draw_acrylic_panel(&painter, card_rect, COLOR_FLYOUT_BG, COLOR_TASKBAR_BORDER);
+
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 28.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Windows Device Pairing",
+                        FontId::proportional(18.0),
+                        COLOR_ACCENT_BLUE,
+                    );
+
+                    let formatted_sas = sas.chars().map(|c| c.to_string()).collect::<Vec<_>>().join("  ");
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 90.0),
+                        egui::Align2::CENTER_CENTER,
+                        formatted_sas,
+                        FontId::proportional(48.0),
+                        Color32::WHITE,
+                    );
+
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 155.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Verify this 6-digit code matches the code on your Android device.",
+                        FontId::proportional(13.0),
+                        COLOR_TEXT_SECONDARY,
+                    );
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 180.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Tap 'Codes match' on the Android screen to confirm pairing.",
+                        FontId::proportional(12.0),
+                        COLOR_TEXT_MUTED,
+                    );
+                }
+                ConnectionPhase::CertificateChanged => {
+                    let card_w = 520.0;
+                    let card_h = 220.0;
+                    let card_rect = Rect::from_center_size(banner_rect.center(), Vec2::new(card_w, card_h));
+                    painter.rect(
+                        card_rect,
+                        Rounding::same(4.0),
+                        Color32::from_rgb(35, 12, 12),
+                        Stroke::new(1.0, Color32::RED),
+                    );
+
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 32.0),
+                        egui::Align2::CENTER_CENTER,
+                        "🛡 Windows Security: Device Identity Changed",
+                        FontId::proportional(18.0),
+                        Color32::from_rgb(255, 100, 100),
+                    );
+                    painter.text(
+                        Pos2::new(card_rect.center().x, card_rect.min.y + 80.0),
+                        egui::Align2::CENTER_CENTER,
+                        "The device certificate does not match the paired device.\nTo re-pair with this device, click 'Forget Pairing' below.",
+                        FontId::proportional(13.0),
+                        COLOR_TEXT_PRIMARY,
+                    );
+
+                    let btn_rect = Rect::from_center_size(Pos2::new(card_rect.center().x, card_rect.max.y - 40.0), Vec2::new(160.0, 36.0));
+                    let btn_hovered = is_hovered(&self.context, btn_rect);
+                    let btn_clicked = is_clicked(&self.context, btn_rect);
+                    if btn_clicked {
+                        actions.forget_pairing = true;
+                    }
+                    painter.rect_filled(btn_rect, Rounding::same(2.0), if btn_hovered { Color32::from_rgb(180, 40, 40) } else { Color32::from_rgb(140, 20, 20) });
+                    painter.text(btn_rect.center(), egui::Align2::CENTER_CENTER, "Forget Pairing", FontId::proportional(13.0), Color32::WHITE);
+                }
+                _ => {
+                    let (_, _, msg) = phase_display_info(phase);
+                    painter.text(
+                        banner_rect.center() + Vec2::new(0.0, 20.0),
+                        egui::Align2::CENTER_CENTER,
+                        msg,
+                        FontId::proportional(18.0),
+                        COLOR_TEXT_PRIMARY,
+                    );
+                    painter.text(
+                        banner_rect.center() + Vec2::new(0.0, 50.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Plug in USB cable and enable USB Tethering on your Android device.",
+                        FontId::proportional(12.0),
+                        COLOR_TEXT_MUTED,
+                    );
+                }
+            }
+        }
+
+        // --- Render Windows 10 UI Components ---
+        render_taskbar(
+            &self.context,
+            &mut self.ui_state,
+            &mut actions,
+            phase,
+            has_video,
+            decode_fps,
+            decode_us,
         );
 
-        match phase {
-            ConnectionPhase::Connected => {} // Draw nothing full-screen
-            ConnectionPhase::WaitingForSas(sas) => {
-                painter.rect(
-                    banner_rect,
-                    Rounding::ZERO,
-                    Color32::from_rgb(10, 10, 10),
-                    Stroke::new(1.0, Color32::WHITE),
-                );
-                
-                painter.text(
-                    banner_rect.center() - Vec2::new(0.0, 50.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Pairing Code",
-                    FontId::proportional(22.0),
-                    Color32::from_rgb(180, 180, 180),
-                );
+        render_start_menu(
+            &self.context,
+            &mut self.ui_state,
+            &mut actions,
+            phase,
+            decode_fps,
+            decode_us,
+        );
 
-                let formatted_sas = sas.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-                painter.text(
-                    banner_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    formatted_sas,
-                    FontId::proportional(56.0),
-                    Color32::WHITE,
-                );
+        render_action_center(
+            &self.context,
+            &mut self.ui_state,
+            &mut actions,
+            is_kiosk,
+        );
 
-                painter.text(
-                    banner_rect.center() + Vec2::new(0.0, 55.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Check that this 6-digit code matches the code on your phone screen.\nConfirm or reject the pairing on your phone.",
-                    FontId::proportional(16.0),
-                    Color32::from_rgb(220, 220, 220),
-                );
-            }
-            ConnectionPhase::CertificateChanged => {
-                painter.rect(
-                    banner_rect,
-                    Rounding::ZERO,
-                    Color32::from_rgb(40, 10, 10),
-                    Stroke::new(2.0, Color32::RED),
-                );
-                
-                painter.text(
-                    banner_rect.center() - Vec2::new(0.0, 24.0),
-                    egui::Align2::CENTER_CENTER,
-                    "SECURITY WARNING: Device Identity Changed",
-                    FontId::proportional(28.0),
-                    Color32::from_rgb(255, 80, 80),
-                );
+        render_dialogs(
+            &self.context,
+            &mut self.ui_state,
+            &mut actions,
+            phase,
+            decode_fps,
+            decode_us,
+        );
 
-                painter.text(
-                    banner_rect.center() + Vec2::new(0.0, 24.0),
-                    egui::Align2::CENTER_CENTER,
-                    "The device certificate does not match the paired device. The connection may be intercepted.\nTo re-pair with a new device, run the receiver with --forget-pairing.",
-                    FontId::proportional(16.0),
-                    Color32::from_rgb(230, 230, 230),
-                );
-            }
-            _ => {
-                let (_, _, msg) = phase_display_info(phase);
-                painter.rect(
-                    banner_rect,
-                    Rounding::ZERO,
-                    Color32::from_rgb(10, 10, 10),
-                    Stroke::new(1.0, Color32::WHITE),
-                );
-                
-                painter.text(
-                    banner_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    msg,
-                    FontId::proportional(24.0),
-                    Color32::from_rgb(245, 245, 245),
-                );
-            }
-        }
-
-        if alpha > 0.0 {
-            let rect_height = 80.0;
-            let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, rect_height));
-            
-            painter.rect(
-                rect,
-                Rounding::same(8.0),
-                Color32::from_rgba_premultiplied(25, 25, 25, (200.0 * alpha) as u8),
-                Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8)),
-            );
-
-            painter.text(
-                rect.min + Vec2::new(10.0, 10.0),
-                egui::Align2::LEFT_TOP,
-                "AndroidDex Receiver",
-                FontId::proportional(14.0),
-                Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8),
-            );
-
-            let (status_text, (r, g, b), _) = phase_display_info(phase);
-            let status_color = Color32::from_rgba_premultiplied(
-                (r as f32 * alpha) as u8,
-                (g as f32 * alpha) as u8,
-                (b as f32 * alpha) as u8,
-                (255.0 * alpha) as u8,
-            );
-            
-            painter.text(
-                rect.min + Vec2::new(10.0, 30.0),
-                egui::Align2::LEFT_TOP,
-                status_text,
-                FontId::proportional(14.0),
-                status_color,
-            );
-
-            painter.text(
-                rect.min + Vec2::new(10.0, 50.0),
-                egui::Align2::LEFT_TOP,
-                if decode_fps > 0 {
-                    format!("Decode: {} fps, {:.1} ms", decode_fps, decode_us as f64 / 1000.0)
-                } else {
-                    "Decode: waiting...".to_string()
-                },
-                FontId::proportional(14.0),
-                Color32::from_rgba_premultiplied(180, 180, 180, (255.0 * alpha) as u8),
-            );
-        }
-
+        // Kiosk Mode Banner if applicable
         if is_kiosk {
-            let window_size = window.inner_size();
-            let banner_rect = Rect::from_min_size(
-                Pos2::new(window_size.width as f32 / window.scale_factor() as f32 / 2.0 - 100.0, 10.0),
-                Vec2::new(200.0, 30.0)
+            let k_rect = Rect::from_min_size(
+                Pos2::new(screen_w / 2.0 - 90.0, 8.0),
+                Vec2::new(180.0, 26.0),
             );
-            
-            painter.rect(
-                banner_rect,
-                Rounding::same(4.0),
-                Color32::from_rgb(10, 10, 10),
-                Stroke::new(1.0, Color32::WHITE),
+            let k_painter = self.context.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("kiosk_banner")));
+            k_painter.rect(
+                k_rect,
+                Rounding::same(2.0),
+                Color32::from_rgb(20, 20, 24),
+                Stroke::new(1.0, Color32::from_rgb(50, 50, 60)),
             );
-            
-            painter.text(
-                banner_rect.center(),
+            k_painter.text(
+                k_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Managed Terminal",
-                FontId::proportional(16.0),
-                Color32::WHITE,
+                "🔒 Kiosk Terminal Locked",
+                FontId::proportional(12.0),
+                COLOR_TEXT_PRIMARY,
             );
         }
 
         let full_output = self.context.end_frame();
         let paint_jobs = self.context.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.renderer.update_texture(device, queue, *id, image_delta);
-        }
-
         let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [window.inner_size().width, window.inner_size().height],
-            pixels_per_point: window.scale_factor() as f32,
+            size_in_pixels: [window_size.width, window_size.height],
+            pixels_per_point: window_scale,
         };
 
-        self.renderer.update_buffers(
-            device,
-            queue,
-            encoder,
-            &paint_jobs,
-            &screen_descriptor,
-        );
+        for (id, delta) in &full_output.textures_delta.set {
+            self.renderer.update_texture(device, queue, *id, delta);
+        }
+
+        self.renderer.update_buffers(device, queue, encoder, &paint_jobs, &screen_descriptor);
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Load, // preserve the decoded video underneath
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -330,12 +391,15 @@ impl OverlayUi {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+
+            self.renderer.render(&mut rpass, &paint_jobs, &screen_descriptor);
         }
 
         for id in &full_output.textures_delta.free {
             self.renderer.free_texture(id);
         }
+
+        actions
     }
 }
 
@@ -345,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_phase_display_info_consistency() {
-        // Handshaking: status and message must agree (not Disconnected)
+        // Handshaking
         let (status, rgb, msg) = phase_display_info(&ConnectionPhase::Handshaking);
         assert_eq!(status, "Status: Handshaking...");
         assert_eq!(msg, "Handshaking...");
@@ -399,4 +463,3 @@ mod tests {
         assert_eq!(rgb, (255, 80, 80));
     }
 }
-

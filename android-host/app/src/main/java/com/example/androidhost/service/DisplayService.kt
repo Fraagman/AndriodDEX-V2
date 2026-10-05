@@ -115,9 +115,26 @@ class DisplayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    private val appLaunchReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.androiddex.host.OPEN_APP") {
+                val pkg = intent.getStringExtra("package") ?: return
+                Log.i(TAG, "Opening app via Broadcast: $pkg")
+                com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
+                forceRedraw.value++
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
+        val filter = android.content.IntentFilter("com.androiddex.host.OPEN_APP")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(appLaunchReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(appLaunchReceiver, filter)
+        }
         startEncodingPipeline()
     }
 
@@ -348,6 +365,9 @@ class DisplayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try {
+            unregisterReceiver(appLaunchReceiver)
+        } catch (_: Exception) {}
         stopEncodingPipeline()
     }
 }
