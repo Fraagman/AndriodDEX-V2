@@ -24,7 +24,6 @@ import android.app.Application
 import com.example.androidhost.DesktopShell
 
 import com.example.androidhost.input.LocalInputDispatcher
-import com.example.androidhost.quic.QuicServer
 
 class DesktopPresentation(
     context: Context,
@@ -39,12 +38,21 @@ class DesktopPresentation(
     private var contentView: ComposeView? = null
 
     private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var heartbeatTick = 0
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
-            if (QuicServer.getConnectionState() == 2) {
-                contentView?.invalidate()
+            // Always push a fresh frame so the encoder surface never starves.
+            // ComposeView.invalidate() schedules a Choreographer frame on the
+            // VirtualDisplay's SurfaceFlinger slot, which gives the H.264 encoder
+            // the pixel data it needs to produce an IDR on the next PARAMETER_KEY_REQUEST_SYNC_FRAME.
+            contentView?.invalidate()
+            heartbeatTick++
+            // Request a keyframe every ~1 s (10 × 100 ms) so a connecting client
+            // never waits more than one second for a decodable picture.
+            if (heartbeatTick % 10 == 0) {
+                DisplayService.requestKeyframe()
             }
-            heartbeatHandler.postDelayed(this, 500)
+            heartbeatHandler.postDelayed(this, 100)
         }
     }
 
@@ -102,7 +110,10 @@ class DesktopPresentation(
         // silently leave the desktop unresponsive to the PC.
         contentView?.let { LocalInputDispatcher.attach(it) }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-        heartbeatHandler.postDelayed(heartbeatRunnable, 500)
+        // Kick an immediate keyframe so the first encoded frame is an IDR,
+        // giving a late-joining receiver a decodable picture right away.
+        DisplayService.requestKeyframe()
+        heartbeatHandler.postDelayed(heartbeatRunnable, 100)
     }
 
     fun onResume() {

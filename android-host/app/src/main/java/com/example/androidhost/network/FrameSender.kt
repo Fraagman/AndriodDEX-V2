@@ -103,11 +103,11 @@ object FrameSender {
     ) {
         if (!isRunning) return
         try {
-            // ByteString.concat builds a rope rather than copying both halves again.
-            val payload = if (csd != null) {
-                ByteString.copyFrom(csd).concat(ByteString.copyFrom(nal))
+            val dup = nal.duplicate()
+            val payload = if (csd != null && csd.isNotEmpty()) {
+                ByteString.copyFrom(csd).concat(ByteString.copyFrom(dup))
             } else {
-                ByteString.copyFrom(nal)
+                ByteString.copyFrom(dup)
             }
 
             val out = serializeFrame(payload, isKeyframe, ptsUs, width, height)

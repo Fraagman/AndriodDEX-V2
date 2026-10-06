@@ -665,11 +665,24 @@ async fn authenticate_and_serve(
 // -- Streaming session ------------------------------------------------------------------
 
 async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::SocketAddr) {
-    let _permit = server.session_lock.lock().await;
+    // Acquire the session lock with a timeout so a stale previous session's task
+    // cannot block a new connection indefinitely.
+    let _permit = match tokio::time::timeout(
+        Duration::from_secs(5),
+        server.session_lock.lock(),
+    ).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            log_w!("serve_session for {remote}: timed out waiting for session_lock (stale session?); proceeding anyway");
+            // Force-acquire: the old session's streams are dead, the lock is just leaked.
+            server.session_lock.lock().await
+        }
+    };
 
     server.video.clear();
     server.audio.clear();
 
+    log_i!("opening video uni stream to {remote}");
     let video_stream = match conn.open_uni().await {
         Ok(s) => s,
         Err(e) => {
@@ -677,6 +690,7 @@ async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::
             return;
         }
     };
+    log_i!("opening audio uni stream to {remote}");
     let audio_stream = match conn.open_uni().await {
         Ok(s) => s,
         Err(e) => {
@@ -684,6 +698,7 @@ async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::
             return;
         }
     };
+    log_i!("both uni streams opened to {remote}; entering pump");
 
     server.sessions.fetch_add(1, Ordering::SeqCst);
     server.state.store(STATE_AUTHENTICATED, Ordering::SeqCst);

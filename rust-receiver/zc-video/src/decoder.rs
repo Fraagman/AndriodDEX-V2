@@ -43,40 +43,58 @@ impl Decoder {
     /// `Err` on a decode failure. The caller should request a keyframe from the
     /// phone on error rather than panicking.
     pub fn decode(&mut self, nal: &[u8]) -> Result<Option<DecodedFrame>, openh264::Error> {
-        // openh264 wants individual NAL units. The phone sends Annex-B streams
-        // which may contain SPS+PPS+IDR concatenated. nal_units() splits them.
+        if nal.is_empty() {
+            return Ok(None);
+        }
+
         let mut last_frame = None;
+        let mut packets_found = 0;
 
         for packet in nal_units(nal) {
+            packets_found += 1;
             match self.inner.decode(packet) {
                 Ok(Some(yuv)) => {
-                    let (width, height) = yuv.dimensions();
-                    let w = width as u32;
-                    let h = height as u32;
-
-                    let (y_stride, u_stride, v_stride) = yuv.strides();
-
-                    let y_data = copy_plane(yuv.y(), y_stride, width, height);
-                    let u_data = copy_plane(yuv.u(), u_stride, (width + 1) / 2, (height + 1) / 2);
-                    let v_data = copy_plane(yuv.v(), v_stride, (width + 1) / 2, (height + 1) / 2);
-
-                    last_frame = Some(DecodedFrame {
-                        y: y_data,
-                        y_stride: width,
-                        u: u_data,
-                        u_stride: (width + 1) / 2,
-                        v: v_data,
-                        v_stride: (width + 1) / 2,
-                        width: w,
-                        height: h,
-                    });
+                    last_frame = Some(Self::convert_yuv(&yuv));
                 }
                 Ok(None) => { /* SPS/PPS consumed, no picture yet */ }
                 Err(e) => return Err(e),
             }
         }
 
+        // If no Annex-B start codes were found in `nal`, try decoding the slice directly
+        if packets_found == 0 {
+            match self.inner.decode(nal) {
+                Ok(Some(yuv)) => {
+                    last_frame = Some(Self::convert_yuv(&yuv));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
         Ok(last_frame)
+    }
+
+    fn convert_yuv(yuv: &impl YUVSource) -> DecodedFrame {
+        let (width, height) = yuv.dimensions();
+        let w = width as u32;
+        let h = height as u32;
+        let (y_stride, u_stride, v_stride) = yuv.strides();
+
+        let y_data = copy_plane(yuv.y(), y_stride, width, height);
+        let u_data = copy_plane(yuv.u(), u_stride, (width + 1) / 2, (height + 1) / 2);
+        let v_data = copy_plane(yuv.v(), v_stride, (width + 1) / 2, (height + 1) / 2);
+
+        DecodedFrame {
+            y: y_data,
+            y_stride: width,
+            u: u_data,
+            u_stride: (width + 1) / 2,
+            v: v_data,
+            v_stride: (width + 1) / 2,
+            width: w,
+            height: h,
+        }
     }
 }
 

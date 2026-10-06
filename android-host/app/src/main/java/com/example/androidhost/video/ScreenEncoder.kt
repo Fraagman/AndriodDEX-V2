@@ -34,7 +34,7 @@ class ScreenEncoder(
 
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val FRAME_RATE = 60
-        private const val I_FRAME_INTERVAL_SEC = 3
+        private const val I_FRAME_INTERVAL_SEC = 1
 
         /** How often to log throughput, in encoded frames. */
         private const val LOG_EVERY_FRAMES = 60L
@@ -125,21 +125,20 @@ class ScreenEncoder(
     /**
      * Asks the encoder to emit an IDR on the next frame. Called when a client finishes
      * pairing, so it does not wait up to [I_FRAME_INTERVAL_SEC] seconds for a picture.
-     * Throttled to 1 per second to prevent network congestion collapses if the receiver
-     * asks for keyframes in a tight loop.
+     * Throttled to prevent network congestion collapses if the receiver asks in a loop.
      */
     fun requestKeyframe(bypassCooldown: Boolean = false) {
         val encoder = codec ?: return
         if (!running) return
         val now = System.currentTimeMillis()
-        if (!bypassCooldown && now - lastKeyframeRequestTime < 1000) return
+        if (!bypassCooldown && now - lastKeyframeRequestTime < 250) return
         lastKeyframeRequestTime = now
 
         try {
             encoder.setParameters(Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             })
-            Log.d(TAG, "Keyframe requested")
+            Log.d(TAG, "Keyframe requested on encoder")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe", e)
         }
@@ -192,7 +191,6 @@ class ScreenEncoder(
             // CBR so a burst of desktop activity cannot spike the bitrate and queue up.
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
-            // Long interval on purpose: keyframes are requested on demand instead.
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SEC)
             // Realtime priority.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
@@ -211,6 +209,31 @@ class ScreenEncoder(
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             }
         }
+    }
+
+    /** Scans buffer for NAL unit type 5 (IDR) or 7 (SPS) */
+    private fun isKeyframeOrConfig(buffer: ByteBuffer, flags: Int): Boolean {
+        if (flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) return true
+        val pos = buffer.position()
+        val limit = buffer.limit()
+        for (i in pos until (limit - 4).coerceAtLeast(pos)) {
+            if (buffer.get(i) == 0.toByte() && buffer.get(i + 1) == 0.toByte()) {
+                val offset = if (buffer.get(i + 2) == 1.toByte()) {
+                    i + 3
+                } else if (i + 3 < limit && buffer.get(i + 2) == 0.toByte() && buffer.get(i + 3) == 1.toByte()) {
+                    i + 4
+                } else {
+                    -1
+                }
+                if (offset in pos until limit) {
+                    val nalType = buffer.get(offset).toInt() and 0x1F
+                    if (nalType == 5 || nalType == 7) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private val callback = object : MediaCodec.Callback() {
@@ -240,7 +263,7 @@ class ScreenEncoder(
                     buffer.position(info.offset)
                     buffer.limit(info.offset + info.size)
 
-                    val isKeyframe = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                    val isKeyframe = isKeyframeOrConfig(buffer, info.flags)
                     listener.onEncodedFrame(
                         if (isKeyframe) codecSpecificData else null,
                         buffer,
@@ -273,8 +296,8 @@ class ScreenEncoder(
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
             // The output format carries SPS (csd-0) and PPS (csd-1). This is the more
             // reliable source than the codec-config buffer on some encoders, so prefer it.
-            val sps = format.getByteBuffer("csd-0")
-            val pps = format.getByteBuffer("csd-1")
+            val sps = format.getByteBuffer("csd-0")?.duplicate()
+            val pps = format.getByteBuffer("csd-1")?.duplicate()
             if (sps != null && pps != null) {
                 val spsLen = sps.remaining()
                 val ppsLen = pps.remaining()
@@ -295,10 +318,11 @@ class ScreenEncoder(
 
     /** Copies SPS/PPS out of a codec-config buffer. Runs at most once per session. */
     private fun cacheCodecSpecificData(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-        buffer.position(info.offset)
-        buffer.limit(info.offset + info.size)
+        val dup = buffer.duplicate()
+        dup.position(info.offset)
+        dup.limit(info.offset + info.size)
         val csd = ByteArray(info.size)
-        buffer.get(csd)
+        dup.get(csd)
         codecSpecificData = csd
         Log.i(TAG, "Cached SPS/PPS from codec-config buffer: ${csd.size} bytes")
     }

@@ -9,6 +9,9 @@ import android.os.Build
 import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
+import com.example.androidhost.service.TetheringService
+import com.example.androidhost.service.AudioCaptureService
+import com.example.androidhost.security.SecurityBridge
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -41,8 +44,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.androidhost.service.TetheringService
-import com.example.androidhost.service.AudioCaptureService
 import kotlinx.coroutines.delay
 
 class MainActivity : FragmentActivity() {
@@ -76,7 +77,7 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         setContent {
             val currentScreen = remember { 
-                mutableStateOf(Screen.PAIRING) 
+                mutableStateOf(if (SecurityBridge.isPaired()) Screen.DESKTOP else Screen.PAIRING) 
             }
 
             val ctx = LocalContext.current
@@ -136,6 +137,14 @@ class MainActivity : FragmentActivity() {
             com.example.androidhost.service.InputManager.startPolling(filesDir.absolutePath)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+
+        if (com.example.androidhost.security.SecurityBridge.isPaired()) {
+            try {
+                ContextCompat.startForegroundService(this, Intent(this, com.example.androidhost.service.DisplayService::class.java))
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
 
         val appFilter = android.content.IntentFilter("com.androiddex.host.OPEN_APP")

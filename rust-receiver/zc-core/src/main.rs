@@ -89,6 +89,14 @@ fn main() {
                     println!("Connected to Android server");
                     is_connected_loop.store(true, Ordering::SeqCst);
 
+                    let ev = zc_input::create_keyframe_request();
+                    let mut serialized = Vec::new();
+                    if prost::Message::encode(&ev, &mut serialized).is_ok() {
+                        if let Ok(mut buf) = input_buffer_loop.lock() {
+                            buf.push_back(serialized);
+                        }
+                    }
+
                     // All three futures run as siblings inside tokio::select!
                     // When ANY exits, we close the connection and loop back.
                     let exit_reason = tokio::select! {
@@ -257,6 +265,12 @@ fn main() {
         height: u32,
     }
     let mut yuv_textures: Option<YuvTextures> = None;
+
+    // Until the first keyframe is decoded, P-frames reference pictures the decoder
+    // has never seen. Also set after every decode error: OpenH264 does not recover
+    // a wedged reference state on its own, so the decoder is rebuilt from scratch
+    // when the next keyframe arrives.
+    let mut need_keyframe = true;
 
     // Create the YUV shader pipeline
     let yuv_shader = renderer.device().create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -515,10 +529,37 @@ fn main() {
                             return;
                         }
 
-                        // Drain all pending frames, decode and upload the latest
+                        // Drain all pending frames. When a backlog has built up (the
+                        // decoder is slower than the sender), decode only from the
+                        // newest keyframe in the batch: the dropped prefix is stale,
+                        // and nothing after a keyframe references frames before it.
+                        let mut batch: Vec<HybridFrame> = Vec::new();
                         while let Ok(hybrid) = frame_rx.try_recv() {
+                            batch.push(hybrid);
+                        }
+                        let start_at = batch
+                            .iter()
+                            .rposition(|h| {
+                                matches!(&h.payload, Some(hybrid_frame::Payload::Video(vf)) if vf.is_keyframe)
+                            })
+                            .unwrap_or(0);
+
+                        for hybrid in batch.into_iter().skip(start_at) {
                             match hybrid.payload {
                                 Some(hybrid_frame::Payload::Video(frame)) => {
+                                    if need_keyframe {
+                                        if !frame.is_keyframe {
+                                            continue;
+                                        }
+                                        match zc_video::Decoder::new() {
+                                            Ok(d) => h264_decoder = Some(d),
+                                            Err(e) => {
+                                                eprintln!("Failed to recreate H.264 decoder: {}", e);
+                                                continue;
+                                            }
+                                        }
+                                        need_keyframe = false;
+                                    }
                                     if let Some(ref mut decoder) = h264_decoder {
                                         let decode_start = std::time::Instant::now();
                                         match decoder.decode(&frame.nal_data) {
@@ -633,7 +674,8 @@ fn main() {
                                             }
                                             Ok(None) => { /* NAL consumed, no picture */ }
                                             Err(e) => {
-                                                eprintln!("H.264 decode error: {}", e);
+                                                eprintln!("H.264 decode error: {}; waiting for the next keyframe", e);
+                                                need_keyframe = true;
                                                 let ev = zc_input::create_keyframe_request();
                                                 let mut serialized = Vec::new();
                                                 if prost::Message::encode(&ev, &mut serialized).is_ok() {
