@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.androidhost.ui.components.ShellDialog
 import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.WindowState
 import java.io.File
@@ -47,11 +48,13 @@ fun FilesApp(
 
     var currentDir by remember { mutableStateOf(internalRoot) }
     var viewingFile by remember { mutableStateOf<File?>(null) }
-    
-    var showCreateFolderDialog by remember { mutableStateOf(false) }
+
+    // In-shell modal (never androidx Dialog — opening a window from the
+    // Presentation's context crashes the app on Android 15).
     val folderOwner = remember { Any() }
-    var showRenameDialogFor by remember { mutableStateOf<File?>(null) }
     val renameOwner = remember { Any() }
+    var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var showRenameDialogFor by remember { mutableStateOf<File?>(null) }
     var showDeleteConfirmFor by remember { mutableStateOf<File?>(null) }
 
     // Rerender trigger for directory changes
@@ -142,122 +145,110 @@ fun FilesApp(
                     }
                 }
             }
-        }
-    }
 
-    if (showCreateFolderDialog) {
-        var folderName by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showCreateFolderDialog = false },
-            title = { Text("Create Folder") },
-            text = {
-                OutlinedTextField(
-                    value = folderName,
-                    onValueChange = { folderName = it },
-                    singleLine = true,
-                    modifier = Modifier.pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                if (event.changes.any { it.pressed }) {
-                                    LocalInputDispatcher.registerComposeTarget(
-                                        folderOwner,
-                                        onText = { text -> folderName += text },
-                                        onKey = { keyCode, pressed ->
-                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && folderName.isNotEmpty()) {
-                                                folderName = folderName.dropLast(1)
-                                            }
-                                            true
+            // In-shell modals: plain layout, never androidx Dialog (window-type
+            // mismatch crashes the app on Android 15 when opened from the
+            // Presentation's context).
+            if (showCreateFolderDialog) {
+                var folderName by remember { mutableStateOf("") }
+                ShellDialog(
+                    title = "Create Folder",
+                    confirmText = "Create",
+                    onDismiss = { showCreateFolderDialog = false },
+                    onConfirm = {
+                        if (folderName.isNotBlank()) {
+                            File(currentDir, folderName).mkdirs()
+                            refreshTrigger++
+                        }
+                        showCreateFolderDialog = false
+                    },
+                    body = {
+                        OutlinedTextField(
+                            value = folderName,
+                            onValueChange = { folderName = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        if (event.changes.any { it.pressed }) {
+                                            LocalInputDispatcher.registerComposeTarget(
+                                                folderOwner,
+                                                onText = { text -> folderName += text },
+                                                onKey = { keyCode, pressed ->
+                                                    if (pressed && keyCode == KeyEvent.KEYCODE_DEL && folderName.isNotEmpty()) {
+                                                        folderName = folderName.dropLast(1)
+                                                    }
+                                                    true
+                                                }
+                                            )
                                         }
-                                    )
+                                    }
                                 }
                             }
-                        }
+                        )
                     }
                 )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    if (folderName.isNotBlank()) {
-                        File(currentDir, folderName).mkdirs()
-                        refreshTrigger++
-                    }
-                    showCreateFolderDialog = false
-                }) { Text("Create") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancel") }
             }
-        )
-    }
 
-    if (showRenameDialogFor != null) {
-        val file = showRenameDialogFor!!
-        var newName by remember { mutableStateOf(file.name) }
-        AlertDialog(
-            onDismissRequest = { showRenameDialogFor = null },
-            title = { Text("Rename") },
-            text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    singleLine = true,
-                    modifier = Modifier.pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                if (event.changes.any { it.pressed }) {
-                                    LocalInputDispatcher.registerComposeTarget(
-                                        renameOwner,
-                                        onText = { text -> newName += text },
-                                        onKey = { keyCode, pressed ->
-                                            if (pressed && keyCode == KeyEvent.KEYCODE_DEL && newName.isNotEmpty()) {
-                                                newName = newName.dropLast(1)
-                                            }
-                                            true
+            if (showRenameDialogFor != null) {
+                val file = showRenameDialogFor!!
+                var newName by remember(file.absolutePath) { mutableStateOf(file.name) }
+                ShellDialog(
+                    title = "Rename",
+                    confirmText = "Rename",
+                    onDismiss = { showRenameDialogFor = null },
+                    onConfirm = {
+                        if (newName.isNotBlank() && newName != file.name) {
+                            file.renameTo(File(file.parentFile, newName))
+                            refreshTrigger++
+                        }
+                        showRenameDialogFor = null
+                    },
+                    body = {
+                        OutlinedTextField(
+                            value = newName,
+                            onValueChange = { newName = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        if (event.changes.any { it.pressed }) {
+                                            LocalInputDispatcher.registerComposeTarget(
+                                                renameOwner,
+                                                onText = { text -> newName += text },
+                                                onKey = { keyCode, pressed ->
+                                                    if (pressed && keyCode == KeyEvent.KEYCODE_DEL && newName.isNotEmpty()) {
+                                                        newName = newName.dropLast(1)
+                                                    }
+                                                    true
+                                                }
+                                            )
                                         }
-                                    )
+                                    }
                                 }
                             }
-                        }
+                        )
                     }
                 )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    if (newName.isNotBlank() && newName != file.name) {
-                        file.renameTo(File(file.parentFile, newName))
-                        refreshTrigger++
-                    }
-                    showRenameDialogFor = null
-                }) { Text("Rename") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRenameDialogFor = null }) { Text("Cancel") }
             }
-        )
-    }
 
-    if (showDeleteConfirmFor != null) {
-        val file = showDeleteConfirmFor!!
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirmFor = null },
-            title = { Text("Delete ${file.name}?") },
-            text = { Text("This action cannot be undone.") },
-            confirmButton = {
-                Button(
-                    onClick = {
+            if (showDeleteConfirmFor != null) {
+                val file = showDeleteConfirmFor!!
+                ShellDialog(
+                    title = "Delete ${file.name}?",
+                    confirmText = "Delete",
+                    onDismiss = { showDeleteConfirmFor = null },
+                    onConfirm = {
                         if (file.isDirectory) file.deleteRecursively() else file.delete()
                         refreshTrigger++
                         showDeleteConfirmFor = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-                ) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirmFor = null }) { Text("Cancel") }
+                    body = { Text("This action cannot be undone.", color = Color(0xFFAAAAAA), fontSize = 14.sp) }
+                )
             }
-        )
+        }
     }
 }
 

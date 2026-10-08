@@ -108,7 +108,16 @@ object InputManager {
                 val pkg = event.openApp.packageName
                 Log.i(TAG, "Opening app via QUIC InputEvent: $pkg")
                 com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
-                DisplayService.forceRedraw.value += 1
+            }
+            InputEvent.EventCase.NAV -> {
+                // Global navigation requested by the receiver's taskbar. Performed by
+                // the optional accessibility service; without it these are no-ops.
+                when (event.nav.action) {
+                    com.androiddex.protocol.NavAction.NAV_BACK -> DesktopAccessibilityService.performBack()
+                    com.androiddex.protocol.NavAction.NAV_HOME -> DesktopAccessibilityService.performHome()
+                    com.androiddex.protocol.NavAction.NAV_RECENTS -> DesktopAccessibilityService.performRecents()
+                    com.androiddex.protocol.NavAction.UNRECOGNIZED -> Unit
+                }
             }
             InputEvent.EventCase.EVENT_NOT_SET, null -> Unit
         }

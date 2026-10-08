@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use egui::Color32;
+use zc_protocol::protocol::NavAction;
 
 /// Actions requested by the UI that must be processed by the main loop.
 #[derive(Default, Clone, Debug)]
@@ -18,6 +19,8 @@ pub struct UiActions {
     pub forget_pairing: bool,
     /// Launch an Android workspace app via package name.
     pub launch_app: Option<&'static str>,
+    /// Global navigation (back / home / recents) performed on the phone.
+    pub nav_action: Option<NavAction>,
     /// Toggle kiosk mode locking.
     pub toggle_kiosk: bool,
     /// Exit the application cleanly.
@@ -60,16 +63,6 @@ pub const ALL_APPS: &[AppMeta] = &[
         is_pinned: true,
     },
     AppMeta {
-        id: "vscode",
-        name: "VS Code Server",
-        category: "Development",
-        subtitle: "Visual Studio Code on Android",
-        package_name: "com.androiddex.codeserver",
-        icon_symbol: "💻",
-        accent_color: Color32::from_rgb(0, 122, 204), // VS Code Blue
-        is_pinned: true,
-    },
-    AppMeta {
         id: "terminal",
         name: "Command Terminal",
         category: "Development",
@@ -89,27 +82,12 @@ pub const ALL_APPS: &[AppMeta] = &[
         accent_color: Color32::from_rgb(116, 77, 169), // Windows Purple
         is_pinned: true,
     },
-    AppMeta {
-        id: "security",
-        name: "Windows Security",
-        category: "Security",
-        subtitle: "TLS Certificate & Trust Store",
-        package_name: "com.androiddex.security",
-        icon_symbol: "🛡",
-        accent_color: Color32::from_rgb(0, 130, 114), // Security Teal
-        is_pinned: true,
-    },
-    AppMeta {
-        id: "diagnostics",
-        name: "Performance Monitor",
-        category: "Diagnostics",
-        subtitle: "FPS, Latency & Frame Telemetry",
-        package_name: "com.androiddex.diagnostics",
-        icon_symbol: "📊",
-        accent_color: Color32::from_rgb(216, 59, 1), // Diagnostic Orange
-        is_pinned: false,
-    },
 ];
+
+// Note: the phone's AppRegistry defines exactly the five apps above. Entries for
+// packages the phone does not register (e.g. com.androiddex.security) were removed:
+// the phone validates openApp requests against its registry and rejects unknown ones.
+
 
 #[derive(Clone, Debug)]
 pub struct NotificationItem {

@@ -777,6 +777,17 @@ fn main() {
                                         println!("Trust data erased via UI. Reconnecting to trigger re-pairing...");
                                     }
 
+                                    if let Some(nav) = actions.nav_action {
+                                        let ev = zc_input::create_nav_event(nav);
+                                        let mut serialized = Vec::new();
+                                        if prost::Message::encode(&ev, &mut serialized).is_ok() {
+                                            if let Ok(mut buf) = input_buffer_for_poll.lock() {
+                                                if buf.len() >= INPUT_BUFFER_MAX { buf.pop_front(); }
+                                                buf.push_back(serialized);
+                                            }
+                                        }
+                                    }
+
                                     if let Some(pkg) = actions.launch_app {
                                         // 1. Send direct QUIC OpenApp event (instant, reliable, works without ADB)
                                         let ev = zc_input::create_open_app_event(pkg.to_string());

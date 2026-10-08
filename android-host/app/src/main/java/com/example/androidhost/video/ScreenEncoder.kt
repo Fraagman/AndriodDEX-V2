@@ -192,6 +192,11 @@ class ScreenEncoder(
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SEC)
+            // When the desktop is static and the shell stops drawing, resubmit the
+            // previous frame so the encoder keeps producing output. This keeps the
+            // I-frame interval and requested sync frames alive on a still desktop
+            // without any redraw hacks. Encoders that don't support it ignore the key.
+            setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 500_000)
             // Realtime priority.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             // No B-frames: they require reordering, which is pure added latency.

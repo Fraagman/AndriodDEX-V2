@@ -16,17 +16,22 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -34,6 +39,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -146,32 +153,8 @@ class MainActivity : FragmentActivity() {
                 e.printStackTrace()
             }
         }
-
-        val appFilter = android.content.IntentFilter("com.androiddex.host.OPEN_APP")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(appLaunchReceiver, appFilter, Context.RECEIVER_EXPORTED)
-        } else {
-            registerReceiver(appLaunchReceiver, appFilter)
-        }
-    }
-
-    private val appLaunchReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.androiddex.host.OPEN_APP") {
-                val pkg = intent.getStringExtra("package") ?: return
-                com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
-            }
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try {
-            unregisterReceiver(appLaunchReceiver)
-        } catch (_: Exception) {}
     }
 }
-
 /**
  * Control Panel shown on the phone's physical screen.
  * The phone screen is NOT a mirror of the desktop — it's a control surface.
@@ -185,6 +168,9 @@ fun ControlPanel(
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
     var wasConnected by remember { mutableStateOf(false) }
+    var encoderFps by remember { mutableStateOf(0) }
+    var encoderKbps by remember { mutableStateOf(0) }
+    var droppedVideo by remember { mutableLongStateOf(0) }
     val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
     val ctx = LocalContext.current
 
@@ -192,133 +178,169 @@ fun ControlPanel(
         while (true) {
             quicState = com.example.androidhost.quic.QuicServer.getConnectionState()
             framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
-            
+            val stats = com.example.androidhost.service.DisplayService.encoderStats.latest.value
+            encoderFps = stats.fps
+            encoderKbps = stats.kilobitsPerSecond
+            droppedVideo = com.example.androidhost.quic.QuicServer.getDroppedVideoFrames()
+
             if (quicState == 2) {
                 wasConnected = true
             } else if (wasConnected && quicState != 2) {
                 ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
                 wasConnected = false
             }
-            
+
             delay(1000)
         }
     }
 
     val statusText = when (quicState) {
         0 -> "Idle"
-        1 -> "Pairing..."
+        1 -> "Pairing"
         2 -> "Connected"
         3 -> "Disconnected"
         else -> "Unknown"
     }
     val statusColor = when (quicState) {
-        2 -> Color(0xFF4CAF50)
-        1 -> Color(0xFFFFC107)
-        3 -> Color(0xFFF44336)
-        else -> Color.Gray
+        2 -> Color(0xFF3DDC84)
+        1 -> Color(0xFFFFB300)
+        3 -> Color(0xFFFF5252)
+        else -> Color(0xFF8B949E)
     }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1117))
+            .background(Color(0xFF0B0F14))
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
     ) {
+        Spacer(modifier = Modifier.height(48.dp))
+
+        // Header
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(Color(0xFF1C6DFF), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("A", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column {
+                Text("AndroidDex", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("Desktop control surface", color = Color(0xFF8B949E), fontSize = 12.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Connection status card
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF151B23), RoundedCornerShape(16.dp))
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(statusColor, RoundedCornerShape(5.dp))
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(statusText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (quicState == 2) "Streaming desktop to receiver" else "Waiting for a receiver to connect",
+                    color = Color(0xFF8B949E), fontSize = 12.sp
+                )
+            }
+            if (framesSent > 0) {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("$framesSent", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("frames", color = Color(0xFF8B949E), fontSize = 11.sp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Stream telemetry
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            StatTile("Encoder", "$encoderFps fps", Modifier.weight(1f))
+            StatTile("Bitrate", "$encoderKbps kbps", Modifier.weight(1f))
+            StatTile("Dropped", "$droppedVideo", Modifier.weight(1f))
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Session actions
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Top
+                .fillMaxWidth()
+                .background(Color(0xFF151B23), RoundedCornerShape(16.dp))
+                .padding(16.dp)
         ) {
-            Spacer(modifier = Modifier.height(48.dp))
+            Text("Session", color = Color(0xFF8B949E), fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Text(
-                text = "AndroidDex",
-                color = Color.White,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "Control Panel",
-                color = Color(0xFF8B949E),
-                fontSize = 14.sp
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Status Card
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF161B22), shape = RoundedCornerShape(12.dp))
-                    .padding(20.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(text = "Connection Status", color = Color(0xFF8B949E), fontSize = 12.sp)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .padding(end = 8.dp)
-                            .background(statusColor, shape = RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(text = statusText, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Lock Session", color = Color.White, fontSize = 15.sp)
+                    Text("Stops streaming and locks this device", color = Color(0xFF8B949E), fontSize = 11.sp)
                 }
-                if (framesSent > 0) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = "Frames sent: $framesSent", color = Color(0xFF8B949E), fontSize = 12.sp)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Controls Card
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF161B22), shape = RoundedCornerShape(12.dp))
-                    .padding(20.dp)
-            ) {
-                Text(text = "Controls", color = Color(0xFF8B949E), fontSize = 12.sp)
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Lock Session
                 Button(
                     onClick = onLockSession,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1C6DFF)),
+                    shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("Lock Session", color = Color.White)
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Audio Toggle
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "System Audio Capture",
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = isAudioCapturing,
-                        onCheckedChange = { onRequestAudioCapture(it) }
-                    )
+                    Text("Lock")
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = Color(0xFF222933))
 
-            // Onboarding Card
-            com.example.androidhost.ui.components.InputSetupPanel()
-
-            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("System Audio", color = Color.White, fontSize = 15.sp)
+                    Text(
+                        if (isAudioCapturing) "Captured and streamed to the receiver" else "Not captured",
+                        color = Color(0xFF8B949E), fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = isAudioCapturing,
+                    onCheckedChange = { onRequestAudioCapture(it) }
+                )
+            }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun StatTile(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(Color(0xFF151B23), RoundedCornerShape(16.dp))
+            .padding(14.dp)
+    ) {
+        Text(label, color = Color(0xFF8B949E), fontSize = 11.sp)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(value, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

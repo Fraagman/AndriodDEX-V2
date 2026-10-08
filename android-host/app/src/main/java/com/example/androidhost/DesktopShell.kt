@@ -3,65 +3,39 @@ package com.example.androidhost
 import android.view.Surface
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.androidhost.ui.components.AppLauncher
+import com.example.androidhost.service.DisplayService
 import com.example.androidhost.ui.components.AppRegistry
-import com.example.androidhost.ui.components.Taskbar
-import com.example.androidhost.ui.components.WindowChrome
 import com.example.androidhost.vm.ConnectionViewModel
 import com.example.androidhost.vm.DisplayViewModel
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Switch
-import androidx.compose.ui.text.font.FontWeight
+import com.example.androidhost.vm.ShellHolder
 import com.example.androidhost.vm.ShellViewModel
-import kotlinx.coroutines.delay
 
 @Composable
 fun DesktopShell(
     viewModel: ConnectionViewModel = viewModel(),
     displayViewModel: DisplayViewModel = viewModel(),
-    shellViewModel: ShellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel,
+    shellViewModel: ShellViewModel = ShellHolder.shellViewModel,
     onLockSession: () -> Unit = {},
-    onRequestAudioCapture: (Boolean) -> Unit = {},
-    displayId: Int = android.view.Display.DEFAULT_DISPLAY
+    onRequestAudioCapture: (Boolean) -> Unit = {}
 ) {
     val isReady by viewModel.isTetheringReady.collectAsState()
     val surface by displayViewModel.virtualDisplaySurface.collectAsState()
-    
+
     DesktopShellContent(
         isTetheringReady = isReady,
         surface = surface,
         shellViewModel = shellViewModel,
         onLockSession = onLockSession,
-        onRequestAudioCapture = onRequestAudioCapture,
-        displayId = displayId
+        onRequestAudioCapture = onRequestAudioCapture
     )
 }
 
@@ -71,63 +45,29 @@ fun DesktopShellContent(
     surface: Surface? = null,
     shellViewModel: ShellViewModel? = null,
     onLockSession: () -> Unit = {},
-    onRequestAudioCapture: (Boolean) -> Unit = {},
-    displayId: Int = android.view.Display.DEFAULT_DISPLAY
+    onRequestAudioCapture: (Boolean) -> Unit = {}
 ) {
-    var quicState by remember { mutableStateOf(0) }
-    var framesSent by remember { mutableStateOf(0) }
-    var showLauncher by remember { mutableStateOf(false) }
+    val windows by shellViewModel?.windows?.collectAsState(initial = emptyList<com.example.androidhost.vm.WindowState>())
+        ?: remember { mutableStateOf(emptyList<com.example.androidhost.vm.WindowState>()) }
 
-    val isAudioCapturing by com.example.androidhost.service.AudioCaptureService.isServiceRunning.collectAsState()
-    val computeState by com.example.androidhost.service.NativeComputeService.nclState.collectAsState()
-    val windows by shellViewModel?.windows?.collectAsState(initial = emptyList()) ?: remember { mutableStateOf(emptyList()) }
-    val forceRedraw by com.example.androidhost.service.DisplayService.forceRedraw.collectAsState()
-    var burstTick by remember { mutableStateOf(0) }
-
-    LaunchedEffect(forceRedraw) {
-        if (forceRedraw > 0) {
-            for (i in 0 until 10) {
-                burstTick++
-                kotlinx.coroutines.delay(16)
-            }
-            burstTick = 0
-        }
-    }
-
-    // Both are optional capabilities. When off, the shell hides the buttons they power
-    // rather than blocking or nagging — desktop control works either way.
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val a11yEnabled by com.example.androidhost.service.DesktopAccessibilityService.isConnected.collectAsState()
-
-    LaunchedEffect(Unit) {
-        // Both settings are toggled in system UI on the phone, out of band from this
-        // Presentation, so poll rather than wait for a lifecycle event we never get.
-        while (true) {
-            com.example.androidhost.service.DesktopAccessibilityService.refresh(context)
-            delay(2000)
-        }
-    }
-
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            // Poll real connection state from the Rust QUIC server via JNI
-            // 0 = Idle, 1 = Pairing, 2 = Authenticated, 3 = Disconnected
-            quicState = com.example.androidhost.quic.QuicServer.getConnectionState()
-            framesSent = com.example.androidhost.network.FrameSender.framesSent.get()
-            delay(1000)
-        }
-    }
+    // The taskbar lives on the receiver (its egui shell owns Start, app launching,
+    // clock, status and navigation). The one thing it cannot do is keep THIS
+    // composition drawing: the encoder only emits frames when something draws,
+    // and a joining client's keyframe request can only be answered once new pixels
+    // exist. This 1 Hz tick keeps the shell alive on a static desktop — the same
+    // job the removed taskbar clock happened to do.
+    val frameTick by DisplayService.frameTick.collectAsState()
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Windows 10 Hero Wallpaper background
-        Windows10Wallpaper()
+        // Windows 10 Hero Wallpaper background (draws a 1 px per-second keepalive)
+        Windows10Wallpaper(keepAliveTick = frameTick)
 
-        // Windows
+        // Windows. List order is the z-order — the view model raises a window by
+        // moving it to the end of the list.
         windows.forEach { window ->
             val appConfig = AppRegistry.apps[window.packageName]
             if (appConfig != null) {
@@ -139,30 +79,33 @@ fun DesktopShellContent(
                 )
             }
         }
-        if (burstTick > 0) {
-            // Guarantee a buffer is queued to the VirtualDisplay by changing layout slightly.
-            // Using a burst of 10 frames ensures the MediaCodec pipeline is fully flushed.
-            androidx.compose.foundation.layout.Box(Modifier.size((burstTick % 10 + 1).dp).background(Color.Black))
-        }
-
-        // Launcher Overlay
-        if (showLauncher) {
-            AppLauncher(
-                onDismiss = { showLauncher = false },
-                onAppSelected = { packageName ->
-                    shellViewModel?.openApp(packageName)
-                },
-                displayId = displayId
-            )
-        }
     }
 }
 
+/**
+ * Draws the desktop wallpaper.
+ *
+ * [keepAliveTick] alternates one pixel's alpha every call: the H.264 encoder only
+ * produces output when its input changes, this device's encoder ignores
+ * KEY_REPEAT_PREVIOUS_FRAME_AFTER, and a fully static desktop would otherwise starve
+ * the stream — a client that joins (or one whose decoder just lost a reference)
+ * would wait forever for an IDR. One imperceptible pixel per second is the smallest
+ * change that keeps frames flowing.
+ */
 @Composable
-fun Windows10Wallpaper(modifier: Modifier = Modifier) {
+fun Windows10Wallpaper(modifier: Modifier = Modifier, keepAliveTick: Long = 0) {
     androidx.compose.foundation.Canvas(modifier = modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
+
+        // 0. Encoder keepalive: one pixel, alpha toggling 1/2 per tick. Invisible
+        // against the near-black backdrop, but it is a real pixel change, so the
+        // compositor hands the encoder a fresh buffer every tick.
+        drawRect(
+            color = Color(0x01000000 + (keepAliveTick % 2).toInt()),
+            topLeft = androidx.compose.ui.geometry.Offset(0f, 0f),
+            size = androidx.compose.ui.geometry.Size(1f, 1f)
+        )
 
         // 1. Deep space navy background gradient
         drawRect(

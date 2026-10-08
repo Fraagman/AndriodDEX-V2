@@ -45,7 +45,14 @@ class DisplayService : Service() {
         var CAPTURE_WIDTH = 1920
         var CAPTURE_HEIGHT = 1080
         var BIT_RATE = 12_000_000 // 12 Mbps default
-        private const val CAPTURE_DPI = 320
+
+        /**
+         * 160 dpi → density 1.0, so 1 dp = 1 px on the virtual display. The shell's
+         * geometry (window bounds, the 48 px taskbar, maximized = full height minus
+         * the taskbar) is defined in screen pixels; at 320 dpi every dp value was
+         * doubled and windows rendered twice as large as the display.
+         */
+        private const val CAPTURE_DPI = 160
 
         /**
          * How often the QUIC connection state is sampled so a freshly paired client can
@@ -62,15 +69,23 @@ class DisplayService : Service() {
          * per-instance so the desktop shell can display it without binding to the
          * service, which it cannot do from inside the Presentation.
          */
-        val forceRedraw = MutableStateFlow(0)
         val encoderStats = EncoderStats()
+
+        /**
+         * Bumped once per second while the pipeline runs. The shell collects this so
+         * Compose recomposes at 1 Hz even when nothing on the desktop changes: the
+         * encoder only emits frames when new pixels arrive, and a joining client's
+         * keyframe request can only be answered once they do. This replaces the taskbar
+         * clock, whose per-second recomposition silently did this job. (The encoder
+         * ignores KEY_REPEAT_PREVIOUS_FRAME_AFTER — measured on c2.qti.avc.encoder.)
+         */
+        val frameTick = MutableStateFlow(0L)
 
         var instance: DisplayService? = null
             private set
 
         fun requestKeyframe() {
             instance?.screenEncoder?.requestKeyframe()
-            forceRedraw.value++
         }
 
         fun updateResolution(width: Int, height: Int) {
@@ -109,6 +124,14 @@ class DisplayService : Service() {
     private val clientWatchHandler = Handler(Looper.getMainLooper())
     private var lastQuicState = -1
 
+    private val frameTickHandler = Handler(Looper.getMainLooper())
+    private val frameTickRunnable = object : Runnable {
+        override fun run() {
+            frameTick.value++
+            frameTickHandler.postDelayed(this, 1000)
+        }
+    }
+
     inner class LocalBinder : Binder() {
         fun getService(): DisplayService = this@DisplayService
     }
@@ -121,7 +144,6 @@ class DisplayService : Service() {
                 val pkg = intent.getStringExtra("package") ?: return
                 Log.i(TAG, "Opening app via Broadcast: $pkg")
                 com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
-                forceRedraw.value++
             }
         }
     }
@@ -193,6 +215,7 @@ class DisplayService : Service() {
         com.example.androidhost.network.FrameSender.start()
         launchDesktopPresentation()
         startClientWatch()
+        frameTickHandler.post(frameTickRunnable)
     }
 
     /**
@@ -226,7 +249,6 @@ class DisplayService : Service() {
                 if (state == QUIC_STATE_AUTHENTICATED && lastQuicState != QUIC_STATE_AUTHENTICATED) {
                     Log.i(TAG, "Client authenticated — requesting keyframe")
                     screenEncoder?.requestKeyframe(bypassCooldown = true)
-                    forceRedraw.value++
                 }
                 lastQuicState = state
 
@@ -337,7 +359,6 @@ class DisplayService : Service() {
         encoderStats.reset()
         encoder.start()
         encoder.requestKeyframe(bypassCooldown = true)
-        forceRedraw.value++
         Log.i(TAG, "Resolution updated successfully to ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}")
     }
 
@@ -347,6 +368,7 @@ class DisplayService : Service() {
      */
     private fun stopEncodingPipeline() {
         clientWatchHandler.removeCallbacksAndMessages(null)
+        frameTickHandler.removeCallbacks(frameTickRunnable)
 
         desktopPresentation?.dismiss()
         desktopPresentation = null

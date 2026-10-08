@@ -102,7 +102,17 @@ object LocalInputDispatcher {
      * IME route cannot work on our untrusted VirtualDisplay.
      */
     sealed class InputTarget {
-        class WebViewBridge(val bridge: WebViewInputBridge, val view: android.webkit.WebView) : InputTarget()
+        class WebViewBridge(
+            val bridge: WebViewInputBridge,
+            val view: android.webkit.WebView,
+            /** False when this WebView's window is not on top — it must not receive
+             *  events a window drawn over it should get. */
+            val eligible: (() -> Boolean)? = null
+        ) : InputTarget() {
+            /** Attached, laid out, and (when known) the top window of the shell. */
+            fun isLive(): Boolean =
+                view.isAttachedToWindow && view.width > 0 && (eligible?.invoke() != false)
+        }
         class ComposeTarget(val onText: (String) -> Unit, val onKey: (Int, Boolean) -> Boolean) : InputTarget()
     }
 
@@ -125,9 +135,47 @@ object LocalInputDispatcher {
      * Registers (or clears) a [WebViewInputBridge]. Call with the bridge on WebView focus
      * gain and with `null` on focus loss. Safe to call from any thread; the swap runs on
      * the main thread. Idempotent.
+     *
+     * Also arms the pointer slot below, so mouse events over the WebView's bounds are
+     * dispatched straight into it (see [resolveWebViewTarget]). [eligible] should report
+     * whether the owning shell window is currently on top; while it is covered, events
+     * pass through to the shell so the covering window receives them.
      */
-    fun registerWebViewBridge(owner: Any, bridge: WebViewInputBridge?, view: android.webkit.WebView) {
-        setTarget(owner, bridge?.let { InputTarget.WebViewBridge(it, view) })
+    fun registerWebViewBridge(
+        owner: Any,
+        bridge: WebViewInputBridge?,
+        view: android.webkit.WebView,
+        eligible: (() -> Boolean)? = null
+    ) {
+        setTarget(owner, bridge?.let { InputTarget.WebViewBridge(it, view, eligible) })
+        mainHandler.post {
+            webviewPointerTarget = bridge?.let { InputTarget.WebViewBridge(it, view, eligible) }
+        }
+    }
+
+    /**
+     * The WebView that PC pointer events are routed into directly. Pointer events
+     * dispatched into the root ComposeView must cross Compose's gesture system to
+     * reach an AndroidView, and ancestor gesture handlers (window raise-on-press,
+     * scrollable surfaces) consume or delay them, which left web pages dead to the
+     * mouse. When the cursor is inside the registered WebView's bounds (or a drag
+     * that started there is in flight), events bypass Compose entirely.
+     */
+    private var webviewPointerTarget: InputTarget.WebViewBridge? = null
+    private var webviewGesture = false
+
+    /** The WebView under the cursor, if the pointer slot is armed, the view is still
+     *  attached to a window, its window is on top, and [x, y] is inside its bounds.
+     *  A destroyed, detached or covered WebView must never intercept events — its
+     *  stale bounds would swallow presses meant for the shell or a covering window. */
+    private fun resolveWebViewTarget(x: Float, y: Float): android.webkit.WebView? {
+        val target = webviewPointerTarget ?: return null
+        val wv = target.view
+        if (!target.isLive()) return null
+        val loc = IntArray(2)
+        wv.getLocationInWindow(loc)
+        val inside = x >= loc[0] && x < loc[0] + wv.width && y >= loc[1] && y < loc[1] + wv.height
+        return if (inside) wv else null
     }
 
     /**
@@ -243,9 +291,20 @@ object LocalInputDispatcher {
             val y = scaleY(wireY)
             val now = SystemClock.uptimeMillis()
 
+            var targetView: View = view
+            var eventX = x
+            var eventY = y
+            resolveWebViewTarget(x, y)?.let { wv ->
+                val loc = IntArray(2)
+                wv.getLocationInWindow(loc)
+                targetView = wv
+                eventX = x - loc[0]
+                eventY = y - loc[1]
+            }
+
             val coords = MotionEvent.PointerCoords().apply {
-                this.x = x
-                this.y = y
+                this.x = eventX
+                this.y = eventY
                 setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll)
                 setAxisValue(MotionEvent.AXIS_HSCROLL, hScroll)
             }
@@ -257,7 +316,7 @@ object LocalInputDispatcher {
                 0, 0, InputDevice.SOURCE_MOUSE, 0
             )
             try {
-                view.dispatchGenericMotionEvent(event)
+                targetView.dispatchGenericMotionEvent(event)
             } finally {
                 event.recycle()
             }
@@ -272,9 +331,30 @@ object LocalInputDispatcher {
         // them as unrelated events and the gesture never registers as one interaction.
         val downTime = if (gestureDownTime != 0L) gestureDownTime else now
 
+        // Direct WebView routing: a drag that started inside the page keeps going to
+        // the page even when the cursor leaves its bounds.
+        var targetView: View = view
+        var eventX = x
+        var eventY = y
+        val wv = resolveWebViewTarget(x, y)
+        if (wv != null) {
+            webviewGesture = true
+        }
+        val active = if (webviewGesture) (wv ?: webviewPointerTarget?.takeIf { it.isLive() }?.view) else null
+        if (active != null) {
+            val loc = IntArray(2)
+            active.getLocationInWindow(loc)
+            targetView = active
+            eventX = x - loc[0]
+            eventY = y - loc[1]
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            webviewGesture = false
+        }
+
         val coords = MotionEvent.PointerCoords().apply {
-            this.x = x
-            this.y = y
+            this.x = eventX
+            this.y = eventY
             pressure = if (action == MotionEvent.ACTION_UP) 0f else 1f
             size = 1f
         }
@@ -286,7 +366,7 @@ object LocalInputDispatcher {
             0, 0, InputDevice.SOURCE_MOUSE, 0
         )
         try {
-            view.dispatchTouchEvent(event)
+            targetView.dispatchTouchEvent(event)
         } finally {
             event.recycle()
         }
@@ -294,9 +374,20 @@ object LocalInputDispatcher {
 
     private fun dispatchHover(view: View, x: Float, y: Float) {
         val now = SystemClock.uptimeMillis()
+        val wv = resolveWebViewTarget(x, y)
+        var targetView: View = view
+        var eventX = x
+        var eventY = y
+        if (wv != null) {
+            val loc = IntArray(2)
+            wv.getLocationInWindow(loc)
+            targetView = wv
+            eventX = x - loc[0]
+            eventY = y - loc[1]
+        }
         val coords = MotionEvent.PointerCoords().apply {
-            this.x = x
-            this.y = y
+            this.x = eventX
+            this.y = eventY
             size = 1f
         }
         val event = MotionEvent.obtain(
@@ -307,7 +398,7 @@ object LocalInputDispatcher {
             0, 0, InputDevice.SOURCE_MOUSE, 0
         )
         try {
-            view.dispatchGenericMotionEvent(event)
+            targetView.dispatchGenericMotionEvent(event)
         } finally {
             event.recycle()
         }
@@ -333,9 +424,20 @@ object LocalInputDispatcher {
         val downTime = if (gestureDownTime != 0L) gestureDownTime else now
         val action = if (pressed) MotionEvent.ACTION_BUTTON_PRESS else MotionEvent.ACTION_BUTTON_RELEASE
 
+        var targetView: View = view
+        var eventX = x
+        var eventY = y
+        resolveWebViewTarget(x, y)?.let { wv ->
+            val loc = IntArray(2)
+            wv.getLocationInWindow(loc)
+            targetView = wv
+            eventX = x - loc[0]
+            eventY = y - loc[1]
+        }
+
         val coords = MotionEvent.PointerCoords().apply {
-            this.x = x
-            this.y = y
+            this.x = eventX
+            this.y = eventY
             size = 1f
         }
         val event = MotionEvent.obtain(
@@ -349,7 +451,7 @@ object LocalInputDispatcher {
             0, 0, InputDevice.SOURCE_MOUSE, 0
         )
         try {
-            view.dispatchGenericMotionEvent(event)
+            targetView.dispatchGenericMotionEvent(event)
         } finally {
             event.recycle()
         }
@@ -392,6 +494,10 @@ object LocalInputDispatcher {
         metaState = 0
         lockState = 0
         keyDownTimes.clear()
+        webviewGesture = false
+        if (targetRef == null || targetRef?.get() == null) {
+            webviewPointerTarget = null
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -442,7 +548,7 @@ object LocalInputDispatcher {
         // silently drops. WebViews need text delivered into the DOM instead.
         // the WebView still receives them as Chromium key events for page shortcuts.
         val target = currentTarget
-        if (target is InputTarget.WebViewBridge) {
+        if (target is InputTarget.WebViewBridge && target.isLive()) {
             val bridge = target.bridge
             val controlName = controlKeyName(keyCode)
             if (controlName != null) {
@@ -542,7 +648,7 @@ object LocalInputDispatcher {
         if (text.isEmpty()) return
         mainHandler.post {
             val target = currentTarget
-            if (target is InputTarget.WebViewBridge) {
+            if (target is InputTarget.WebViewBridge && target.isLive()) {
                 target.bridge.insertText(text)
                 return@post
             } else if (target is InputTarget.ComposeTarget) {

@@ -1,4 +1,4 @@
-use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, OpenAppRequest, ScrollEvent, TextEvent, input_event};
+use zc_protocol::protocol::{InputEvent, KeyboardEvent, MouseEvent, NavAction, NavEvent, OpenAppRequest, ScrollEvent, TextEvent, input_event};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VIRTUAL_WIDTH: u32 = 1920;
@@ -8,6 +8,14 @@ pub fn create_open_app_event(package_name: String) -> InputEvent {
     InputEvent {
         event: Some(input_event::Event::OpenApp(OpenAppRequest {
             package_name,
+        })),
+    }
+}
+
+pub fn create_nav_event(action: NavAction) -> InputEvent {
+    InputEvent {
+        event: Some(input_event::Event::Nav(NavEvent {
+            action: action as i32,
         })),
     }
 }

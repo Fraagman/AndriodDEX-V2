@@ -1,5 +1,6 @@
 use egui::{Color32, FontId, Pos2, Rect, Rounding, Stroke, Vec2};
 use zc_network::ConnectionPhase;
+use zc_protocol::protocol::NavAction;
 use super::theme::*;
 use super::types::{UiActions, UiState, ALL_APPS};
 
@@ -68,6 +69,8 @@ pub fn render_taskbar(
 
     // Left elements (Start button, Search bar, Task View, Pinned Apps)
     let mut current_x = taskbar_rect.min.x;
+    let search_width = 180.0;
+    let task_view_width = 40.0;
 
     // --- 1. Start Button ---
     let start_btn_width = 48.0;
@@ -107,83 +110,96 @@ pub fn render_taskbar(
     }
     current_x += start_btn_width;
 
-    // --- 2. Search Box ---
-    let search_width = 180.0;
-    let search_box_rect = Rect::from_min_size(
-        Pos2::new(current_x + 4.0, taskbar_rect.min.y + 6.0),
-        Vec2::new(search_width, taskbar_height - 12.0),
-    );
-    painter.rect(
-        search_box_rect,
-        Rounding::same(2.0),
-        Color32::from_rgb(32, 32, 36),
-        Stroke::new(1.0, Color32::from_rgb(55, 55, 60)),
-    );
-    painter.text(
-        Pos2::new(search_box_rect.min.x + 8.0, search_box_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "⌕",
-        FontId::proportional(14.0),
-        COLOR_TEXT_SECONDARY,
-    );
+    // Responsive left cluster: the system tray on the right is fixed-width, so on
+    // narrow windows the search box, task view and pinned apps are dropped in that
+    // order (they all remain reachable through the Start menu) instead of colliding
+    // with the tray.
+    let right_tray_width = 4.0 + 38.0 + 72.0 + 34.0 + 65.0 + 34.0 + 40.0 + 32.0 * 3.0 + 34.0;
+    let left_limit = taskbar_rect.max.x - right_tray_width - 8.0;
 
-    egui::Area::new(egui::Id::new("taskbar_search_area"))
-        .fixed_pos(Pos2::new(search_box_rect.min.x + 24.0, search_box_rect.min.y + 2.0))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            ui.set_max_width(search_width - 30.0);
-            let edit_resp = ui.add(
-                egui::TextEdit::singleline(&mut ui_state.search_query)
-                    .hint_text("Type here to search")
-                    .frame(false)
-                    .text_color(COLOR_TEXT_PRIMARY)
-                    .font(FontId::proportional(12.0)),
-            );
-            if edit_resp.changed() && !ui_state.search_query.is_empty() {
-                ui_state.start_menu_open = true;
-            }
-        });
+    // --- 2. Search Box (first to hide) ---
+    let show_search = current_x + search_width + 8.0 + 44.0 <= left_limit;
+    if show_search {
+        let search_box_rect = Rect::from_min_size(
+            Pos2::new(current_x + 4.0, taskbar_rect.min.y + 6.0),
+            Vec2::new(search_width, taskbar_height - 12.0),
+        );
+        painter.rect(
+            search_box_rect,
+            Rounding::same(2.0),
+            Color32::from_rgb(32, 32, 36),
+            Stroke::new(1.0, Color32::from_rgb(55, 55, 60)),
+        );
+        painter.text(
+            Pos2::new(search_box_rect.min.x + 8.0, search_box_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "⌕",
+            FontId::proportional(14.0),
+            COLOR_TEXT_SECONDARY,
+        );
 
-    current_x += search_width + 8.0;
+        egui::Area::new(egui::Id::new("taskbar_search_area"))
+            .fixed_pos(Pos2::new(search_box_rect.min.x + 24.0, search_box_rect.min.y + 2.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(search_width - 30.0);
+                let edit_resp = ui.add(
+                    egui::TextEdit::singleline(&mut ui_state.search_query)
+                        .hint_text("Type here to search")
+                        .frame(false)
+                        .text_color(COLOR_TEXT_PRIMARY)
+                        .font(FontId::proportional(12.0)),
+                );
+                if edit_resp.changed() && !ui_state.search_query.is_empty() {
+                    ui_state.start_menu_open = true;
+                }
+            });
 
-    // --- 3. Task View Button (⧉) ---
-    let task_view_width = 40.0;
-    let task_view_rect = Rect::from_min_size(
-        Pos2::new(current_x, taskbar_rect.min.y),
-        Vec2::new(task_view_width, taskbar_height),
-    );
-    let tv_hovered = is_hovered(ctx, task_view_rect);
-    let tv_clicked = is_clicked(ctx, task_view_rect);
-    if tv_clicked {
-        ui_state.diagnostics_open = !ui_state.diagnostics_open;
+        current_x += search_width + 8.0;
     }
-    if tv_hovered || ui_state.diagnostics_open {
-        painter.rect_filled(task_view_rect, Rounding::ZERO, COLOR_HOVER_BG);
-    }
-    painter.text(
-        task_view_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "⧉",
-        FontId::proportional(15.0),
-        if ui_state.diagnostics_open { COLOR_ACCENT_BLUE } else { COLOR_TEXT_PRIMARY },
-    );
-    if tv_hovered {
-        egui::show_tooltip_text(ctx, egui::Id::new("tv_tip"), "Task View & Diagnostics HUD");
-    }
-    current_x += task_view_width + 4.0;
 
-    // Subtle divider
-    painter.line_segment(
-        [
-            Pos2::new(current_x, taskbar_rect.min.y + 10.0),
-            Pos2::new(current_x, taskbar_rect.max.y - 10.0),
-        ],
-        Stroke::new(1.0, Color32::from_rgb(50, 50, 54)),
-    );
-    current_x += 6.0;
+    // --- 3. Task View Button (⧉) — keeps room for at least one pinned app ---
+    if current_x + task_view_width + 44.0 <= left_limit {
+        let task_view_rect = Rect::from_min_size(
+            Pos2::new(current_x, taskbar_rect.min.y),
+            Vec2::new(task_view_width, taskbar_height),
+        );
+        let tv_hovered = is_hovered(ctx, task_view_rect);
+        let tv_clicked = is_clicked(ctx, task_view_rect);
+        if tv_clicked {
+            ui_state.diagnostics_open = !ui_state.diagnostics_open;
+        }
+        if tv_hovered || ui_state.diagnostics_open {
+            painter.rect_filled(task_view_rect, Rounding::ZERO, COLOR_HOVER_BG);
+        }
+        painter.text(
+            task_view_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "⧉",
+            FontId::proportional(15.0),
+            if ui_state.diagnostics_open { COLOR_ACCENT_BLUE } else { COLOR_TEXT_PRIMARY },
+        );
+        if tv_hovered {
+            egui::show_tooltip_text(ctx, egui::Id::new("tv_tip"), "Task View & Diagnostics HUD");
+        }
+        current_x += task_view_width + 4.0;
 
-    // --- 4. Pinned Apps ---
+        // Subtle divider
+        painter.line_segment(
+            [
+                Pos2::new(current_x, taskbar_rect.min.y + 10.0),
+                Pos2::new(current_x, taskbar_rect.max.y - 10.0),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(50, 50, 54)),
+        );
+        current_x += 6.0;
+    }
+
+    // --- 4. Pinned Apps (as many as fit) ---
     for app in ALL_APPS.iter().filter(|a| a.is_pinned) {
+        if current_x + 44.0 > left_limit {
+            break; // window too narrow — the app stays available in the Start menu
+        }
         let app_rect = Rect::from_min_size(
             Pos2::new(current_x, taskbar_rect.min.y),
             Vec2::new(44.0, taskbar_height),
@@ -385,6 +401,43 @@ pub fn render_taskbar(
         FontId::proportional(13.0),
         COLOR_TEXT_PRIMARY,
     );
+
+    // --- Navigation Buttons (Back / Home / Recents) ---
+    // Global navigation performed on the phone through its accessibility service.
+    // Without that optional service the phone ignores the events, so the buttons
+    // stay visible and simply do nothing.
+    let nav_buttons: [(&str, NavAction, &str); 3] = [
+        ("←", NavAction::NavBack, "Back"),
+        ("⌂", NavAction::NavHome, "Home"),
+        ("▤", NavAction::NavRecents, "Recents"),
+    ];
+    for (glyph, nav_action, tip) in nav_buttons.iter() {
+        right_x -= 32.0;
+        let nav_rect = Rect::from_min_size(
+            Pos2::new(right_x, taskbar_rect.min.y),
+            Vec2::new(32.0, taskbar_height),
+        );
+        let nav_hovered = is_hovered(ctx, nav_rect);
+        let nav_clicked = is_clicked(ctx, nav_rect);
+        if nav_clicked {
+            actions.nav_action = Some(*nav_action);
+        }
+        if nav_hovered {
+            painter.rect_filled(nav_rect, Rounding::ZERO, COLOR_HOVER_BG);
+            egui::show_tooltip_text(
+                ctx,
+                egui::Id::new(format!("nav_{}_tip", tip)),
+                format!("{} (needs the AndroidDEX accessibility service on the phone)", tip),
+            );
+        }
+        painter.text(
+            nav_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            *glyph,
+            FontId::proportional(13.0),
+            COLOR_TEXT_PRIMARY,
+        );
+    }
 
     // --- Network Status Icon (📶 / Ethernet) ---
     right_x -= 40.0;

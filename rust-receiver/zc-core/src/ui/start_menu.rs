@@ -17,8 +17,10 @@ pub fn render_start_menu(
 
     let screen_rect = ctx.screen_rect();
     let taskbar_height = 42.0;
-    let menu_width = 620.0;
-    let menu_height = 510.0;
+    // Clamp to the window so a short display never pushes the menu (or its app
+    // rows) off-screen.
+    let menu_width = 620.0f32.min(screen_rect.width());
+    let menu_height = 510.0f32.min(screen_rect.max.y - taskbar_height);
 
     let menu_rect = Rect::from_min_size(
         Pos2::new(0.0, screen_rect.max.y - taskbar_height - menu_height),
@@ -138,8 +140,6 @@ pub fn render_start_menu(
             ui_state.running_apps.insert(app.id);
             if app.id == "settings" {
                 ui_state.settings_open = true;
-            } else if app.id == "diagnostics" {
-                ui_state.diagnostics_open = true;
             }
             ui_state.start_menu_open = false;
         }

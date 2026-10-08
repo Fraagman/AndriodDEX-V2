@@ -37,25 +37,6 @@ class DesktopPresentation(
     /** The Compose view that receives input from the PC. */
     private var contentView: ComposeView? = null
 
-    private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var heartbeatTick = 0
-    private val heartbeatRunnable = object : Runnable {
-        override fun run() {
-            // Always push a fresh frame so the encoder surface never starves.
-            // ComposeView.invalidate() schedules a Choreographer frame on the
-            // VirtualDisplay's SurfaceFlinger slot, which gives the H.264 encoder
-            // the pixel data it needs to produce an IDR on the next PARAMETER_KEY_REQUEST_SYNC_FRAME.
-            contentView?.invalidate()
-            heartbeatTick++
-            // Request a keyframe every ~1 s (10 × 100 ms) so a connecting client
-            // never waits more than one second for a decodable picture.
-            if (heartbeatTick % 10 == 0) {
-                DisplayService.requestKeyframe()
-            }
-            heartbeatHandler.postDelayed(this, 100)
-        }
-    }
-
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
 
@@ -75,20 +56,21 @@ class DesktopPresentation(
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         window?.setBackgroundDrawableResource(android.R.color.transparent)
-        window?.clearFlags(
-            android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND or
-            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
-        )
+        // Dialogs dim what is behind them; on the VirtualDisplay that would darken the
+        // desktop behind the shell window. The focusable flags stay at their defaults:
+        // input reaches the shell through LocalInputDispatcher's direct view dispatch,
+        // which does not depend on window focus, and there is no IME on this display
+        // for ALT_FOCUSABLE_IM to matter.
+        window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
 
         savedStateRegistryController.performRestore(savedInstanceState)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
         val composeView = ComposeView(context).apply {
             setContent {
-                DesktopShell(displayId = display.displayId)
+                DesktopShell()
             }
         }
 
@@ -113,21 +95,32 @@ class DesktopPresentation(
         // Kick an immediate keyframe so the first encoded frame is an IDR,
         // giving a late-joining receiver a decodable picture right away.
         DisplayService.requestKeyframe()
-        heartbeatHandler.postDelayed(heartbeatRunnable, 100)
     }
 
     fun onResume() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
     }
 
+    /**
+     * The framework never calls this for a Presentation, but the Compose UI inside
+     * expects a fully resumed lifecycle owner, so [DisplayService] invokes it right
+     * after [show].
+     */
+    fun onPause() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    }
+
     override fun onStop() {
         super.onStop()
-        heartbeatHandler.removeCallbacks(heartbeatRunnable)
         LocalInputDispatcher.detach()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
     }
 
     override fun dismiss() {
+        // Full lifecycle order before teardown: PAUSE, then the framework's
+        // dismiss path drives our onStop (STOP), then DESTROY releases the
+        // ViewModelStore the ComposeView may still be reading.
+        onPause()
         super.dismiss()
         LocalInputDispatcher.detach()
         contentView = null

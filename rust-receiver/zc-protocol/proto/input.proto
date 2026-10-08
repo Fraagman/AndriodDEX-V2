@@ -55,6 +55,19 @@ message OpenAppRequest {
     string package_name = 1;
 }
 
+// Global navigation (back / home / recents), performed on the phone through its
+// DesktopAccessibilityService. The actions are no-ops on the phone when that
+// optional service is not enabled.
+message NavEvent {
+    NavAction action = 1;
+}
+
+enum NavAction {
+    NAV_BACK = 0;
+    NAV_HOME = 1;
+    NAV_RECENTS = 2;
+}
+
 message InputEvent {
     oneof event {
         MouseEvent mouse = 1;
@@ -63,5 +76,6 @@ message InputEvent {
         KeyframeRequest request_keyframe = 4;
         TextEvent text = 5;
         OpenAppRequest open_app = 6;
+        NavEvent nav = 7;
     }
 }

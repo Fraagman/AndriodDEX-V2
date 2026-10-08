@@ -2,7 +2,6 @@ package com.example.androidhost
 
 import android.content.Intent
 import android.os.Bundle
-import android.view.Display
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -55,8 +54,7 @@ class DebugDesktopActivity : FragmentActivity() {
                 DesktopShellContent(
                     isTetheringReady = true,
                     surface = null,
-                    shellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel,
-                    displayId = Display.DEFAULT_DISPLAY
+                    shellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel
                 )
             }
         }

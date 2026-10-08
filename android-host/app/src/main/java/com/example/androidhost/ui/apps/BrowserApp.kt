@@ -209,10 +209,23 @@ fun BrowserApp(
                                 evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
                             }
                         }
-                        // Removed focus listener; using touch listener instead.
+                        // Register immediately (not just on touch): the dispatcher routes
+                        // pointer events straight into this WebView when the cursor is
+                        // over it, so the first click needs the bridge armed already.
+                        // Eligibility: only while this browser window is the shell's
+                        // top window — a WebView covered by another window must not
+                        // swallow clicks aimed at the window above it.
+                        val shell = com.example.androidhost.vm.ShellHolder.shellViewModel
+                        val isTopWindow: () -> Boolean = {
+                            // Top of the shell's z-order (list order) must be this very
+                            // browser window; any window above it disqualifies the page
+                            // from taking pointer/key events.
+                            shell.windows.value.lastOrNull { !it.isMinimized }?.id == windowState.id
+                        }
+                        LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge, this, isTopWindow)
                         setOnTouchListener { _, event ->
                             if (event.action == android.view.MotionEvent.ACTION_DOWN) {
-                                LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge, this)
+                                LocalInputDispatcher.registerWebViewBridge(bridgeOwner, bridge, this, isTopWindow)
                             }
                             false
                         }
