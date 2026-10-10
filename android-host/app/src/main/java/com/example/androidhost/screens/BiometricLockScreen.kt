@@ -23,13 +23,16 @@ import androidx.fragment.app.FragmentActivity
  * audio capture; unlocking requires biometrics or the device credential.
  *
  * A dead-end here would strand the user (no enrolled fingerprint, a cancelled
- * prompt, a transient error), so this screen always offers "Try again" and an
- * explicit "Skip" that ends the locked session — the same exit a forced app
- * restart would give, made visible instead of hidden.
+ * prompt, a transient error), so this screen offers "Try again" and an explicit
+ * "End locked session" escape. The escape NEVER unlocks: it ends the session
+ * (services are already stopped at lock time) and drops the user back to the
+ * top-level screen — returning to the desktop requires either a successful
+ * biometric or a deliberate relaunch.
  */
 @Composable
 fun BiometricLockScreen(
-    onUnlockSuccess: () -> Unit
+    onUnlockSuccess: () -> Unit,
+    onEndSession: () -> Unit
 ) {
     val fragmentActivity = LocalContext.current as? FragmentActivity
     var errorMsg by remember { mutableStateOf<String?>(null) }
@@ -108,8 +111,11 @@ fun BiometricLockScreen(
                 }) {
                     Text("Try again")
                 }
-                TextButton(onClick = onUnlockSuccess) {
-                    Text("Skip — end locked session")
+                // Ends the locked session. This must never unlock: onUnlockSuccess
+                // restarts the stream, and a lock that can be tapped through is
+                // no lock at all.
+                TextButton(onClick = onEndSession) {
+                    Text("End locked session")
                 }
             }
         }

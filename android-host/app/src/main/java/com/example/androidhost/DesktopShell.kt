@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -73,15 +74,24 @@ fun DesktopShellContent(
 
         // Windows. List order is the z-order — the view model raises a window by
         // moving it to the end of the list.
+        //
+        // key(window.id): without it the forEach composes by POSITION, so a
+        // raise (reorder) mid-gesture discards and recreates every affected
+        // subtree. A press that starts on a Button — WindowChrome raises the
+        // window on press — then loses its subtree before UP cancels the
+        // pointer input and the click never fires. With a stable key the same
+        // node instance moves to the end and the in-flight gesture survives.
         windows.forEach { window ->
-            val appConfig = AppRegistry.apps[window.packageName]
-            if (appConfig != null) {
-                appConfig.content(
-                    window,
-                    { shellViewModel?.closeWindow(window.id) },
-                    { shellViewModel?.minimizeWindow(window.id) },
-                    { shellViewModel?.maximizeWindow(window.id) }
-                )
+            key(window.id) {
+                val appConfig = AppRegistry.apps[window.packageName]
+                if (appConfig != null) {
+                    appConfig.content(
+                        window,
+                        { shellViewModel?.closeWindow(window.id) },
+                        { shellViewModel?.minimizeWindow(window.id) },
+                        { shellViewModel?.maximizeWindow(window.id) }
+                    )
+                }
             }
         }
     }

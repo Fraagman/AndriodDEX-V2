@@ -81,7 +81,11 @@ fun TerminalWindow(
 @Composable
 private fun TerminalSurface() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val rootDir = remember { context.filesDir }
+    // The jail root is a dedicated subfolder of filesDir — NOT filesDir itself,
+    // which holds pairing_v2.psk and tls_identity.bin one level up. Nothing
+    // secret is created inside it, and every path-taking program resolves
+    // through TerminalSandbox.resolveInRoot.
+    val rootDir = remember { TerminalSandbox.jailRoot(context.filesDir) }
     var currentDir by remember { mutableStateOf(rootDir) }
     val scrollback: SnapshotStateList<String> = remember { mutableStateListOf() }
     var currentInput by remember { mutableStateOf("") }
@@ -92,16 +96,13 @@ private fun TerminalSurface() {
     val textOwner = remember { Any() }
     var currentProcess: java.lang.Process? = null
 
-    // Read-only programs the sandboxed terminal will execute; everything else is
-    // refused. Output caps keep a huge file from freezing the UI or ballooning.
-    val ALLOWED_PROGRAMS = setOf("ls", "pwd", "echo", "date", "whoami", "cat", "df", "uname", "head", "tail", "wc")
     val MAX_OUTPUT_CHARS = 64_000
     val MAX_OUTPUT_LINES = 400
     val WHITESPACE = Regex("\\s+")
 
     LaunchedEffect(Unit) {
         scrollback.add("AndroidDex terminal — sandboxed to ${rootDir.absolutePath}")
-        scrollback.add("Read-only commands only: ls pwd cat echo date whoami df uname head tail wc")
+        scrollback.add("Read-only commands only: ${TerminalSandbox.ALLOWED_PROGRAMS.joinToString(" ")}")
         focusRequester.requestFocus()
     }
 
@@ -121,9 +122,11 @@ private fun TerminalSurface() {
      * would expose the app's private files (the pairing key, the TLS identity) and
      * any binary the app uid can exec.
      *
-     * Instead: an allow-list of harmless read-only programs, executed WITHOUT a
-     * shell (arguments are passed literally, so `;`, `|`, `$()` and backticks
-     * cannot smuggle commands), and `cat` restricted to paths inside the sandbox.
+     * [TerminalSandbox] owns the rules: an allow-list of read-only programs,
+     * executed WITHOUT a shell (arguments are literal, so `;`, `|`, `$()` and
+     * backticks cannot smuggle commands), and every path-taking program's
+     * operands resolved and jailed to [rootDir] (filesDir/home, which holds no
+     * secrets).
      */
     fun runCommand(cmd: String) {
         if (busy) return
@@ -131,13 +134,12 @@ private fun TerminalSurface() {
         scrollback.add("${prompt(currentDir)} $cmd")
         if (trimmed.isEmpty()) return
 
-        // `cd` is handled in-process so it persists across commands. Sandbox to filesDir.
+        // `cd` is handled in-process so it persists across commands. The same
+        // canonical check as every path operand.
         if (trimmed == "cd" || trimmed.startsWith("cd ")) {
             val target = trimmed.removePrefix("cd").trim().ifEmpty { rootDir.absolutePath }
-            val resolved = File(currentDir, target).canonicalFile
-            // Compare with the root + separator: startsWith on the bare root would
-            // also accept a sibling directory named "files_evil".
-            if (resolved != rootDir && !resolved.absolutePath.startsWith(rootDir.absolutePath + File.separator)) {
+            val resolved = TerminalSandbox.resolveInRoot(rootDir, currentDir, target)
+            if (resolved == null) {
                 scrollback.add("cd: $target: outside sandbox (${rootDir.absolutePath})")
             } else if (!resolved.exists() || !resolved.isDirectory) {
                 scrollback.add("cd: $target: No such file or directory")
@@ -148,24 +150,9 @@ private fun TerminalSurface() {
         }
 
         val tokens = trimmed.split(WHITESPACE)
-        val program = tokens[0]
-        if (program !in ALLOWED_PROGRAMS) {
-            scrollback.add("$program: not allowed — sandboxed terminal offers: ${ALLOWED_PROGRAMS.joinToString(" ")}")
+        TerminalSandbox.validate(rootDir, currentDir, tokens)?.let { refusal ->
+            scrollback.add(refusal)
             return
-        }
-        if (program == "cat") {
-            val targets = tokens.drop(1).filter { !it.startsWith("-") }
-            if (targets.isEmpty()) {
-                scrollback.add("cat: missing file operand")
-                return
-            }
-            for (t in targets) {
-                val resolved = File(currentDir, t).canonicalFile
-                if (!resolved.absolutePath.startsWith(rootDir.absolutePath + File.separator)) {
-                    scrollback.add("cat: $t: outside sandbox (${rootDir.absolutePath})")
-                    return
-                }
-            }
         }
 
         busy = true

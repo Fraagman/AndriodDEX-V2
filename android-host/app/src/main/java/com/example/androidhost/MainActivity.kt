@@ -109,6 +109,16 @@ class MainActivity : FragmentActivity() {
                 Screen.LOCK -> com.example.androidhost.screens.BiometricLockScreen(
                     onUnlockSuccess = {
                         currentScreen.value = Screen.DESKTOP
+                    },
+                    onEndSession = {
+                        // "End locked session" must NEVER unlock: the services were
+                        // already stopped at lock time, so ending means leaving the
+                        // desktop entirely — back to the top-level screen, from which
+                        // the only path to DESKTOP is a deliberate relaunch.
+                        ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
+                        ctx.stopService(Intent(ctx, com.example.androidhost.service.AudioCaptureService::class.java))
+                        com.example.androidhost.service.AudioCaptureService.isServiceRunning.value = false
+                        currentScreen.value = Screen.PAIRING
                     }
                 )
                 Screen.DESKTOP -> ControlPanel(

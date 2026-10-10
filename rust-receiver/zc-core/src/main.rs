@@ -20,6 +20,75 @@ const INPUT_BUFFER_MAX: usize = 1000;
 /// unbounded allocation — one hostile or corrupt length is an instant OOM.
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// Depth of the video frame queue between the QUIC task and the render loop.
+const VIDEO_QUEUE_DEPTH: usize = 4;
+
+/// True when the frame is an IDR (keyframe), matching the receiver's
+/// `is_keyframe` semantics everywhere else.
+fn frame_is_keyframe(frame: &HybridFrame) -> bool {
+    matches!(&frame.payload, Some(zc_protocol::video::hybrid_frame::Payload::Video(v)) if v.is_keyframe)
+}
+
+/// Bounded video queue between the tokio task and the render loop.
+///
+/// The push NEVER blocks: this replaced a `sync_channel(4)` whose blocking
+/// `send` ran inside the tokio task — with the queue full and the render loop
+/// stalled, the worker thread froze and audio (processed in the same select
+/// loop) stalled behind video. On a full queue the push evicts the OLDEST
+/// non-keyframe (P-frames are recoverable via a keyframe request; a queued IDR
+/// is not); it never blocks and returns whether a frame was dropped so the
+/// pusher can raise the keyframe flag.
+struct VideoFrameQueue {
+    inner: Mutex<VecDeque<HybridFrame>>,
+    capacity: usize,
+}
+
+impl VideoFrameQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::with_capacity(capacity)),
+            capacity,
+        }
+    }
+
+    /// Pushes [frame] without ever blocking. Returns true when a frame was
+    /// dropped (an evicted P-frame, or the newcomer when the queue holds only
+    /// keyframes) — the caller then raises the keyframe flag.
+    fn push(&self, frame: HybridFrame) -> bool {
+        let mut q = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut dropped = false;
+        if q.len() >= self.capacity {
+            if let Some(idx) = q.iter().position(|f| !frame_is_keyframe(f)) {
+                q.remove(idx);
+                dropped = true;
+            } else if !frame_is_keyframe(&frame) {
+                // All queued frames are keyframes and the newcomer is a P-frame:
+                // drop the newcomer rather than a queued IDR.
+                return true;
+            } else {
+                // All keyframes plus a new keyframe: the bound wins.
+                q.pop_front();
+                dropped = true;
+            }
+        }
+        q.push_back(frame);
+        dropped
+    }
+
+    /// Takes every queued frame (the render loop's batch catch-up then skips to
+    /// the newest keyframe in the batch — the §3.1 invariant).
+    fn drain(&self) -> Vec<HybridFrame> {
+        let mut q = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        q.drain(..).collect()
+    }
+}
+
 /// True while either kiosk lock is engaged: the registry-detected assigned-access
 /// profile, or the receiver's own UI-toggled lock. While locked, the window close
 /// button and Escape-to-exit do nothing; Ctrl+Alt+Esc releases the soft lock.
@@ -61,7 +130,11 @@ fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(4433);
 
-    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<HybridFrame>(4);
+    // Video frames from the QUIC task to the render loop: a bounded, non-blocking
+    // queue. `frame_dropped_flag` is the latch the task raises when the queue
+    // dropped a P-frame; the render loop folds it into its need_keyframe state.
+    let video_queue = Arc::new(VideoFrameQueue::new(VIDEO_QUEUE_DEPTH));
+    let frame_dropped_flag = Arc::new(AtomicBool::new(false));
     
     // Initialize audio player on main thread so stream lives forever
     let (_audio_player, audio_sender) = match zc_audio::AudioPlayer::new() {
@@ -97,11 +170,16 @@ fn main() {
     let is_muted_for_quic = is_audio_muted.clone();
     let audio_vol_for_quic = audio_volume_pct.clone();
     
+    // Clones for the QUIC task.
+    let video_queue_for_quic = video_queue.clone();
+    let frame_dropped_for_quic = frame_dropped_flag.clone();
+
     rt.spawn(async move {
         let mut attempt_backoff: u32 = 0;
         loop {
             let phase_clone = phase_for_quic.clone();
-            let frame_tx_loop = frame_tx.clone();
+            let video_queue_loop = video_queue_for_quic.clone();
+            let frame_dropped_loop = frame_dropped_for_quic.clone();
             let audio_sender_loop = audio_sender.clone();
             let input_buffer_loop = input_buffer_for_quic.clone();
             let is_connected_loop = is_connected_quic.clone();
@@ -163,7 +241,8 @@ fn main() {
                                     }
                                     Ok(mut stream) => {
 
-                                        let frame_tx_inner = frame_tx_loop.clone();
+                                        let video_queue_inner = video_queue_loop.clone();
+                                        let drop_flag_inner = frame_dropped_loop.clone();
                                         let ap_inner = audio_sender_loop.clone();
 
                                         // Process this stream inline (no detached spawn)
@@ -194,13 +273,21 @@ fn main() {
                                             let payload = &frame_buf[1..];
 
                                             if msg_type == 0x01 {
-                                                // Video. sync_channel(4): a full queue
-                                                // blocks this read, which backs the QUIC
-                                                // flow control up to the phone's
-                                                // drop-oldest queue — backpressure all
-                                                // the way instead of unbounded buffering.
+                                                // Video. The push never blocks
+                                                // (this replaced a sync_channel
+                                                // whose blocking send froze the
+                                                // tokio worker — and audio in the
+                                                // same loop — behind video). On a
+                                                // full queue the oldest P-frame is
+                                                // evicted and the render loop is
+                                                // told to wait for a keyframe; the
+                                                // render side keeps its §3.1
+                                                // batch catch-up.
                                                 if let Ok(frame) = HybridFrame::decode(payload) {
-                                                    let sent = frame_tx_inner.send(frame).is_ok();
+                                                    let dropped = video_queue_inner.push(frame);
+                                                    if dropped {
+                                                        drop_flag_inner.store(true, Ordering::SeqCst);
+                                                    }
                                                     // The render loop sleeps in ControlFlow::Wait;
                                                     // only an explicit request wakes it, so a
                                                     // frame arrival must raise one.
@@ -208,9 +295,6 @@ fn main() {
                                                         if let Some(w) = w_guard.as_ref() {
                                                             w.request_redraw();
                                                         }
-                                                    }
-                                                    if !sent {
-                                                        return "Frame receiver is gone".to_string();
                                                     }
                                                 } else {
                                                     eprintln!("Failed to decode HybridFrame");
@@ -736,10 +820,13 @@ fn main() {
                         // decoder is slower than the sender), decode only from the
                         // newest keyframe in the batch: the dropped prefix is stale,
                         // and nothing after a keyframe references frames before it.
-                        let mut batch: Vec<HybridFrame> = Vec::new();
-                        while let Ok(hybrid) = frame_rx.try_recv() {
-                            batch.push(hybrid);
+                        // A queue-side P-frame drop (VideoFrameQueue::push on a full
+                        // queue) folds in here: skip until the next IDR instead of
+                        // feeding the decoder a gap it must error on first.
+                        if frame_dropped_flag.swap(false, Ordering::SeqCst) {
+                            need_keyframe = true;
                         }
+                        let batch: Vec<HybridFrame> = video_queue.drain();
                         let start_at = batch
                             .iter()
                             .rposition(|h| {
@@ -1059,5 +1146,65 @@ fn main() {
         renderer::show_fatal_error("AndroidDex Receiver", &format!("event loop failed: {e}"));
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(key: bool) -> HybridFrame {
+        HybridFrame {
+            payload: Some(zc_protocol::video::hybrid_frame::Payload::Video(
+                zc_protocol::video::VideoFrame {
+                    is_keyframe: key,
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn video_queue_evicts_the_oldest_non_keyframe_on_a_full_queue() {
+        let q = VideoFrameQueue::new(3);
+        assert!(!q.push(frame(false))); // P1
+        assert!(!q.push(frame(false))); // P2
+        assert!(!q.push(frame(false))); // P3 (full now)
+        assert!(q.push(frame(false)), "the 4th P-frame must evict P1, not block");
+        let drained = q.drain();
+        assert_eq!(drained.len(), 3);
+        // P1 was evicted: the queue holds P2, P3, P4.
+        assert!(drained.iter().all(|f| !frame_is_keyframe(f)));
+    }
+
+    #[test]
+    fn video_queue_keeps_a_keyframe_when_evicting() {
+        let q = VideoFrameQueue::new(2);
+        assert!(!q.push(frame(true)));  // IDR
+        assert!(!q.push(frame(false))); // P (full)
+        // A new frame must evict the P-frame, never the IDR.
+        assert!(q.push(frame(false)));
+        let drained = q.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(frame_is_keyframe(&drained[0]), "the queued IDR must survive");
+    }
+
+    #[test]
+    fn video_queue_drops_an_incoming_p_frame_over_queued_idrs() {
+        let q = VideoFrameQueue::new(2);
+        assert!(!q.push(frame(true)));
+        assert!(!q.push(frame(true)));
+        // Queue holds only IDRs; an incoming P-frame is dropped itself.
+        assert!(q.push(frame(false)));
+        assert_eq!(q.drain().len(), 2);
+    }
+
+    #[test]
+    fn video_queue_never_blocks_or_grows_past_its_bound() {
+        let q = VideoFrameQueue::new(4);
+        for i in 0..1000 {
+            q.push(frame(i % 10 == 0));
+        }
+        assert!(q.drain().len() <= 4, "the queue must stay bounded");
+    }
 }
 

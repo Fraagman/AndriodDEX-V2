@@ -66,6 +66,15 @@ android {
         checkReleaseBuilds = true
         baseline = file("lint-baseline.xml")
     }
+
+    // Robolectric must see the merged manifest and resources: the Compose UI
+    // tests (BiometricLockScreenTest) launch the ComponentActivity that
+    // ui-test-manifest declares in the debug manifest.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -119,6 +128,8 @@ dependencies {
   // Local tests: jUnit, coroutines, Android runner
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
+  // Compose UI tests under Robolectric (BiometricLockScreen lock-bypass test)
+  testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.kotlinx.coroutines.test)
 
   // Instrumented tests: jUnit rules and runners

@@ -83,14 +83,20 @@ const MAX_COOLDOWN_ENTRIES: usize = 64;
 
 // -- Shared server state ---------------------------------------------------------------
 
-/// Bounded, drop-oldest input queue. A hostile or buggy client must not be able to
-/// grow the phone's heap without bound, and stale input must be dropped in favour of
-/// fresh events rather than delaying them: the queue holds [capacity] events; a push
-/// into a full queue evicts the oldest. The Kotlin consumer polls one event at a time.
+/// Bounded input queue with a per-entry criticality flag. A hostile or buggy
+/// client must not be able to grow the phone's heap without bound, and stale
+/// input must be dropped in favour of fresh events rather than delaying them.
+/// On a full queue a push evicts the oldest DROPPABLE entry (pure mouse
+/// motion) and never a critical one (button state, keys, text, nav, open_app)
+/// while a move exists to evict instead. The Kotlin consumer polls one event
+/// at a time.
 struct InputQueue {
-    inner: Mutex<VecDeque<Vec<u8>>>,
+    inner: Mutex<VecDeque<(Vec<u8>, bool)>>,
     available: Condvar,
     capacity: usize,
+    /// Critical entries evicted because the queue was full of critical events.
+    /// Non-zero means the consumer stopped draining; reported in the log.
+    evicted_critical: std::sync::atomic::AtomicU64,
 }
 
 impl InputQueue {
@@ -99,18 +105,33 @@ impl InputQueue {
             inner: Mutex::new(VecDeque::with_capacity(capacity)),
             available: Condvar::new(),
             capacity,
+            evicted_critical: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    fn push(&self, event: Vec<u8>) {
+    /// Pushes [event], tagged `droppable` (pure motion). On a full queue:
+    ///  - evicts the oldest droppable entry if one exists (never a critical
+    ///    entry while a move is available),
+    ///  - a droppable newcomer into an all-critical queue is dropped itself,
+    ///  - a critical newcomer into an all-critical queue evicts the oldest
+    ///    entry so the memory bound holds, counted in [Self::evicted_critical].
+    fn push_classified(&self, event: Vec<u8>, droppable: bool) {
         let mut q = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         if q.len() >= self.capacity {
-            q.pop_front();
+            if let Some(idx) = q.iter().position(|(_, d)| *d) {
+                q.remove(idx);
+            } else if droppable {
+                // All entries are critical: a pure move never displaces one.
+                return;
+            } else {
+                self.evicted_critical.fetch_add(1, Ordering::SeqCst);
+                q.pop_front();
+            }
         }
-        q.push_back(event);
+        q.push_back((event, droppable));
         drop(q);
         self.available.notify_one();
     }
@@ -123,7 +144,7 @@ impl InputQueue {
         };
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if let Some(event) = q.pop_front() {
+            if let Some((event, _)) = q.pop_front() {
                 return Some(event);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -139,6 +160,127 @@ impl InputQueue {
                 return None;
             }
         }
+    }
+}
+
+/// Which oneof case a serialized `InputEvent` carries, read from the wire bytes.
+///
+/// The oneof is InputEvent's ONLY field, so the first tag byte identifies the
+/// member: every member is a message (wire type 2), giving tags
+/// mouse=0x0A, keyboard=0x12, scroll=0x1A, keyframe=0x22, text=0x2A,
+/// open_app=0x32, nav=0x3A. This is a classification used ONLY to decide which
+/// events a flood may drop — the authoritative parse is the generated Kotlin
+/// class, and these byte shapes are pinned cross-language by the Kotlin
+/// `InputEventGoldenTest`. Unrecognized or malformed events classify as
+/// [InputEventKind::Unknown] and are never dropped (conservative: delivery is
+/// bounded by the queue and Kotlin's parser drops malformed events itself).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum InputEventKind {
+    /// The level-triggered button mask from MouseEvent field 3 (0 when the
+    /// field is absent, per proto3 default).
+    Mouse { buttons: u32 },
+    Keyboard,
+    Scroll,
+    Text,
+    OpenApp,
+    Nav,
+    KeyframeRequest,
+    Unknown,
+}
+
+fn classify_input_event(data: &[u8]) -> InputEventKind {
+    let Some((&tag, rest)) = data.split_first() else {
+        return InputEventKind::Unknown;
+    };
+    match tag {
+        0x0A => InputEventKind::Mouse {
+            buttons: parse_mouse_buttons(rest),
+        },
+        0x12 => InputEventKind::Keyboard,
+        0x1A => InputEventKind::Scroll,
+        0x22 => InputEventKind::KeyframeRequest,
+        0x2A => InputEventKind::Text,
+        0x32 => InputEventKind::OpenApp,
+        0x3A => InputEventKind::Nav,
+        _ => InputEventKind::Unknown,
+    }
+}
+
+/// Reads a protobuf varint, advancing `pos`. Returns None on truncation.
+fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    while *pos < data.len() && shift < 64 {
+        let byte = data[*pos];
+        *pos += 1;
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// Extracts MouseEvent's `buttons` (field 3) from the submessage that follows
+/// the oneof tag: `[len varint][body]`. The body's known fields are all
+/// varints; other wire types are skipped structurally. Returns `u32::MAX` when
+/// the framing is unparseable — that can never equal a previously delivered
+/// mask, so a malformed event never qualifies as a pure move.
+fn parse_mouse_buttons(rest: &[u8]) -> u32 {
+    let mut pos = 0usize;
+    let Some(body_len) = read_varint(rest, &mut pos) else {
+        return u32::MAX;
+    };
+    let body_len = body_len as usize;
+    // A length larger than the buffer is a truncated/hostile event.
+    if body_len > rest.len().saturating_sub(pos) {
+        return u32::MAX;
+    }
+    let body_end = pos + body_len;
+    while pos < body_end {
+        let Some(tag) = read_varint(rest, &mut pos) else {
+            return u32::MAX;
+        };
+        let field = tag >> 3;
+        let wire_type = tag & 0x7;
+        match wire_type {
+            0 => {
+                let Some(value) = read_varint(rest, &mut pos) else {
+                    return u32::MAX;
+                };
+                if field == 3 {
+                    return value as u32;
+                }
+            }
+            1 => {
+                pos += 8;
+            }
+            2 => {
+                let Some(len) = read_varint(rest, &mut pos) else {
+                    return u32::MAX;
+                };
+                pos += len as usize;
+            }
+            5 => {
+                pos += 4;
+            }
+            _ => return u32::MAX,
+        }
+    }
+    // Field 3 absent: proto3 default 0 (no buttons held — hover or release).
+    0
+}
+
+/// True when `kind` is pure motion the rate limiter may drop without breaking
+/// input: a mouse sample whose button mask matches the last DELIVERED mask (a
+/// press or release is a state change and must always arrive), or a scroll.
+/// Keyboard, text, nav and open_app are always critical.
+fn is_droppable_kind(kind: InputEventKind, last_delivered_buttons: Option<u32>) -> bool {
+    match kind {
+        InputEventKind::Mouse { buttons } => Some(buttons) == last_delivered_buttons,
+        InputEventKind::Scroll => true,
+        _ => false,
     }
 }
 
@@ -877,6 +1019,10 @@ async fn read_input(server: Arc<Server>, conn: Connection) {
 
     let mut limiter = RateLimiter::new(250.0, 100.0);
     let mut dropped_for_rate: u64 = 0;
+    // The button mask of the last DELIVERED mouse sample. A mouse event whose
+    // mask differs from this is a press or a release — a state change that
+    // must always arrive, or the phone is left with a stuck button.
+    let mut last_delivered_buttons: Option<u32> = None;
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -894,21 +1040,43 @@ async fn read_input(server: Arc<Server>, conn: Connection) {
             return;
         }
 
-        if !limiter.allow() {
-            dropped_for_rate += 1;
-            if dropped_for_rate == 1 || dropped_for_rate % 500 == 0 {
-                log_w!("input rate limit in effect; {dropped_for_rate} events dropped so far");
-            }
-            continue;
-        }
-
         let mut data = vec![0u8; len];
         if let Err(e) = stream.read_exact(&mut data).await {
             log_w!("truncated input event: {e}");
             return;
         }
 
-        server.input_queue.push(data);
+        // Flood policy: over the rate budget, only pure mouse motion and scrolls
+        // are dropped. Button-state changes (mask differs from the last delivered
+        // sample), key events, text, nav and open_app are ALWAYS delivered — a
+        // limiter that eats a button-up leaves a drag stuck on the desktop, and
+        // a limiter that eats keys eats typing.
+        let kind = classify_input_event(&data);
+        // Pure-motion flag, computed against the mask BEFORE this event: a state
+        // change that has been admitted but not yet consumed must also be
+        // un-evictable in the queue.
+        let droppable = is_droppable_kind(kind, last_delivered_buttons);
+        if !limiter.allow() {
+            if droppable {
+                dropped_for_rate += 1;
+                if dropped_for_rate == 1 || dropped_for_rate % 500 == 0 {
+                    log_w!("input rate limit in effect; {dropped_for_rate} events dropped so far");
+                }
+                continue;
+            }
+        }
+        if let InputEventKind::Mouse { buttons } = kind {
+            last_delivered_buttons = Some(buttons);
+        }
+
+        server.input_queue.push_classified(data, droppable);
+        let evicted = server
+            .input_queue
+            .evicted_critical
+            .swap(0, Ordering::SeqCst);
+        if evicted > 0 {
+            log_e!("{evicted} critical input events evicted — the queue was full of undelivered non-motion events");
+        }
     }
 }
 
@@ -1152,5 +1320,265 @@ mod tests {
     fn untrusted_bytes_are_escaped_before_logging() {
         assert_eq!(printable(b"androiddex-v2"), "androiddex-v2");
         assert_eq!(printable(b"\x00\x1b[31m"), "\\x00\\x1b[31m");
+    }
+
+    // ---- Input flood policy (rate limiter + queue eviction) --------------------------
+
+    /// Serializes InputEvent{mouse: MouseEvent{x:1, y:1, buttons:B}} exactly the
+    /// way the receiver's prost encoding does (proto3: zero-valued fields are
+    /// absent). The byte shapes are pinned cross-language by the Kotlin
+    /// `InputEventGoldenTest`.
+    fn mouse_event(buttons: u32) -> Vec<u8> {
+        let mut body = vec![0x08, 0x01, 0x10, 0x01]; // x=1, y=1
+        if buttons != 0 {
+            body.push(0x18); // field 3 (buttons), varint
+            let mut b = buttons as u64;
+            loop {
+                let byte = (b & 0x7F) as u8;
+                b >>= 7;
+                if b == 0 {
+                    body.push(byte);
+                    break;
+                }
+                body.push(byte | 0x80);
+            }
+        }
+        let mut event = vec![0x0A, body.len() as u8]; // oneof mouse, length
+        event.extend_from_slice(&body);
+        event
+    }
+
+    /// InputEvent{keyboard: KeyboardEvent{keycode=57, pressed=true}}.
+    fn keyboard_event() -> Vec<u8> {
+        // KeyboardEvent body: keycode=57 (field 1 varint), pressed=true (field 2 varint)
+        let body = vec![0x08, 0x39, 0x10, 0x01];
+        let mut event = vec![0x12, body.len() as u8]; // oneof keyboard
+        event.extend_from_slice(&body);
+        event
+    }
+
+    /// InputEvent{scroll: ScrollEvent{...}} — only the oneof tag matters here.
+    fn scroll_event() -> Vec<u8> {
+        let body = vec![0x08, 0x64, 0x10, 0xC8, 0x01]; // x=100, y=200
+        let mut event = vec![0x1A, body.len() as u8];
+        event.extend_from_slice(&body);
+        event
+    }
+
+    fn text_event() -> Vec<u8> {
+        let body = b"hi".to_vec();
+        // TextEvent body: text="hi" (field 1, length-delimited)
+        let mut inner = vec![0x0A, 0x02];
+        inner.extend_from_slice(&body);
+        let mut event = vec![0x2A, inner.len() as u8];
+        event.extend_from_slice(&inner);
+        event
+    }
+
+    fn nav_event() -> Vec<u8> {
+        // NavEvent{action: NAV_HOME=1}
+        let body = vec![0x08, 0x01];
+        let mut event = vec![0x3A, body.len() as u8];
+        event.extend_from_slice(&body);
+        event
+    }
+
+    fn open_app_event() -> Vec<u8> {
+        // OpenAppRequest{package_name: "browser"}
+        let pkg = b"browser";
+        let mut inner = vec![0x0A, pkg.len() as u8];
+        inner.extend_from_slice(pkg);
+        let mut event = vec![0x32, inner.len() as u8];
+        event.extend_from_slice(&inner);
+        event
+    }
+
+    /// Admits [event] under the flood policy and updates the delivered-mask
+    /// state exactly like read_input does. Returns true when delivered.
+    fn admit_under_flood(
+        limiter: &mut RateLimiter,
+        last_delivered_buttons: &mut Option<u32>,
+        event: &[u8],
+    ) -> bool {
+        let kind = classify_input_event(event);
+        let droppable = is_droppable_kind(kind, *last_delivered_buttons);
+        if !limiter.allow() && droppable {
+            return false;
+        }
+        if let InputEventKind::Mouse { buttons } = kind {
+            *last_delivered_buttons = Some(buttons);
+        }
+        true
+    }
+
+    #[test]
+    fn classifier_reads_the_oneof_tag_and_mouse_buttons() {
+        assert_eq!(
+            classify_input_event(&mouse_event(0)),
+            InputEventKind::Mouse { buttons: 0 }
+        );
+        assert_eq!(
+            classify_input_event(&mouse_event(1)),
+            InputEventKind::Mouse { buttons: 1 }
+        );
+        assert_eq!(classify_input_event(&keyboard_event()), InputEventKind::Keyboard);
+        assert_eq!(classify_input_event(&scroll_event()), InputEventKind::Scroll);
+        assert_eq!(classify_input_event(&text_event()), InputEventKind::Text);
+        assert_eq!(classify_input_event(&open_app_event()), InputEventKind::OpenApp);
+        assert_eq!(classify_input_event(&nav_event()), InputEventKind::Nav);
+        assert_eq!(classify_input_event(&[]), InputEventKind::Unknown);
+        assert_eq!(classify_input_event(&[0xFF]), InputEventKind::Unknown);
+        // Malformed mouse body: unparseable framing can never be a pure move.
+        assert_eq!(
+            classify_input_event(&[0x0A, 0x7F, 0x08]),
+            InputEventKind::Mouse { buttons: u32::MAX }
+        );
+    }
+
+    #[test]
+    fn thousand_hz_move_flood_plus_button_up_delivers_the_button_up() {
+        // A limiter that can only afford ~2 events: the flood exhausts it in the
+        // first samples. Pure moves are dropped; the press and the release are
+        // state changes and MUST get through.
+        let mut limiter = RateLimiter::new(1.0, 2.0);
+        let mut last: Option<u32> = None;
+
+        let mut delivered = 0;
+        for _ in 0..1000 {
+            if admit_under_flood(&mut limiter, &mut last, &mouse_event(0)) {
+                delivered += 1;
+            }
+        }
+        assert!(
+            delivered < 50,
+            "the flood must be coalesced, got {delivered} delivered"
+        );
+        assert_eq!(last, Some(0), "the first sample sets the delivered baseline");
+
+        // Press (mask 0 -> 1): a state change, must be delivered even though the
+        // limiter is exhausted.
+        assert!(
+            admit_under_flood(&mut limiter, &mut last, &mouse_event(1)),
+            "button press must never be dropped by the rate limiter"
+        );
+
+        // Drag moves at the same exhausted limiter: coalesced.
+        let mut drag_delivered = 0;
+        for _ in 0..1000 {
+            if admit_under_flood(&mut limiter, &mut last, &mouse_event(1)) {
+                drag_delivered += 1;
+            }
+        }
+        assert!(drag_delivered < 50, "drag flood must be coalesced");
+
+        // Button-up (mask 1 -> 0): the release must always arrive.
+        assert!(
+            admit_under_flood(&mut limiter, &mut last, &mouse_event(0)),
+            "button release must never be dropped by the rate limiter"
+        );
+    }
+
+    #[test]
+    fn keys_text_nav_openapp_survive_a_flood_exhausted_limiter() {
+        let mut limiter = RateLimiter::new(1.0, 2.0);
+        let mut last: Option<u32> = None;
+        for _ in 0..1000 {
+            let _ = admit_under_flood(&mut limiter, &mut last, &mouse_event(0));
+        }
+        assert_eq!(last, Some(0));
+
+        for event in [
+            keyboard_event().as_slice(),
+            text_event().as_slice(),
+            nav_event().as_slice(),
+            open_app_event().as_slice(),
+        ] {
+            assert!(
+                admit_under_flood(&mut limiter, &mut last, event),
+                "critical event ({:02x}…) must be delivered even over budget",
+                event[0]
+            );
+        }
+    }
+
+    #[test]
+    fn input_queue_never_evicts_a_critical_event_for_a_move() {
+        let queue = InputQueue::new(4);
+        // Fill with pure moves.
+        for _ in 0..4 {
+            queue.push_classified(mouse_event(0), true);
+        }
+        // A critical event must land and evict the OLDEST MOVE, not displace
+        // nothing.
+        queue.push_classified(keyboard_event(), false);
+        // Drain: the keyboard event must be among what we get back.
+        let drained: Vec<Vec<u8>> = (0..4)
+            .filter_map(|_| queue.pop_timeout(Duration::from_millis(0)))
+            .collect();
+        assert!(
+            drained.iter().any(|e| classify_input_event(e) == InputEventKind::Keyboard),
+            "the critical key event must survive the eviction"
+        );
+        assert_eq!(drained.len(), 4, "the queue never exceeds its bound");
+    }
+
+    #[test]
+    fn input_queue_drops_a_move_when_full_of_critical_events() {
+        let queue = InputQueue::new(3);
+        for _ in 0..3 {
+            queue.push_classified(keyboard_event(), false);
+        }
+        queue.push_classified(mouse_event(0), true); // must be dropped
+        let drained: Vec<Vec<u8>> = (0..3)
+            .filter_map(|_| queue.pop_timeout(Duration::from_millis(0)))
+            .collect();
+        assert_eq!(drained.len(), 3);
+        assert!(
+            drained.iter().all(|e| classify_input_event(e) == InputEventKind::Keyboard),
+            "a move must never displace critical events"
+        );
+        assert_eq!(queue.evicted_critical.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn input_queue_keeps_its_bound_when_full_of_critical_events() {
+        let queue = InputQueue::new(3);
+        for _ in 0..3 {
+            queue.push_classified(keyboard_event(), false);
+        }
+        // A 4th critical event: the memory bound wins, the oldest is evicted.
+        queue.push_classified(text_event(), false);
+        assert_eq!(queue.evicted_critical.load(Ordering::SeqCst), 1);
+        let drained: Vec<Vec<u8>> = (0..3)
+            .filter_map(|_| queue.pop_timeout(Duration::from_millis(0)))
+            .collect();
+        assert_eq!(drained.len(), 3);
+        assert!(
+            drained.iter().any(|e| classify_input_event(e) == InputEventKind::Text),
+            "the newest critical event is kept"
+        );
+    }
+
+    #[test]
+    fn scroll_is_pure_motion_but_press_and_release_are_not() {
+        let mut last: Option<u32> = None;
+        assert!(is_droppable_kind(classify_input_event(&scroll_event()), last));
+        // Mouse with no baseline yet: never droppable (establishes state).
+        assert!(!is_droppable_kind(classify_input_event(&mouse_event(0)), last));
+        last = Some(0);
+        // Hover stream at mask 0: pure motion.
+        assert!(is_droppable_kind(classify_input_event(&mouse_event(0)), last));
+        // Press to mask 1: state change.
+        assert!(!is_droppable_kind(classify_input_event(&mouse_event(1)), last));
+        last = Some(1);
+        // Drag at mask 1: pure motion again.
+        assert!(is_droppable_kind(classify_input_event(&mouse_event(1)), last));
+        // Release to mask 0: state change.
+        assert!(!is_droppable_kind(classify_input_event(&mouse_event(0)), last));
+        // Keys and text are never pure motion.
+        assert!(!is_droppable_kind(classify_input_event(&keyboard_event()), last));
+        assert!(!is_droppable_kind(classify_input_event(&text_event()), last));
+        assert!(!is_droppable_kind(classify_input_event(&nav_event()), last));
+        assert!(!is_droppable_kind(classify_input_event(&open_app_event()), last));
     }
 }
