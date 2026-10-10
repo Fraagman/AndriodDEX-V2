@@ -16,16 +16,11 @@ pub fn render_start_menu(
     }
 
     let screen_rect = ctx.screen_rect();
-    let taskbar_height = 42.0;
-    // Clamp to the window so a short display never pushes the menu (or its app
-    // rows) off-screen.
-    let menu_width = 620.0f32.min(screen_rect.width());
-    let menu_height = 510.0f32.min(screen_rect.max.y - taskbar_height);
-
-    let menu_rect = Rect::from_min_size(
-        Pos2::new(0.0, screen_rect.max.y - taskbar_height - menu_height),
-        Vec2::new(menu_width, menu_height),
-    );
+    let taskbar_height = super::layout::TASKBAR_HEIGHT;
+    // Clamped to the window by the shared layout so a short display never pushes
+    // the menu (or its app rows) off-screen.
+    let menu_rect = super::layout::start_menu_rect(screen_rect);
+    let menu_height = menu_rect.height();
 
     // Click outside to dismiss
     if ctx.input(|i| i.pointer.any_click()) {

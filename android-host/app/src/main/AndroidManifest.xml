@@ -22,9 +22,13 @@
         android:supportsRtl="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.AndroidHost">
+        <!-- allowBackup=false is the real protection; the backup_rules/data_extraction_rules
+             files are defence in depth that keep working if that flag is ever flipped
+             (see BackupRulesTest, which asserts the excluded names exist). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

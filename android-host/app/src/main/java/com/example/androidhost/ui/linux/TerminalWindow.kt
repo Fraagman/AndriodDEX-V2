@@ -90,10 +90,18 @@ private fun TerminalSurface() {
     val focusRequester = remember { FocusRequester() }
     val scope = rememberCoroutineScope()
     val textOwner = remember { Any() }
+    var currentProcess: java.lang.Process? = null
+
+    // Read-only programs the sandboxed terminal will execute; everything else is
+    // refused. Output caps keep a huge file from freezing the UI or ballooning.
+    val ALLOWED_PROGRAMS = setOf("ls", "pwd", "echo", "date", "whoami", "cat", "df", "uname", "head", "tail", "wc")
+    val MAX_OUTPUT_CHARS = 64_000
+    val MAX_OUTPUT_LINES = 400
+    val WHITESPACE = Regex("\\s+")
 
     LaunchedEffect(Unit) {
         scrollback.add("AndroidDex terminal — sandboxed to ${rootDir.absolutePath}")
-        scrollback.add("Type a command and press Enter. `cd`, `pwd`, `ls` are supported via sh -c.")
+        scrollback.add("Read-only commands only: ls pwd cat echo date whoami df uname head tail wc")
         focusRequester.requestFocus()
     }
 
@@ -101,16 +109,35 @@ private fun TerminalSurface() {
         scrollState.scrollTo(scrollState.maxValue)
     }
 
+    // Kill a still-running command when the window is disposed: a cancelled
+    // scope would otherwise orphan the process (a `sleep 5m` would keep running).
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { currentProcess?.destroy() }
+    }
+
+    /**
+     * Runs a command inside the sandbox. The terminal is reachable from any paired
+     * PC over the network, so it must never be a raw `sh -c` with user text: that
+     * would expose the app's private files (the pairing key, the TLS identity) and
+     * any binary the app uid can exec.
+     *
+     * Instead: an allow-list of harmless read-only programs, executed WITHOUT a
+     * shell (arguments are passed literally, so `;`, `|`, `$()` and backticks
+     * cannot smuggle commands), and `cat` restricted to paths inside the sandbox.
+     */
     fun runCommand(cmd: String) {
         if (busy) return
         val trimmed = cmd.trim()
         scrollback.add("${prompt(currentDir)} $cmd")
         if (trimmed.isEmpty()) return
-        // Handle `cd` in-process so it persists across commands. Sandbox to filesDir.
+
+        // `cd` is handled in-process so it persists across commands. Sandbox to filesDir.
         if (trimmed == "cd" || trimmed.startsWith("cd ")) {
             val target = trimmed.removePrefix("cd").trim().ifEmpty { rootDir.absolutePath }
             val resolved = File(currentDir, target).canonicalFile
-            if (!resolved.absolutePath.startsWith(rootDir.absolutePath)) {
+            // Compare with the root + separator: startsWith on the bare root would
+            // also accept a sibling directory named "files_evil".
+            if (resolved != rootDir && !resolved.absolutePath.startsWith(rootDir.absolutePath + File.separator)) {
                 scrollback.add("cd: $target: outside sandbox (${rootDir.absolutePath})")
             } else if (!resolved.exists() || !resolved.isDirectory) {
                 scrollback.add("cd: $target: No such file or directory")
@@ -119,21 +146,62 @@ private fun TerminalSurface() {
             }
             return
         }
+
+        val tokens = trimmed.split(WHITESPACE)
+        val program = tokens[0]
+        if (program !in ALLOWED_PROGRAMS) {
+            scrollback.add("$program: not allowed — sandboxed terminal offers: ${ALLOWED_PROGRAMS.joinToString(" ")}")
+            return
+        }
+        if (program == "cat") {
+            val targets = tokens.drop(1).filter { !it.startsWith("-") }
+            if (targets.isEmpty()) {
+                scrollback.add("cat: missing file operand")
+                return
+            }
+            for (t in targets) {
+                val resolved = File(currentDir, t).canonicalFile
+                if (!resolved.absolutePath.startsWith(rootDir.absolutePath + File.separator)) {
+                    scrollback.add("cat: $t: outside sandbox (${rootDir.absolutePath})")
+                    return
+                }
+            }
+        }
+
         busy = true
+        currentProcess = null
         scope.launch {
             val output = withContext(Dispatchers.IO) {
                 runCatching {
-                    val proc = ProcessBuilder("sh", "-c", trimmed)
+                    val proc = ProcessBuilder(tokens)
                         .directory(currentDir)
                         .redirectErrorStream(true)
                         .start()
+                    currentProcess = proc
                     proc.outputStream.close()
-                    val text = proc.inputStream.bufferedReader().readText()
+                    // Cap the read: a huge file would otherwise balloon memory and
+                    // freeze the UI with thousands of lines.
+                    val text = proc.inputStream.bufferedReader().use { reader ->
+                        val sb = StringBuilder()
+                        val buf = CharArray(2048)
+                        var read = 0
+                        var total = 0
+                        while (reader.read(buf).also { read = it } > 0 && total < MAX_OUTPUT_CHARS) {
+                            sb.append(buf, 0, read)
+                            total += read
+                        }
+                        if (total >= MAX_OUTPUT_CHARS) sb.append("\n…output truncated at $MAX_OUTPUT_CHARS chars…")
+                        sb.toString()
+                    }
                     proc.waitFor()
+                    currentProcess = null
                     text
                 }.getOrElse { e -> "sh: ${e.message ?: e.javaClass.simpleName}\n" }
             }
-            output.trimEnd('\n').split('\n').forEach { scrollback.add(it) }
+            output.trimEnd('\n').split('\n').take(MAX_OUTPUT_LINES).forEach { scrollback.add(it) }
+            if (output.trimEnd('\n').split('\n').size > MAX_OUTPUT_LINES) {
+                scrollback.add("…output truncated at $MAX_OUTPUT_LINES lines…")
+            }
             busy = false
         }
     }
@@ -174,15 +242,19 @@ private fun TerminalSurface() {
                                                     val cmd = currentInput
                                                     currentInput = ""
                                                     runCommand(cmd)
+                                                    true
                                                 }
                                                 KeyEvent.KEYCODE_DEL -> {
                                                     if (currentInput.isNotEmpty()) {
                                                         currentInput = currentInput.dropLast(1)
                                                     }
+                                                    true
                                                 }
+                                                else -> false
                                             }
+                                        } else {
+                                            false
                                         }
-                                        true
                                     }
                                 )
                                 focusRequester.requestFocus()

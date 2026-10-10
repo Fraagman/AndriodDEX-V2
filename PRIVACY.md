@@ -37,10 +37,11 @@ We operate under a strict, local-first privacy model:
 
 ### D. Cryptographic Pairing Credentials
 - **What is stored:** To provide authenticated communication, the App generates and stores:
-  1. An Ed25519 TLS identity and self-signed certificate for QUIC transport encryption.
+  1. An X25519-based TLS identity and self-signed certificate for QUIC transport encryption.
   2. An authenticated pre-shared key (PSK) established during mutual pairing via X25519 Elliptic-Curve Diffie-Hellman (ECDH) and authenticated by user comparison of a 6-digit Short Authentication String (SAS).
-- **Storage and Security:** Credentials are saved exclusively in the App's protected internal sandbox (`/data/data/com.androiddex.host/files/quic_server/`).
-- **Backup Exclusion:** The App's manifest and backup configuration rules (`dataExtractionRules.xml` and `backup_rules.xml`) explicitly mark this directory as excluded from Android cloud backups and adb backups.
+- **Storage and Security:** Credentials are saved exclusively in the App's protected internal sandbox (`/data/data/com.androiddex.host/files/quic_server/`), written atomically (temp file + fsync + rename) with mode 0600. On the Windows receiver side the equivalent trust file is DPAPI-encrypted, so it is useless off the machine.
+- **Diagnostic logging:** the app logs throughput and connection states; audio byte dumps exist only in debug builds (`BuildConfig.DEBUG`-gated) and never ship in release builds.
+- **Backup Exclusion:** The App's manifest and backup configuration rules (`dataExtractionRules.xml` and `backup_rules.xml`) explicitly exclude the key files (`pairing_v2.psk`, `tls_identity.bin`) from Android cloud backups and adb backups; `allowBackup="false"` is the primary protection. A unit test (`BackupRulesTest`) asserts the exclusions name real files.
 - **User Control:** Users can permanently delete stored pairing keys at any time by tapping **Forget paired PC** in the App's interface.
 
 ---

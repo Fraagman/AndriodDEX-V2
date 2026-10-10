@@ -66,7 +66,12 @@ class EncoderStats {
             totalFrames = totalFrames
         )
 
-        windowStartMs = now
+        // Anchor the next window to the grid instead of `now`: under sustained load
+        // each window otherwise starts late by however long the closing frame was
+        // delayed, and the reported fps drifts low. After a long gap (idle desktop)
+        // the grid is reset so one frame cannot close a string of stale windows.
+        windowStartMs += WINDOW_MS
+        if (now - windowStartMs >= WINDOW_MS) windowStartMs = now
         windowFrames = 0
         windowBytes = 0
         windowKeyframes = 0

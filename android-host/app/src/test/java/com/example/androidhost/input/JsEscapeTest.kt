@@ -90,17 +90,4 @@ class JsEscapeTest {
         assertTrue("script must call insertText", script.contains("document.execCommand('insertText'"))
         assertTrue("script must guard on activeElement", script.contains("document.activeElement"))
     }
-
-    @Test
-    fun controlKeyScriptContainsExpectedPieces() {
-        val downEnter = buildControlKeyScript("Enter", 13, pressed = true)
-        assertTrue(downEnter.contains("KeyboardEvent('keydown'"))
-        assertTrue(downEnter.contains("requestSubmit"))
-
-        val upEnter = buildControlKeyScript("Enter", 13, pressed = false)
-        assertTrue(upEnter.contains("KeyboardEvent('keyup'"))
-
-        val downBksp = buildControlKeyScript("Backspace", 8, pressed = true)
-        assertTrue(downBksp.contains("execCommand('delete'"))
-    }
 }

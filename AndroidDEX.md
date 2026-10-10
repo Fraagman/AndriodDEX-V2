@@ -12,7 +12,7 @@ graph LR
         VD[VirtualDisplay + Compose Shell] --> MC[MediaCodec H.264 Encoder]
         AC[AudioCaptureService: MediaProjection for Audio Only] --> QS[Embedded Rust QUIC Server]
         MC --> QS
-        QS -->|Input Injection| ID[LocalInputDispatcher + IME]
+        QS -->|Input Injection| ID[LocalInputDispatcher direct dispatch]
     end
     subgraph Network Transport
         QS <-->|USB Tethering RNDIS / QUIC UDP 4433| WR[Rust Windows Receiver]
@@ -40,7 +40,7 @@ graph LR
 | **Audio Capture** | `AudioRecord` + `MediaProjection` (audio capture only) | [AudioCaptureService.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/service/AudioCaptureService.kt) |
 | **QUIC Server (Native)** | Rust `quinn` / `tokio` via JNI cdylib | [lib.rs](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/rust_quic_server/src/lib.rs), [QuicServer.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/quic/QuicServer.kt) |
 | **Input Dispatching** | JNI blocking input queue + MotionEvent/KeyEvent injection | [InputManager.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/service/InputManager.kt), [LocalInputDispatcher.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/input/LocalInputDispatcher.kt) |
-| **System Navigation & IME** | AccessibilityService & Custom IME | [DesktopAccessibilityService.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/service/DesktopAccessibilityService.kt), [AndroidDexIME.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/service/AndroidDexIME.kt) |
+| **System Navigation & Input** | AccessibilityService (optional; back/home/recents) + LocalInputDispatcher direct view dispatch (no IME, no permissions) | [DesktopAccessibilityService.kt] |
 | **Native Compute Service** | On-device Linux / Code-Server execution | [NativeComputeService.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/service/NativeComputeService.kt), [CodeServerWindow.kt](file:///c:/Users/Asus/Documents/GitHub/AndriodDEX-V2/android-host/app/src/main/java/com/example/androidhost/ui/linux/CodeServerWindow.kt) |
 
 ### Built-in Desktop Shell Applications
@@ -62,18 +62,18 @@ graph LR
 | `zc-protocol` | Protocol Buffers message serialization and frame framing | `prost`, `prost-build` |
 | `zc-input` | Windows keyboard/mouse event capture and input packet generation | `winit`, `prost` |
 | `zc-security` | Cryptographic pairing, HKDF key derivation, and TLS cert validation | `ring`, `x25519-dalek`, `rcgen` |
-| `zc-audio` | Audio stream buffer management and real-time playback | `cpal`, `rubato`, `crossbeam-queue` |
+| `zc-audio` | Audio stream buffer management and real-time playback | `cpal`, `rubato` |
 
 ---
 
 ## Wire Protocol & Security Model
 
-- **Pairing (ALPN `androiddex-pairing`)**: Ephemeral X25519 key exchange authenticated with a 6-digit user-verified PIN using HKDF-SHA256. The resulting Pre-Shared Key (PSK) is persisted locally in app private storage (`pairing.psk`).
-- **Streaming (ALPN `androiddex`)**: Resuming connections authenticate via SHA256 auth tokens derived from the stored PSK.
+- **Pairing (ALPN `androiddex-pair-v2`)**: Ephemeral X25519 key exchange; both screens display a 6-digit short authentication string (SAS, ~20 bits — see crypto.rs for the documented residual odds) and the user confirms they match; the PSK is derived via HKDF-SHA256 bound to the TLS channel binding. The PSK is persisted locally in app private storage (`pairing_v2.psk`), DPAPI-encrypted on the Windows side.
+- **Streaming (ALPN `androiddex-v2`)**: Resuming connections authenticate via a mutual challenge-response proof exchange (HMAC-SHA256, constant-time verified) bound to the TLS session.
 - **Framing**:
   - `0x01`: Video packet (`HybridFrame` containing H.264 NALUs).
   - `0x02`: Audio packet (`AudioPacket` containing 16-bit PCM samples).
-  - Input stream: Unidirectional stream transporting length-prefixed `InputEvent` protobuf messages.
+  - Input stream: Unidirectional stream transporting length-prefixed `InputEvent` protobuf messages (mouse, keyboard, scroll, text, open_app, nav — no `Ping`; it is not on the wire).
 
 ---
 
@@ -81,9 +81,9 @@ graph LR
 
 | Component | Minimum Specification |
 |---|---|
-| Android Host | Android 10+ (minSdk 29, compileSdk 36, targetSdk 34) |
+| Android Host | Android 10+ (minSdk 29, compileSdk 36, targetSdk 36) |
 | Windows Client | Windows 10 / 11 (64-bit) |
-| Toolchains | Rust 1.85+ stable (required for edition 2024), Android NDK 26.1.10909125, JDK 17, Gradle 9.1.0 (supplied by wrapper) |
+| Toolchains | Rust 1.85+ stable, Android NDK 30.0.14904198, JDK 17, Gradle 9.1.0 (supplied by wrapper) |
 
 ---
 

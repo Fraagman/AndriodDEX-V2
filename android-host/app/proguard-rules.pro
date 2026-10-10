@@ -37,6 +37,9 @@
 # Jetpack Compose & Android Lifecycle Keep Rules
 # ---------------------------------------------------------------------------
 -keepattributes *Annotation*,InnerClasses,EnclosingMethod,Signature
+# Keep line numbers in release crash traces: without them a production
+# stack trace is unreadable (REL-03).
+-keepattributes SourceFile,LineNumberTable
 
 -keepclassmembers class * extends androidx.lifecycle.ViewModel {
     <init>(...);

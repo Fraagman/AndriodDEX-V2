@@ -42,6 +42,11 @@ impl Decoder {
     /// the NAL was consumed but no picture is ready yet (e.g. SPS/PPS), or
     /// `Err` on a decode failure. The caller should request a keyframe from the
     /// phone on error rather than panicking.
+    ///
+    /// Contract: **latest wins** — when a NAL batch contains several pictures,
+    /// only the last is returned. With B-frames disabled (the encoder's config)
+    /// an access unit produces at most one picture, so nothing is lost today;
+    /// enabling B-frames would silently drop pictures here.
     pub fn decode(&mut self, nal: &[u8]) -> Result<Option<DecodedFrame>, openh264::Error> {
         if nal.is_empty() {
             return Ok(None);

@@ -94,10 +94,6 @@ impl OverlayUi {
         let wants_pointer = self.context.wants_pointer_input();
         let wants_keyboard = self.context.wants_keyboard_input();
 
-        let size = window.inner_size();
-        let scale = window.scale_factor();
-        let taskbar_h = 42.0 * scale;
-
         match event {
             winit::event::WindowEvent::CursorMoved { position, .. } => {
                 self.last_cursor_pos = Some((position.x, position.y));
@@ -108,23 +104,23 @@ impl OverlayUi {
             _ => {}
         }
 
+        // Hit-testing in egui LOGICAL pixels through the shared layout module —
+        // the same rects the draw code uses, so a panel size change can never
+        // leave an invisible zone eating clicks (or leaking them to the phone).
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let screen_logical = Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(size.width as f32 / scale, size.height as f32 / scale),
+        );
         let (cursor_x, cursor_y) = self.last_cursor_pos.unwrap_or((-1.0, -1.0));
-        let is_over_taskbar = cursor_y >= (size.height as f64 - taskbar_h) && cursor_y >= 0.0;
+        let cursor_logical = Pos2::new(cursor_x as f32 / scale, cursor_y as f32 / scale);
 
-        let is_over_start_menu = if self.ui_state.start_menu_open {
-            let sm_w = 640.0 * scale;
-            let sm_h = 560.0 * scale;
-            cursor_x >= 0.0 && cursor_x <= sm_w && cursor_y >= (size.height as f64 - taskbar_h - sm_h) && cursor_y <= (size.height as f64 - taskbar_h)
-        } else {
-            false
-        };
-
-        let is_over_action_center = if self.ui_state.action_center_open {
-            let ac_w = 380.0 * scale;
-            cursor_x >= (size.width as f64 - ac_w) && cursor_x <= size.width as f64 && cursor_y >= 0.0 && cursor_y <= (size.height as f64 - taskbar_h)
-        } else {
-            false
-        };
+        let is_over_taskbar = super::layout::taskbar_rect(screen_logical).contains(cursor_logical);
+        let is_over_start_menu = self.ui_state.start_menu_open
+            && super::layout::start_menu_rect(screen_logical).contains(cursor_logical);
+        let is_over_action_center = self.ui_state.action_center_open
+            && super::layout::action_center_rect(screen_logical).contains(cursor_logical);
 
         let is_over_modal_ui = self.ui_state.volume_flyout_open
             || self.ui_state.network_flyout_open
@@ -275,14 +271,30 @@ impl OverlayUi {
                         COLOR_TEXT_PRIMARY,
                     );
 
-                    let btn_rect = Rect::from_center_size(Pos2::new(card_rect.center().x, card_rect.max.y - 40.0), Vec2::new(160.0, 36.0));
+                    let btn_rect = Rect::from_center_size(Pos2::new(card_rect.center().x, card_rect.max.y - 40.0), Vec2::new(200.0, 36.0));
                     let btn_hovered = is_hovered(&self.context, btn_rect);
                     let btn_clicked = is_clicked(&self.context, btn_rect);
+                    // Two-click confirm: forgetting the pairing is destructive and
+                    // a misclick must not silently un-pair the PC (J30).
                     if btn_clicked {
-                        actions.forget_pairing = true;
+                        if self.ui_state.forget_pairing_armed {
+                            actions.forget_pairing = true;
+                            self.ui_state.forget_pairing_armed = false;
+                        } else {
+                            self.ui_state.forget_pairing_armed = true;
+                        }
                     }
-                    painter.rect_filled(btn_rect, Rounding::same(2.0), if btn_hovered { Color32::from_rgb(180, 40, 40) } else { Color32::from_rgb(140, 20, 20) });
-                    painter.text(btn_rect.center(), egui::Align2::CENTER_CENTER, "Forget Pairing", FontId::proportional(13.0), Color32::WHITE);
+                    // Disarm when the pointer leaves the button area.
+                    if !btn_hovered && !btn_clicked {
+                        self.ui_state.forget_pairing_armed = false;
+                    }
+                    let btn_label = if self.ui_state.forget_pairing_armed {
+                        "Confirm: forget pairing?"
+                    } else {
+                        "Forget Pairing"
+                    };
+                    painter.rect_filled(btn_rect, Rounding::same(2.0), if self.ui_state.forget_pairing_armed { Color32::from_rgb(220, 60, 60) } else if btn_hovered { Color32::from_rgb(180, 40, 40) } else { Color32::from_rgb(140, 20, 20) });
+                    painter.text(btn_rect.center(), egui::Align2::CENTER_CENTER, btn_label, FontId::proportional(13.0), Color32::WHITE);
                 }
                 _ => {
                     let (_, _, msg) = phase_display_info(phase);
@@ -397,6 +409,15 @@ impl OverlayUi {
 
         for id in &full_output.textures_delta.free {
             self.renderer.free_texture(id);
+        }
+
+        // egui's own repaint deadline: when egui wants animation the delay is
+        // short, and the event loop must wake for it. Otherwise no repaint is
+        // requested and the loop waits for real events (frames, input, phases).
+        if let Some(vo) = full_output.viewport_output.get(&self.context.viewport_id()) {
+            if vo.repaint_delay < std::time::Duration::from_secs(1) {
+                actions.repaint_after = Some(vo.repaint_delay);
+            }
         }
 
         actions

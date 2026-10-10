@@ -1,3 +1,4 @@
+pub mod layout;
 pub mod theme;
 pub mod types;
 pub mod taskbar;

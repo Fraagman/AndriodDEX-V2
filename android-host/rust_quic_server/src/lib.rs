@@ -21,10 +21,10 @@ mod tls;
 
 use std::fmt;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::collections::VecDeque;
 use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
@@ -62,6 +62,10 @@ const AUDIO_QUEUE_DEPTH: usize = 8;
 /// Ceiling on a single input event. Anything larger is malformed or hostile.
 const MAX_INPUT_EVENT_BYTES: usize = 64 * 1024;
 
+/// Depth of the bounded input queue (drop-oldest). Generous against real input
+/// rates; the bound is what keeps a hostile sender from growing the heap.
+const INPUT_QUEUE_DEPTH: usize = 64;
+
 // QUIC application close codes, purely for diagnosis on the PC side.
 const CLOSE_NO_ALPN: u32 = 1;
 const CLOSE_BAD_ALPN: u32 = 2;
@@ -70,6 +74,7 @@ const CLOSE_AUTH_FAILED: u32 = 4;
 const CLOSE_PAIRING_FAILED: u32 = 5;
 const CLOSE_ALREADY_PAIRED: u32 = 6;
 const CLOSE_RATE_LIMITED: u32 = 7;
+const CLOSE_BUSY: u32 = 8;
 
 /// Cooldown between pairing attempts from the same remote IP address.
 const PAIRING_COOLDOWN: Duration = Duration::from_millis(500);
@@ -78,11 +83,105 @@ const MAX_COOLDOWN_ENTRIES: usize = 64;
 
 // -- Shared server state ---------------------------------------------------------------
 
+/// Bounded, drop-oldest input queue. A hostile or buggy client must not be able to
+/// grow the phone's heap without bound, and stale input must be dropped in favour of
+/// fresh events rather than delaying them: the queue holds [capacity] events; a push
+/// into a full queue evicts the oldest. The Kotlin consumer polls one event at a time.
+struct InputQueue {
+    inner: Mutex<VecDeque<Vec<u8>>>,
+    available: Condvar,
+    capacity: usize,
+}
+
+impl InputQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::with_capacity(capacity)),
+            available: Condvar::new(),
+            capacity,
+        }
+    }
+
+    fn push(&self, event: Vec<u8>) {
+        let mut q = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if q.len() >= self.capacity {
+            q.pop_front();
+        }
+        q.push_back(event);
+        drop(q);
+        self.available.notify_one();
+    }
+
+    /// Blocks up to `timeout` for the next event.
+    fn pop_timeout(&self, timeout: Duration) -> Option<Vec<u8>> {
+        let mut q = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(event) = q.pop_front() {
+                return Some(event);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (guard, wait) = match self.available.wait_timeout(q, remaining) {
+                Ok(r) => r,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            q = guard;
+            if wait.timed_out() && q.is_empty() {
+                return None;
+            }
+        }
+    }
+}
+
+/// Token bucket capping input events per session. A hostile client must not be able
+/// to flood the phone's main thread into an ANR from a device that paired once and
+/// reconnects without any prompt. 250 events/s with a burst of 100 is far above any
+/// real input rate (a mouse at 125 Hz plus key repeat is ~200 events/s at worst).
+struct RateLimiter {
+    tokens: f64,
+    last_refill: std::time::Instant,
+    rate_per_sec: f64,
+    burst: f64,
+}
+
+impl RateLimiter {
+    fn new(rate_per_sec: f64, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            last_refill: std::time::Instant::now(),
+            rate_per_sec,
+            burst,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 struct Server {
     state: AtomicI32,
     video: Arc<FrameQueue>,
     audio: Arc<FrameQueue>,
-    input_tx: Sender<Vec<u8>>,
+    input_queue: Arc<InputQueue>,
     confirmations: ConfirmationChannel,
     store: SecureStore,
     /// The pairing key of the currently paired PC, mirrored from disk.
@@ -133,8 +232,10 @@ impl Server {
             map.retain(|_, last_attempt| now.saturating_duration_since(*last_attempt) < PAIRING_COOLDOWN);
         }
         if map.len() >= MAX_COOLDOWN_ENTRIES {
-            if let Some(oldest_key) = map.keys().next().copied() {
-                map.remove(&oldest_key);
+            // True LRU eviction: remove the least-recent attempt, not an arbitrary
+            // HashMap entry (`keys().next()` is unspecified order).
+            if let Some(oldest) = map.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k) {
+                map.remove(&oldest);
             }
         }
         if let Some(last_attempt) = map.get(&ip) {
@@ -159,7 +260,7 @@ impl Server {
 /// Opaque handle handed back to Kotlin.
 struct ServerContext {
     server: Arc<Server>,
-    input_rx: Receiver<Vec<u8>>,
+    input_queue: Arc<InputQueue>,
     _rt: Runtime,
 }
 
@@ -273,13 +374,13 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
         log_i!("no paired device on record; next PC must pair with SAS confirmation");
     }
 
-    let (input_tx, input_rx) = unbounded::<Vec<u8>>();
+    let input_queue = Arc::new(InputQueue::new(INPUT_QUEUE_DEPTH));
 
     let server = Arc::new(Server {
         state: AtomicI32::new(STATE_IDLE),
         video: Arc::new(FrameQueue::new(VIDEO_QUEUE_DEPTH)),
         audio: Arc::new(FrameQueue::new(AUDIO_QUEUE_DEPTH)),
-        input_tx,
+        input_queue: input_queue.clone(),
         confirmations: ConfirmationChannel::new(),
         store,
         psk: Mutex::new(persisted_psk),
@@ -295,7 +396,7 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
 
     rt.spawn(run_endpoint(server.clone(), port));
 
-    let ctx = Box::new(ServerContext { server, input_rx, _rt: rt });
+    let ctx = Box::new(ServerContext { server, input_queue, _rt: rt });
     Box::into_raw(ctx) as jlong
 }
 
@@ -304,8 +405,11 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_start(
 fn bind_endpoint(server: &Arc<Server>, addr: std::net::SocketAddr) -> Result<Endpoint, String> {
     let config = tls::build_server_config(&server.store, &[ALPN_STREAM, ALPN_PAIRING])?;
 
-    // Create a UDP socket with SO_REUSEADDR to avoid "Address already in use" (EADDRINUSE /
-    // OS error 98) after an Android force-stop that leaves the old socket lingering.
+    // SO_REUSEADDR on a UDP socket does NOT let a new bind take over a port that
+    // another process still holds (that is SO_REUSEPORT, and even it needs both
+    // sockets to opt in). It is set before the first bind as harmless standard
+    // practice; the fallback retry only rescues a bind when the previous owner's
+    // socket is already in the middle of closing.
     let socket = std::net::UdpSocket::bind(addr)
         .or_else(|_first_err| {
             // If bind fails, try with SO_REUSEADDR via socket2.
@@ -665,6 +769,16 @@ async fn authenticate_and_serve(
 // -- Streaming session ------------------------------------------------------------------
 
 async fn serve_session(server: Arc<Server>, conn: Connection, remote: std::net::SocketAddr) {
+    // A live session is already streaming: refuse this connection rather than
+    // steal frames out from under it — two pumps draining one queue would give
+    // both viewers interleaved halves. A second PC now gets CLOSE_BUSY instead
+    // of silently waiting or corrupting the stream.
+    if server.sessions.load(Ordering::SeqCst) > 0 {
+        log_w!("serve_session for {remote}: another session is streaming; refusing");
+        conn.close(VarInt::from_u32(CLOSE_BUSY), b"another PC is streaming");
+        return;
+    }
+
     // Acquire the session lock with a timeout so a stale previous session's task
     // cannot block a new connection indefinitely.
     let _permit = match tokio::time::timeout(
@@ -761,6 +875,9 @@ async fn read_input(server: Arc<Server>, conn: Connection) {
         }
     };
 
+    let mut limiter = RateLimiter::new(250.0, 100.0);
+    let mut dropped_for_rate: u64 = 0;
+
     loop {
         let mut len_buf = [0u8; 4];
         if let Err(e) = stream.read_exact(&mut len_buf).await {
@@ -777,16 +894,21 @@ async fn read_input(server: Arc<Server>, conn: Connection) {
             return;
         }
 
+        if !limiter.allow() {
+            dropped_for_rate += 1;
+            if dropped_for_rate == 1 || dropped_for_rate % 500 == 0 {
+                log_w!("input rate limit in effect; {dropped_for_rate} events dropped so far");
+            }
+            continue;
+        }
+
         let mut data = vec![0u8; len];
         if let Err(e) = stream.read_exact(&mut data).await {
             log_w!("truncated input event: {e}");
             return;
         }
 
-        if server.input_tx.send(data).is_err() {
-            log_e!("input consumer is gone; stopping the input reader");
-            return;
-        }
+        server.input_queue.push(data);
     }
 }
 
@@ -809,7 +931,7 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         Duration::from_millis(500)
     };
 
-    let Ok(data) = ctx.input_rx.recv_timeout(timeout) else {
+    let Some(data) = ctx.input_queue.pop_timeout(timeout) else {
         return 0;
     };
     if data.is_empty() {
@@ -821,7 +943,12 @@ pub extern "system" fn Java_com_example_androidhost_quic_QuicServer_pollData(
         _ => return 0,
     };
     if data.len() > capacity {
-        log_w!("dropping a {} byte input event: the Kotlin buffer holds {capacity}", data.len());
+        // Unreachable by construction: read_input caps events at
+        // MAX_INPUT_EVENT_BYTES (64 KiB) and the Kotlin buffer is 1 MiB. If the
+        // buffer ever shrinks below the cap this is the landmine: the event was
+        // already dequeued, so it is dropped rather than re-delivered — the
+        // capacity invariant must hold for this to stay lossless.
+        log_e!("dropping a {} byte input event: the Kotlin buffer holds only {capacity}", data.len());
         return 0;
     }
 
@@ -933,27 +1060,6 @@ pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nati
     }
 }
 
-/// Alias for `nativeConfirmPairing`.
-#[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeConfirm(
-    env: JNIEnv,
-    class: JClass,
-    matched: jboolean,
-) -> jboolean {
-    Java_com_example_androidhost_security_SecurityBridge_nativeConfirmPairing(env, class, matched)
-}
-
-/// Legacy PIN verification bridge stub. Returns false under Protocol v2.
-#[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeVerifyPin(
-    _env: JNIEnv,
-    _class: JClass,
-    _pin: JString,
-) -> jboolean {
-    log_w!("legacy nativeVerifyPin called; Protocol v2 requires confirmation");
-    JNI_FALSE
-}
-
 /// Reads the pending 6-digit SAS code, or returns null if no pairing is awaiting confirmation.
 #[no_mangle]
 pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeGetPendingSas(
@@ -976,15 +1082,6 @@ pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nati
     }
 }
 
-/// Alias for `nativeGetPendingSas`.
-#[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeGetSas(
-    env: JNIEnv,
-    class: JClass,
-) -> jni::sys::jstring {
-    Java_com_example_androidhost_security_SecurityBridge_nativeGetPendingSas(env, class)
-}
-
 /// True while a PC is mid-pairing and the phone is waiting for the user to confirm the SAS.
 #[no_mangle]
 pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingConfirmation(
@@ -995,15 +1092,6 @@ pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nati
         Some(server) if server.confirmations.is_awaiting() => JNI_TRUE,
         _ => JNI_FALSE,
     }
-}
-
-/// Backward compatibility alias for `nativeIsAwaitingConfirmation`.
-#[no_mangle]
-pub extern "system" fn Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingPin(
-    env: JNIEnv,
-    class: JClass,
-) -> jboolean {
-    Java_com_example_androidhost_security_SecurityBridge_nativeIsAwaitingConfirmation(env, class)
 }
 
 /// True when a pairing key is on record, i.e. a known PC can connect without confirmation.

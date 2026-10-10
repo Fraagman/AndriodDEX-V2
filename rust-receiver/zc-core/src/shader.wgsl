@@ -11,6 +11,11 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
+// Aspect-preserving letterbox rect for the video, in NDC units, computed by the
+// application from the window and decoded-frame sizes: xy = centre of the rect,
+// zw = half-extent. The same rect maps pointer input (zc_input::letterbox_point).
+@group(0) @binding(4) var<uniform> u_rect: vec4<f32>;
+
 // Full-screen triangle trick: 3 vertices, no vertex buffer needed.
 // Vertex IDs 0, 1, 2 produce a triangle that covers the entire screen.
 @vertex
@@ -19,9 +24,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Generate oversized triangle from vertex index
     let x = f32(i32(vertex_index & 1u) * 4 - 1);
     let y = f32(i32(vertex_index >> 1u) * 4 - 1);
-    out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
     // UV: map clip space to texture coordinates, flip Y
     out.uv = vec2<f32>(x * 0.5 + 0.5, 0.5 - y * 0.5);
+    // Scale the triangle down to the letterbox rect. UVs were computed from the
+    // raw coordinates, so the full frame still maps across the shrunk triangle.
+    out.clip_position = vec4<f32>(u_rect.z * x + u_rect.x, u_rect.w * y + u_rect.y, 0.0, 1.0);
     return out;
 }
 

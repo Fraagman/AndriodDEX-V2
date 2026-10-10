@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.AndroidHost" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Dark theme with a dark windowBackground: the app is all-dark, and the Light
+         theme flashed white on every cold start. -->
+    <style name="Theme.AndroidHost" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 </resources>

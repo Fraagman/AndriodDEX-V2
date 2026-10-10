@@ -49,4 +49,9 @@ android-host/.idea/
 /screen0.png
 /promt.md
 
-# Per-session hardware/artefact evidence — never committed
+# Per-session hardware/artefact evidence - never committed
+*.log
+!docs/*.md
+pair.png
+progress.md
+receiver_live.log

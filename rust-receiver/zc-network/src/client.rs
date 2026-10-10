@@ -20,6 +20,14 @@ pub type QuinnError = Box<dyn std::error::Error + Send + Sync>;
 /// QUIC application close code sent by the phone when it has no stored pairing PSK.
 pub const CLOSE_NOT_PAIRED: u32 = 3;
 
+/// QUIC application close code sent by the phone when another PC is already
+/// streaming (the session is refused rather than shared).
+pub const CLOSE_BUSY: u32 = 8;
+
+/// Close code 6: the phone is paired to some PC (its key is on record) but this
+/// PC has no trust data — a previous pairing aborted after the phone persisted.
+pub const CLOSE_ALREADY_PAIRED: u32 = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanError {
     FingerprintMismatch {
@@ -75,6 +83,27 @@ pub async fn is_peer_close_not_paired(conn: &Connection) -> bool {
             app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED)
         }
         _ => false,
+    }
+}
+
+/// Maps a peer's application close code to the scan error it means, or None when the
+/// code carries no special meaning (the scan then treats it like any other failure).
+fn scan_close_error(app_close: &quinn::ApplicationClose) -> Option<ScanError> {
+    if app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED) {
+        Some(ScanError::NotPaired)
+    } else if app_close.error_code == quinn::VarInt::from_u32(CLOSE_BUSY) {
+        // The phone refused this connection because another PC is streaming.
+        Some(ScanError::Other("another PC is already streaming on the phone".to_string()))
+    } else if app_close.error_code == quinn::VarInt::from_u32(CLOSE_ALREADY_PAIRED) {
+        // The phone holds a pairing key for some PC and this PC has none: a
+        // previous pairing aborted after the phone persisted. Without this
+        // mapping the receiver retries forever with a generic failure and the
+        // user has to guess they must tap "Forget paired PC" on the phone.
+        Some(ScanError::Other(
+            "the phone already has a pairing key for another PC — open the phone and tap 'Forget paired PC' (or run this receiver with --forget-pairing)".to_string(),
+        ))
+    } else {
+        None
     }
 }
 
@@ -154,6 +183,49 @@ async fn scan_rndis_subnet(
 ) -> Result<(Connection, Fingerprint), ScanError> {
     let mut attempt = 1;
     loop {
+        // Direct-address override (e.g. an emulator reached through an adb UDP port
+        // redirect, where no RNDIS adapter exists to scan). When set, skip discovery
+        // entirely and connect straight to ANDROIDDEX_HOST:port.
+        if let Ok(host) = std::env::var("ANDROIDDEX_HOST") {
+            if !host.is_empty() {
+                let addr = SocketAddr::new(
+                    host.parse::<Ipv4Addr>()
+                        .map_err(|e| ScanError::Other(format!("ANDROIDDEX_HOST={host:?} is not an IPv4: {e}")))?
+                        .into(),
+                    port,
+                );
+                status_callback(ConnectionPhase::Scanning(host.clone(), attempt));
+                if let Ok(connecting) = endpoint.connect(addr, "localhost") {
+                    if let Ok(res) = tokio::time::timeout(Duration::from_millis(1000), connecting).await {
+                        match res {
+                            Ok(conn) => {
+                                let actual_fp = extract_peer_fingerprint(&conn)?;
+                                if let Some(expected) = expected_fp {
+                                    if actual_fp != expected {
+                                        return Err(ScanError::FingerprintMismatch {
+                                            expected,
+                                            actual: actual_fp,
+                                        });
+                                    }
+                                }
+                                status_callback(ConnectionPhase::Found(host.clone()));
+                                return Ok((conn, actual_fp));
+                            }
+                            Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
+                                if let Some(e) = scan_close_error(&app_close) {
+                                    return Err(e);
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                attempt += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        }
+
         // Hardware Check: Find RNDIS adapters
         let adapters = ipconfig::get_adapters().unwrap_or_default();
         let rndis_adapters: Vec<_> = adapters.into_iter()
@@ -165,6 +237,34 @@ async fn scan_rndis_subnet(
             .collect();
 
         if rndis_adapters.is_empty() {
+            // Emulator fallback: try 127.0.0.1 (UDP redirect from emulator console)
+            status_callback(ConnectionPhase::Scanning("127.0.0.1".to_string(), attempt));
+            let addr = SocketAddr::new(IpAddr::V4("127.0.0.1".parse().unwrap()), port);
+            if let Ok(connecting) = endpoint.connect(addr, "localhost") {
+                if let Ok(res) = tokio::time::timeout(Duration::from_millis(1000), connecting).await {
+                    match res {
+                        Ok(conn) => {
+                            let actual_fp = extract_peer_fingerprint(&conn)?;
+                            if let Some(expected) = expected_fp {
+                                if actual_fp != expected {
+                                    return Err(ScanError::FingerprintMismatch {
+                                        expected,
+                                        actual: actual_fp,
+                                });
+                                }
+                            }
+                            status_callback(ConnectionPhase::Found("127.0.0.1".to_string()));
+                            return Ok((conn, actual_fp));
+                        }
+                        Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
+                            if let Some(e) = scan_close_error(&app_close) {
+                                return Err(e);
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
             status_callback(ConnectionPhase::Failed("Connect your phone via USB.".to_string()));
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -215,8 +315,8 @@ async fn scan_rndis_subnet(
                             return Ok((conn, actual_fp));
                         }
                         Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
-                            if app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED) {
-                                return Err(ScanError::NotPaired);
+                            if let Some(e) = scan_close_error(&app_close) {
+                                return Err(e);
                             }
                         }
                         Err(_) => {}
@@ -262,8 +362,8 @@ async fn scan_rndis_subnet(
                                     }
                                 }
                                 Err(quinn::ConnectionError::ApplicationClosed(app_close)) => {
-                                    if app_close.error_code == quinn::VarInt::from_u32(CLOSE_NOT_PAIRED) {
-                                        return Some(Err(ScanError::NotPaired));
+                                    if let Some(e) = scan_close_error(&app_close) {
+                                        return Some(Err(e));
                                     }
                                 }
                                 Err(_) => {}
@@ -293,8 +393,17 @@ async fn scan_rndis_subnet(
         }
         
         status_callback(ConnectionPhase::Failed("Open the AndroidDex app on your phone.".to_string()));
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Backing-off scan: 3, 5, 8, 12, then 15 s. A machine whose adapter matches
+        // *ndis* would otherwise port-scan its /24 every 3 s forever (AV/IDS noise).
         attempt += 1;
+        let backoff_secs = match attempt {
+            1..=2 => 3,
+            3..=4 => 5,
+            5..=6 => 8,
+            7..=8 => 12,
+            _ => 15,
+        };
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
     }
 }
 

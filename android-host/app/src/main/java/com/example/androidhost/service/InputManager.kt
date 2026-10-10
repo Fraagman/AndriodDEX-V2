@@ -2,9 +2,9 @@ package com.example.androidhost.service
 
 import android.util.Log
 import com.androiddex.protocol.InputEvent
+import com.example.androidhost.BuildConfig
 import com.example.androidhost.input.LocalInputDispatcher
 import com.example.androidhost.quic.QuicServer
-import java.io.OutputStream
 
 /**
  * Reads input events off the QUIC transport and hands them to [LocalInputDispatcher].
@@ -19,10 +19,6 @@ object InputManager {
     private var inputServerThread: Thread? = null
     var isPolling = false
         private set
-
-    /** Dedicated vsock stream for the AVF Linux VM, when one is attached. */
-    @Volatile
-    var vmOutputStream: OutputStream? = null
 
     fun startPolling(dataPath: String) {
         if (isPolling) return
@@ -51,6 +47,8 @@ object InputManager {
         }
     }
 
+    /** Stops the poll thread. Called when the owning service dies; the QUIC server
+     *  itself is process-global and outlives the service. */
     fun stopPolling() {
         isPolling = false
         inputServerThread?.interrupt()
@@ -58,23 +56,6 @@ object InputManager {
     }
 
     private fun handleInputEvent(data: ByteArray, length: Int) {
-        // If a VM is running, pipe the raw bytes straight to its vsock and skip Android.
-        vmOutputStream?.let { stream ->
-            try {
-                val lenBytes = java.nio.ByteBuffer.allocate(4)
-                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                    .putInt(length)
-                    .array()
-                stream.write(lenBytes)
-                stream.write(data, 0, length)
-                stream.flush()
-                return
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to write to VM vsock, falling back to Android", e)
-                vmOutputStream = null
-            }
-        }
-
         val event = try {
             InputEvent.parseFrom(data.copyOf(length))
         } catch (e: Exception) {
@@ -89,12 +70,14 @@ object InputManager {
             }
             InputEvent.EventCase.KEYBOARD -> {
                 val k = event.keyboard
-                Log.d(TAG, "InputManager handleInputEvent KEYBOARD: keycode=${k.keycode}, pressed=${k.pressed}")
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "InputManager handleInputEvent KEYBOARD: keycode=${k.keycode}, pressed=${k.pressed}")
+                }
                 LocalInputDispatcher.onKey(k.keycode, k.pressed, k.modifiers)
             }
             InputEvent.EventCase.SCROLL -> {
                 val s = event.scroll
-                LocalInputDispatcher.onScroll(s.x, s.y, s.vScroll, s.hScroll)
+                LocalInputDispatcher.onScroll(s.x, s.y, s.vScroll, s.hScroll, s.modifiers)
             }
             InputEvent.EventCase.REQUEST_KEYFRAME -> {
                 Log.i(TAG, "Keyframe requested by receiver")

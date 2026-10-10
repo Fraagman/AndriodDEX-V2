@@ -95,19 +95,29 @@ class ScreenEncoder(
         encoder.setCallback(callback)
 
         try {
-            encoder.configure(buildFormat(constrainedBaseline = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        } catch (e: Exception) {
-            // Some encoders reject an explicit profile/level pair. Losing the profile
-            // hint is survivable — KEY_MAX_B_FRAMES still asks for no B-frames — but a
-            // failed configure is not, so retry once without it.
-            Log.w(TAG, "Encoder rejected ConstrainedBaseline; retrying without profile/level", e)
-            encoder.reset()
-            encoder.setCallback(callback)
-            encoder.configure(buildFormat(constrainedBaseline = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        }
+            try {
+                encoder.configure(buildFormat(constrainedBaseline = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e: Exception) {
+                // Some encoders reject an explicit profile/level pair. Losing the profile
+                // hint is survivable — KEY_MAX_B_FRAMES still asks for no B-frames — but a
+                // failed configure is not, so retry once without it.
+                Log.w(TAG, "Encoder rejected ConstrainedBaseline; retrying without profile/level", e)
+                encoder.reset()
+                encoder.setCallback(callback)
+                encoder.configure(buildFormat(constrainedBaseline = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
 
-        surface = encoder.createInputSurface()
-        codec = encoder
+            surface = encoder.createInputSurface()
+            codec = encoder
+        } catch (e: Exception) {
+            // Never leak a codec instance: encoder slots are a scarce hardware
+            // resource, and enough leaked instances leave no app able to encode.
+            try {
+                encoder.release()
+            } catch (_: Exception) {
+            }
+            throw e
+        }
         Log.i(TAG, "Encoder prepared: ${width}x$height @ ${FRAME_RATE}fps, ${bitrate / 1_000_000} Mbps")
     }
 
@@ -130,7 +140,9 @@ class ScreenEncoder(
     fun requestKeyframe(bypassCooldown: Boolean = false) {
         val encoder = codec ?: return
         if (!running) return
-        val now = System.currentTimeMillis()
+        // uptimeMillis, not wall clock: an NTP or timezone step must not be able to
+        // lock keyframe requests out for minutes.
+        val now = android.os.SystemClock.uptimeMillis()
         if (!bypassCooldown && now - lastKeyframeRequestTime < 250) return
         lastKeyframeRequestTime = now
 
@@ -138,7 +150,9 @@ class ScreenEncoder(
             encoder.setParameters(Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             })
-            Log.d(TAG, "Keyframe requested on encoder")
+            if (com.example.androidhost.BuildConfig.DEBUG) {
+                Log.d(TAG, "Keyframe requested on encoder")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe", e)
         }
@@ -279,7 +293,7 @@ class ScreenEncoder(
                     val count = framesEncoded.incrementAndGet()
                     bytesEncoded.addAndGet(info.size.toLong())
                     if (isKeyframe) keyframesEncoded.incrementAndGet()
-                    if (count % LOG_EVERY_FRAMES == 0L) {
+                    if (com.example.androidhost.BuildConfig.DEBUG && count % LOG_EVERY_FRAMES == 0L) {
                         Log.d(
                             TAG,
                             "Encoded $count frames, ${keyframesEncoded.get()} keyframes, " +

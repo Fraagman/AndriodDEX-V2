@@ -4,7 +4,14 @@ class QuicServer {
     companion object {
         var handle: Long = 0
             private set
-            
+
+        /**
+         * True when [start] returned 0 (port busy, key storage unusable): the PC can
+         * never connect and the UI must show a terminal error instead of "Idle".
+         */
+        var serverStartFailed = false
+            private set
+
         init {
             System.loadLibrary("rust_quic_server")
         }
@@ -12,7 +19,17 @@ class QuicServer {
         fun startServer(port: Int, dataPath: String) {
             if (handle == 0L) {
                 handle = start(port, dataPath)
-                android.util.Log.d("QuicServer", "QUIC server started, handle = $handle")
+                if (handle != 0L) {
+                    serverStartFailed = false
+                    android.util.Log.i("QuicServer", "QUIC server started, handle = $handle")
+                } else {
+                    serverStartFailed = true
+                    android.util.Log.e(
+                        "QuicServer",
+                        "QUIC server FAILED to start (port $port busy, or key storage unusable); " +
+                            "a receiver will never be able to connect"
+                    )
+                }
             }
         }
 

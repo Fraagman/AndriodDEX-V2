@@ -151,6 +151,17 @@ fn write_private(path: &Path, chunks: &[&[u8]]) -> io::Result<()> {
 
     fs::rename(&tmp, path)?;
     restrict_file(path)?;
+    // fsync the containing directory so the rename itself survives a crash:
+    // without it the file can be gone while the disk still holds the old
+    // contents, and the key silently disappears.
+    #[cfg(unix)]
+    {
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+    }
     Ok(())
 }
 

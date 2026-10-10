@@ -13,14 +13,9 @@ pub fn render_action_center(
     }
 
     let screen_rect = ctx.screen_rect();
-    let taskbar_height = 42.0;
-    let ac_width = 340.0;
-    let ac_height = screen_rect.height() - taskbar_height;
-
-    let ac_rect = Rect::from_min_size(
-        Pos2::new(screen_rect.max.x - ac_width, screen_rect.min.y),
-        Vec2::new(ac_width, ac_height),
-    );
+    let taskbar_height = super::layout::TASKBAR_HEIGHT;
+    let ac_width = super::layout::ACTION_CENTER_WIDTH;
+    let ac_rect = super::layout::action_center_rect(screen_rect);
 
     // Dismiss on outside click
     if ctx.input(|i| i.pointer.any_click()) {
@@ -137,11 +132,11 @@ pub fn render_action_center(
     let quick_actions = [
         QuickAction { id: "qa_fs", label: "Fullscreen", icon: "🖥", active: false },
         QuickAction { id: "qa_kf", label: "Keyframe", icon: "⚡", active: false },
-        QuickAction { id: "qa_mute", label: "Mute", icon: "🔊", active: ui_state.is_muted },
+        QuickAction { id: "qa_mute", label: if ui_state.is_muted { "Unmute" } else { "Mute" }, icon: if ui_state.is_muted { "🔇" } else { "🔊" }, active: ui_state.is_muted },
         QuickAction { id: "qa_hud", label: "Stats HUD", icon: "📊", active: ui_state.show_hud_stats },
         QuickAction { id: "qa_kiosk", label: "Kiosk", icon: "🔒", active: is_kiosk },
         QuickAction { id: "qa_reconn", label: "Reconnect", icon: "🔄", active: false },
-        QuickAction { id: "qa_sec", label: "Security", icon: "🛡", active: false },
+        QuickAction { id: "qa_sec", label: "Security", icon: "🛡", active: ui_state.settings_open },
         QuickAction { id: "qa_sett", label: "Settings", icon: "⚙", active: ui_state.settings_open },
     ];
 

@@ -13,28 +13,20 @@ import com.example.androidhost.service.DisplayService
 import java.lang.ref.WeakReference
 
 /**
- * Callback for WebView surfaces (BrowserApp, CodeServerWindow) that want key/text events
- * routed through the DOM instead of the Android IME.
+ * Callback for WebView surfaces (BrowserApp, CodeServerWindow) that want text
+ * events routed through the DOM instead of the Android IME.
  *
- * Registered by the surface when its WebView gains focus and cleared when it loses focus;
- * see [LocalInputDispatcher.registerWebViewBridge]. Callbacks are invoked on the main
- * thread. All three methods must be safe to call for non-editable focus targets — the
- * WebView side is expected to check `document.activeElement` and no-op silently when the
- * focus is not on an editable element (an INPUT, TEXTAREA or contentEditable node), so the
- * page's own key-shortcut handling keeps working (31c).
+ * The platform IME cannot serve the untrusted VirtualDisplay, so printable text
+ * resolved by the PC (TextEvent — layout-independent, dead keys, clipboard
+ * paste) is injected into the page's focused editable element via
+ * `evaluateJavascript`. Everything else arrives as real [KeyEvent]s and is
+ * dispatched straight into the WebView, where Chromium performs the default
+ * action (caret movement, backward delete, form submit, page scroll) and raises
+ * trusted keydown/keyup pairs to page JavaScript.
  */
 interface WebViewInputBridge {
     /** Insert `text` into the currently focused editable element. */
     fun insertText(text: CharSequence)
-
-    /**
-     * Handle a control key that should not be routed as text.
-     *
-     * `key` is a DOM-style KeyboardEvent.key value: "Backspace", "Enter", "Tab", "Escape",
-     * "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown". `keyCode` is the legacy DOM
-     * KeyboardEvent.keyCode integer. `pressed` is true for keydown, false for keyup.
-     */
-    fun controlKey(key: String, keyCode: Int, pressed: Boolean)
 }
 
 /**
@@ -86,14 +78,26 @@ object LocalInputDispatcher {
 
     // ---- Keyboard state (main thread only) ----
 
-    /** Currently held modifiers, as an Android metaState bitmask. */
-    private var metaState = 0
-
-    /** Latched CapsLock / NumLock bits, toggled on each press. */
+    /**
+     * Latched CapsLock / NumLock bits, toggled on each press. Modifier state is
+     * NOT tracked here: the receiver reports the live modifier bitmask with every
+     * event, which is authoritative even when a release is lost on the wire.
+     */
     private var lockState = 0
 
-    /** downTime per Android keycode, so KeyEvent UP pairs with its DOWN. */
+    /** downTime per winit keycode, so KeyEvent UP pairs with its DOWN. Keyed by
+     *  the wire code, not the Android keycode: several wire codes map to one
+     *  Android keycode (Backslash/IntlBackslash, NumpadMultiply/NumpadStar) and
+     *  would otherwise share one downTime. */
     private val keyDownTimes = HashMap<Int, Long>()
+
+    /** Key auto-repeat (the receiver suppresses OS repeats for keyboard-routed
+     *  keys; they are regenerated here with proper Android `repeatCount`). */
+    private val repeatDelayMs = 400L
+    private val repeatPeriodMs = 50L
+    private var repeatWinitKey = -1
+    private var repeatRunnable: Runnable? = null
+    private var repeatCounter = 0
 
     /**
      * When set, WebView-focused surfaces receive text and control keys through the DOM
@@ -214,12 +218,14 @@ object LocalInputDispatcher {
      * @param wireX  X in the [WIRE_WIDTH] coordinate space
      * @param wireY  Y in the [WIRE_HEIGHT] coordinate space
      * @param buttons bitmask of [WIRE_BUTTON_LEFT] / [WIRE_BUTTON_RIGHT] / [WIRE_BUTTON_MIDDLE]
+     * @param modifiers live wire modifier bitmask from the receiver; folded into
+     *        the dispatched MotionEvents so Ctrl-click / Shift-click reach apps
      */
     fun onMouse(wireX: Int, wireY: Int, buttons: Int, modifiers: Int = 0) {
-        mainHandler.post { handleMouse(wireX, wireY, buttons) }
+        mainHandler.post { handleMouse(wireX, wireY, buttons, modifiers) }
     }
 
-    private fun handleMouse(wireX: Int, wireY: Int, buttons: Int) {
+    private fun handleMouse(wireX: Int, wireY: Int, buttons: Int, wireModifiers: Int) {
         val view = targetRef?.get() ?: return
 
         val x = scaleX(wireX)
@@ -228,6 +234,7 @@ object LocalInputDispatcher {
         val changed = previous xor buttons
         val androidButtons = toAndroidButtonState(buttons)
         val moved = x != lastX || y != lastY
+        val meta = wireModifiersToAndroidMeta(wireModifiers) or lockState
 
         val wasDown = previous != 0
         val isDown = buttons != 0
@@ -236,40 +243,40 @@ object LocalInputDispatcher {
         //   ACTION_DOWN -> ACTION_BUTTON_PRESS -> ACTION_BUTTON_RELEASE -> ACTION_UP,
         // so releases are emitted before the pointer action and presses after it.
         if (changed and WIRE_BUTTON_RIGHT != 0 && buttons and WIRE_BUTTON_RIGHT == 0) {
-            dispatchButtonAction(view, x, y, false, androidButtons, MotionEvent.BUTTON_SECONDARY)
+            dispatchButtonAction(view, x, y, false, androidButtons, MotionEvent.BUTTON_SECONDARY, meta)
         }
         if (changed and WIRE_BUTTON_MIDDLE != 0 && buttons and WIRE_BUTTON_MIDDLE == 0) {
-            dispatchButtonAction(view, x, y, false, androidButtons, MotionEvent.BUTTON_TERTIARY)
+            dispatchButtonAction(view, x, y, false, androidButtons, MotionEvent.BUTTON_TERTIARY, meta)
         }
 
         when {
             !wasDown && isDown -> {
                 gestureDownTime = SystemClock.uptimeMillis()
-                dispatchPointer(view, MotionEvent.ACTION_DOWN, x, y, androidButtons)
+                dispatchPointer(view, MotionEvent.ACTION_DOWN, x, y, androidButtons, meta)
             }
             wasDown && !isDown -> {
-                dispatchPointer(view, MotionEvent.ACTION_UP, x, y, 0)
+                dispatchPointer(view, MotionEvent.ACTION_UP, x, y, 0, meta)
                 gestureDownTime = 0L
             }
             isDown -> {
                 // Emit a MOVE for position changes and for button changes mid-gesture,
                 // so Compose sees the updated buttonState without a new DOWN.
                 if (moved || changed != 0) {
-                    dispatchPointer(view, MotionEvent.ACTION_MOVE, x, y, androidButtons)
+                    dispatchPointer(view, MotionEvent.ACTION_MOVE, x, y, androidButtons, meta)
                 }
             }
             moved -> {
                 // No button held: this is hover. Must go through the generic-motion
                 // path with SOURCE_MOUSE for hover and cursor states to work.
-                dispatchHover(view, x, y)
+                dispatchHover(view, x, y, meta)
             }
         }
 
         if (changed and WIRE_BUTTON_RIGHT != 0 && buttons and WIRE_BUTTON_RIGHT != 0) {
-            dispatchButtonAction(view, x, y, true, androidButtons, MotionEvent.BUTTON_SECONDARY)
+            dispatchButtonAction(view, x, y, true, androidButtons, MotionEvent.BUTTON_SECONDARY, meta)
         }
         if (changed and WIRE_BUTTON_MIDDLE != 0 && buttons and WIRE_BUTTON_MIDDLE != 0) {
-            dispatchButtonAction(view, x, y, true, androidButtons, MotionEvent.BUTTON_TERTIARY)
+            dispatchButtonAction(view, x, y, true, androidButtons, MotionEvent.BUTTON_TERTIARY, meta)
         }
 
         lastWireButtons = buttons
@@ -284,7 +291,7 @@ object LocalInputDispatcher {
      * @param vScroll vertical detents; positive scrolls content up (away from the user)
      * @param hScroll horizontal detents; positive scrolls content right
      */
-    fun onScroll(wireX: Int, wireY: Int, vScroll: Float, hScroll: Float) {
+    fun onScroll(wireX: Int, wireY: Int, vScroll: Float, hScroll: Float, modifiers: Int = 0) {
         mainHandler.post {
             val view = targetRef?.get() ?: return@post
             val x = scaleX(wireX)
@@ -311,7 +318,7 @@ object LocalInputDispatcher {
             val event = MotionEvent.obtain(
                 now, now, MotionEvent.ACTION_SCROLL,
                 1, arrayOf(mouseProperties()), arrayOf(coords),
-                metaState or lockState, toAndroidButtonState(lastWireButtons),
+                wireModifiersToAndroidMeta(modifiers) or lockState, toAndroidButtonState(lastWireButtons),
                 1.0f, 1.0f,
                 0, 0, InputDevice.SOURCE_MOUSE, 0
             )
@@ -325,7 +332,7 @@ object LocalInputDispatcher {
         }
     }
 
-    private fun dispatchPointer(view: View, action: Int, x: Float, y: Float, buttonState: Int) {
+    private fun dispatchPointer(view: View, action: Int, x: Float, y: Float, buttonState: Int, meta: Int) {
         val now = SystemClock.uptimeMillis()
         // ACTION_DOWN establishes downTime; MOVE and UP must reuse it or Compose treats
         // them as unrelated events and the gesture never registers as one interaction.
@@ -361,7 +368,7 @@ object LocalInputDispatcher {
         val event = MotionEvent.obtain(
             downTime, now, action,
             1, arrayOf(mouseProperties()), arrayOf(coords),
-            metaState or lockState, buttonState,
+            meta, buttonState,
             1.0f, 1.0f,
             0, 0, InputDevice.SOURCE_MOUSE, 0
         )
@@ -372,7 +379,7 @@ object LocalInputDispatcher {
         }
     }
 
-    private fun dispatchHover(view: View, x: Float, y: Float) {
+    private fun dispatchHover(view: View, x: Float, y: Float, meta: Int) {
         val now = SystemClock.uptimeMillis()
         val wv = resolveWebViewTarget(x, y)
         var targetView: View = view
@@ -393,7 +400,7 @@ object LocalInputDispatcher {
         val event = MotionEvent.obtain(
             now, now, MotionEvent.ACTION_HOVER_MOVE,
             1, arrayOf(mouseProperties()), arrayOf(coords),
-            metaState or lockState, 0,
+            meta, 0,
             1.0f, 1.0f,
             0, 0, InputDevice.SOURCE_MOUSE, 0
         )
@@ -418,7 +425,8 @@ object LocalInputDispatcher {
         y: Float,
         pressed: Boolean,
         buttonState: Int,
-        actionButton: Int
+        actionButton: Int,
+        meta: Int
     ) {
         val now = SystemClock.uptimeMillis()
         val downTime = if (gestureDownTime != 0L) gestureDownTime else now
@@ -443,7 +451,7 @@ object LocalInputDispatcher {
         val event = MotionEvent.obtain(
             downTime, now, action,
             1, arrayOf(mouseProperties()), arrayOf(coords),
-            metaState or lockState,
+            meta,
             // Guarantee the bit for the button this event is about matches the action,
             // independent of how the caller computed buttonState.
             if (pressed) buttonState or actionButton else buttonState and actionButton.inv(),
@@ -484,17 +492,19 @@ object LocalInputDispatcher {
     private fun cancelActiveGesture() {
         val view = targetRef?.get() ?: return
         if (gestureDownTime == 0L) return
-        dispatchPointer(view, MotionEvent.ACTION_CANCEL, lastX, lastY, 0)
+        dispatchPointer(view, MotionEvent.ACTION_CANCEL, lastX, lastY, 0, lockState)
         gestureDownTime = 0L
     }
 
     private fun resetState() {
         gestureDownTime = 0L
         lastWireButtons = 0
-        metaState = 0
         lockState = 0
         keyDownTimes.clear()
         webviewGesture = false
+        lastX = 0f
+        lastY = 0f
+        cancelRepeat()
         if (targetRef == null || targetRef?.get() == null) {
             webviewPointerTarget = null
         }
@@ -508,105 +518,135 @@ object LocalInputDispatcher {
      * Handles one key event from the PC.
      *
      * [winitKeyCode] is the receiver's raw `winit::keyboard::KeyCode` ordinal; see
-     * [WinitKeyMap]. The receiver hardcodes `modifiers: 0` on the wire, so shift/ctrl/alt
-     * state is reconstructed here from the modifier key presses themselves.
+     * [WinitKeyMap]. Modifier state is NOT reconstructed from key history: the
+     * receiver reports the live bitmask with every event and that is authoritative
+     * (a lost release can no longer stick Shift on). Only CapsLock/NumLock latch
+     * locally, because the wire carries no lock state.
      *
-     * When our IME is the active keyboard and has a live `InputConnection`, the event is
-     * handed to it so text lands in the focused editor. Otherwise it goes straight into
-     * the view tree.
-     *
-     * @param wireModifiers modifier bitmask from the receiver. When non-zero, this is
-     *        used directly instead of the locally-reconstructed state, which can desync
-     *        if a modifier release is missed over the network (classic: Shift stuck on).
+     * @param wireModifiers modifier bitmask from the receiver.
+     * @param repeatCount 0 for the initial press; >0 for synthesised auto-repeat.
      */
     fun onKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
-        mainHandler.post { handleKey(winitKeyCode, pressed, wireModifiers) }
+        mainHandler.post { handleKey(winitKeyCode, pressed, wireModifiers, 0) }
     }
 
-    private fun handleKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int = 0) {
-        updateMetaState(winitKeyCode, pressed)
+    private fun handleKey(winitKeyCode: Int, pressed: Boolean, wireModifiers: Int, repeatCount: Int) {
+        if (repeatCount == 0) {
+            if (pressed) {
+                if (winitKeyCode == WinitKeyMap.CAPS_LOCK) {
+                    lockState = lockState xor KeyEvent.META_CAPS_LOCK_ON
+                } else if (winitKeyCode == WinitKeyMap.NUM_LOCK) {
+                    lockState = lockState xor KeyEvent.META_NUM_LOCK_ON
+                }
+            } else {
+                cancelRepeat(winitKeyCode)
+            }
+        }
 
         val keyCode = WinitKeyMap.toAndroidKeyCode(winitKeyCode)
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN) return
 
-        // When the receiver sends a non-zero modifier bitmask, trust it over the
-        // locally-reconstructed state. A missed key-up over the network leaves the
-        // local tracker stuck, but the receiver always has the real modifier state.
-        val effectiveMeta = if (wireModifiers != 0) wireModifiersToAndroidMeta(wireModifiers) or lockState else metaState or lockState
+        val effectiveMeta = wireModifiersToAndroidMeta(wireModifiers) or lockState
         val now = SystemClock.uptimeMillis()
         val downTime: Long
-        if (pressed) {
+        if (pressed && repeatCount == 0) {
             downTime = now
-            keyDownTimes[keyCode] = now
+            keyDownTimes[winitKeyCode] = now
+            if (!isModifierOrLockKey(winitKeyCode)) scheduleRepeat(winitKeyCode, wireModifiers)
+        } else if (pressed) {
+            downTime = keyDownTimes[winitKeyCode] ?: now
         } else {
-            downTime = keyDownTimes.remove(keyCode) ?: now
+            downTime = keyDownTimes.remove(winitKeyCode) ?: now
         }
 
-        // Route through the WebView bridge when a WebView surface has focus. This is the
-        // replacement for the dead IME path: our virtual display is
-        // untrusted, so `onStartInput` never fires and `InputConnection`-based text entry
-        // silently drops. WebViews need text delivered into the DOM instead.
-        // the WebView still receives them as Chromium key events for page shortcuts.
+        val event = KeyEvent(
+            downTime, now,
+            if (pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
+            keyCode, repeatCount, effectiveMeta,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+            InputDevice.SOURCE_KEYBOARD
+        )
+
         val target = currentTarget
         if (target is InputTarget.WebViewBridge && target.isLive()) {
-            val bridge = target.bridge
+            // Real Android KeyEvents straight into the WebView: Chromium performs
+            // the default action (caret movement, backward delete, form submit,
+            // page scroll, find-bar and shortcut handling) and raises trusted
+            // keydown/keyup pairs to page JS. DOM injection stays reserved for
+            // TextEvent strings, which a bare KeyEvent cannot carry.
+            target.view.dispatchKeyEvent(event)
+            return
+        }
+
+        var consumed = false
+        if (target is InputTarget.ComposeTarget) {
             val controlName = controlKeyName(keyCode)
             if (controlName != null) {
-                bridge.controlKey(controlName, controlKeyDomCode(keyCode), pressed)
-                return
+                consumed = target.onKey(keyCode, pressed)
             }
-            // Printable characters: only on key-down, and only when we can resolve one.
-            // Modifier-only combos (Ctrl+A etc.) fall through to `dispatchKeyEvent` so
-            // the WebView still receives them as Chromium key events for page shortcuts.
-            if (pressed && effectiveMeta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) == 0) {
-                val unicode = KeyEvent(
-                    downTime, now, KeyEvent.ACTION_DOWN, keyCode, 0, effectiveMeta,
-                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
-                ).unicodeChar
-                if (unicode != 0) {
-                    bridge.insertText(String(Character.toChars(unicode)))
-                    return
-                }
-            }
-            // Not a printable char and not a listed control — fall through so page-level
-            // shortcuts (Ctrl+F etc.) keep working via View.dispatchKeyEvent.
-        } else if (target is InputTarget.ComposeTarget) {
-            val controlName = controlKeyName(keyCode)
-            if (controlName != null) {
-                if (target.onKey(keyCode, pressed)) return
-            }
-            if (pressed && effectiveMeta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) == 0) {
-                val unicode = KeyEvent(
-                    downTime, now, KeyEvent.ACTION_DOWN, keyCode, 0, effectiveMeta,
-                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
-                ).unicodeChar
+            if (!consumed && pressed && effectiveMeta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) == 0) {
+                val unicode = event.unicodeChar
                 if (unicode != 0) {
                     target.onText(String(Character.toChars(unicode)))
-                    return
+                    consumed = true
                 }
             }
         }
 
-        // The IME path is removed.
-
-        if (target == null) {
+        if (!consumed) {
+            // No bridge target, or the target declined the key: hand it to the
+            // view tree so Compose's own key handling (caret movement in focused
+            // text fields, scrollables, shortcuts) still sees it.
             val view = targetRef?.get() ?: return
-            val event = KeyEvent(
-                downTime, now,
-                if (pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
-                keyCode, 0, effectiveMeta,
-                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-                InputDevice.SOURCE_KEYBOARD
-            )
             view.dispatchKeyEvent(event)
         }
     }
 
+    /** True for keys that must never auto-repeat (modifiers, CapsLock, NumLock). */
+    private fun isModifierOrLockKey(winitKeyCode: Int): Boolean = when (winitKeyCode) {
+        WinitKeyMap.CAPS_LOCK, WinitKeyMap.NUM_LOCK -> true
+        else -> WinitKeyMap.isModifier(winitKeyCode)
+    }
+
     /**
-     * Maps Android keycodes for the control keys named in the task-31 spec to their
-     * DOM `KeyboardEvent.key` string. Returns null for keys not covered by 31b, which
-     * are then either injected as text (printable) or fall through to `dispatchKeyEvent`
-     * (modifier combos, function keys).
+     * Starts the auto-repeat loop for a fresh key press. Repeats are synthesised
+     * here because the receiver suppresses OS repeats for keyboard-routed keys —
+     * one repeat authority, deterministic over the wire. A new press takes over
+     * the slot (Windows behaviour: only the newest key repeats).
+     */
+    private fun scheduleRepeat(winitKeyCode: Int, wireModifiers: Int) {
+        cancelRepeat()
+        repeatWinitKey = winitKeyCode
+        repeatCounter = 0
+        val runnable = object : Runnable {
+            override fun run() {
+                if (repeatWinitKey != winitKeyCode) return
+                repeatCounter += 1
+                handleKey(winitKeyCode, true, wireModifiers, repeatCounter)
+                mainHandler.postDelayed(this, repeatPeriodMs)
+            }
+        }
+        repeatRunnable = runnable
+        mainHandler.postDelayed(runnable, repeatDelayMs)
+    }
+
+    private fun cancelRepeat(winitKeyCode: Int) {
+        if (repeatWinitKey == winitKeyCode) cancelRepeat()
+    }
+
+    private fun cancelRepeat() {
+        repeatRunnable?.let { mainHandler.removeCallbacks(it) }
+        repeatRunnable = null
+        repeatWinitKey = -1
+        repeatCounter = 0
+    }
+
+    /**
+     * Maps Android keycodes for the control keys to the set the shell's text
+     * fields are asked to handle through [InputTarget.ComposeTarget.onKey] before
+     * anything falls through to the view tree. Returns null for other keys, which
+     * are then either injected as text (printable) or dispatched raw (modifier
+     * combos, function keys).
      */
     private fun controlKeyName(keyCode: Int): String? = when (keyCode) {
         KeyEvent.KEYCODE_DEL -> "Backspace"
@@ -620,19 +660,6 @@ object LocalInputDispatcher {
         else -> null
     }
 
-    /** Legacy DOM keyCode integer for the keys enumerated by [controlKeyName]. */
-    private fun controlKeyDomCode(keyCode: Int): Int = when (keyCode) {
-        KeyEvent.KEYCODE_DEL -> 8
-        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> 13
-        KeyEvent.KEYCODE_TAB -> 9
-        KeyEvent.KEYCODE_ESCAPE -> 27
-        KeyEvent.KEYCODE_DPAD_LEFT -> 37
-        KeyEvent.KEYCODE_DPAD_UP -> 38
-        KeyEvent.KEYCODE_DPAD_RIGHT -> 39
-        KeyEvent.KEYCODE_DPAD_DOWN -> 40
-        else -> 0
-    }
-
     fun registerComposeTarget(owner: Any, onText: ((String) -> Unit)?, onKey: ((Int, Boolean) -> Boolean)?) {
         setTarget(owner, if (onText != null && onKey != null) InputTarget.ComposeTarget(onText, onKey) else null)
     }
@@ -642,7 +669,8 @@ object LocalInputDispatcher {
      * PC resolves itself (dead keys, IME composition, clipboard paste).
      *
      * Routes through the WebView bridge when one is attached, or the Compose injection
-     * channel, or the Terminal.
+     * channel, or the Terminal. A drop is logged rather than silently swallowed so a
+     * missing `registerComposeTarget` call is visible during support/debugging.
      */
     fun onText(text: CharSequence) {
         if (text.isEmpty()) return
@@ -653,49 +681,17 @@ object LocalInputDispatcher {
                 return@post
             } else if (target is InputTarget.ComposeTarget) {
                 target.onText(text.toString())
+            } else {
+                Log.w(TAG, "Dropping text (${text.length} chars): no input target registered")
             }
         }
-    }
-
-    private fun updateMetaState(winitKeyCode: Int, pressed: Boolean) {
-        // CapsLock / NumLock latch on press and persist until pressed again.
-        if (!pressed) {
-            when (winitKeyCode) {
-                WinitKeyMap.CAPS_LOCK, WinitKeyMap.NUM_LOCK -> return
-            }
-        } else {
-            when (winitKeyCode) {
-                WinitKeyMap.CAPS_LOCK -> {
-                    lockState = lockState xor KeyEvent.META_CAPS_LOCK_ON
-                    return
-                }
-                WinitKeyMap.NUM_LOCK -> {
-                    lockState = lockState xor KeyEvent.META_NUM_LOCK_ON
-                    return
-                }
-            }
-        }
-
-        val bits = when (winitKeyCode) {
-            WinitKeyMap.SHIFT_LEFT -> KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
-            WinitKeyMap.SHIFT_RIGHT -> KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_RIGHT_ON
-            WinitKeyMap.CONTROL_LEFT -> KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
-            WinitKeyMap.CONTROL_RIGHT -> KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_RIGHT_ON
-            WinitKeyMap.ALT_LEFT -> KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
-            WinitKeyMap.ALT_RIGHT -> KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON
-            WinitKeyMap.SUPER_LEFT, WinitKeyMap.META -> KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON
-            WinitKeyMap.SUPER_RIGHT -> KeyEvent.META_META_ON or KeyEvent.META_META_RIGHT_ON
-            else -> return
-        }
-
-        metaState = if (pressed) metaState or bits else metaState and bits.inv()
     }
 
     /**
      * Converts the wire modifier bitmask (matching `input.proto` Modifier enum values)
      * into Android [KeyEvent] `META_*` flags.
      */
-    private fun wireModifiersToAndroidMeta(wireModifiers: Int): Int {
+    internal fun wireModifiersToAndroidMeta(wireModifiers: Int): Int {
         var meta = 0
         if (wireModifiers and 1 != 0) meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
         if (wireModifiers and 2 != 0) meta = meta or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
@@ -776,27 +772,4 @@ internal fun buildInsertTextScript(text: CharSequence): String {
         "if(!editable)return;" +
         "try{document.execCommand('insertText',false,t);}catch(e){}" +
         "})(${escapeForJsStringLiteral(text)});"
-}
-
-/**
- * Builds the `evaluateJavascript` payload for a synthetic KeyboardEvent on the current
- * DOM caret. Backspace is delivered as `execCommand('delete')` per task 31b; Enter,
- * Tab, Escape and the arrow keys as a matching `keydown`/`keyup` pair. When Enter is
- * pressed on an INPUT inside a form we also call `form.requestSubmit()` so form
- * submission — Google search being the specific example the owner will test — actually
- * runs, which synthetic KeyboardEvents alone do not trigger.
- */
-internal fun buildControlKeyScript(key: String, keyCode: Int, pressed: Boolean): String {
-    val evType = if (pressed) "keydown" else "keyup"
-    return "(function(){var el=document.activeElement;if(!el)return;" +
-        "var tag=el.tagName;" +
-        "var editable=tag==='INPUT'||tag==='TEXTAREA'||el.isContentEditable;" +
-        "if(!editable)return;" +
-        "var k=${escapeForJsStringLiteral(key)};var kc=$keyCode;" +
-        (if (pressed && key == "Backspace") "try{document.execCommand('delete',false,null);}catch(e){}return;" else "") +
-        "try{var ev=new KeyboardEvent('$evType',{key:k,code:k,keyCode:kc,which:kc," +
-        "bubbles:true,cancelable:true});el.dispatchEvent(ev);" +
-        (if (pressed && key == "Enter") "if(tag==='INPUT'&&el.form){if(el.form.requestSubmit){el.form.requestSubmit();}else{el.form.submit();}}" else "") +
-        "}catch(e){}" +
-        "})();"
 }

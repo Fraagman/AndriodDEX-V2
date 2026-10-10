@@ -21,9 +21,14 @@ mod imp {
     pub const PRIO_ERROR: i32 = 6;
 
     pub fn write(prio: i32, tag: &str, msg: &str) {
-        // Interior NULs would truncate the message; replace rather than drop the line.
-        let sanitized = msg.replace('\0', "?");
-        let (Ok(tag), Ok(text)) = (CString::new(tag), CString::new(sanitized)) else {
+        // Interior NULs would truncate the message; replace rather than drop the
+        // line — but only pay for the scan-and-replace when a NUL is present.
+        let sanitized: std::borrow::Cow<str> = if msg.contains('\0') {
+            std::borrow::Cow::Owned(msg.replace('\0', "?"))
+        } else {
+            std::borrow::Cow::Borrowed(msg)
+        };
+        let (Ok(tag), Ok(text)) = (CString::new(tag), CString::new(sanitized.as_bytes())) else {
             return;
         };
         unsafe {

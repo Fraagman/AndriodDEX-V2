@@ -13,7 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -151,16 +151,25 @@ fun FilesApp(
             // Presentation's context).
             if (showCreateFolderDialog) {
                 var folderName by remember { mutableStateOf("") }
+                var folderError by remember { mutableStateOf<String?>(null) }
                 ShellDialog(
                     title = "Create Folder",
                     confirmText = "Create",
                     onDismiss = { showCreateFolderDialog = false },
                     onConfirm = {
                         if (folderName.isNotBlank()) {
-                            File(currentDir, folderName).mkdirs()
-                            refreshTrigger++
+                            // Reject path separators and traversal: the name must be
+                            // a plain folder name inside the shown directory.
+                            if (folderName.contains('/') || folderName.contains('\\') || folderName.contains("..")) {
+                                folderError = "Name cannot contain / \\ or .."
+                            } else if (!File(currentDir, folderName).mkdirs()) {
+                                folderError = "Could not create the folder"
+                            } else {
+                                folderError = null
+                                refreshTrigger++
+                                showCreateFolderDialog = false
+                            }
                         }
-                        showCreateFolderDialog = false
                     },
                     body = {
                         OutlinedTextField(
@@ -178,8 +187,10 @@ fun FilesApp(
                                                 onKey = { keyCode, pressed ->
                                                     if (pressed && keyCode == KeyEvent.KEYCODE_DEL && folderName.isNotEmpty()) {
                                                         folderName = folderName.dropLast(1)
+                                                        true
+                                                    } else {
+                                                        false
                                                     }
-                                                    true
                                                 }
                                             )
                                         }
@@ -187,6 +198,9 @@ fun FilesApp(
                                 }
                             }
                         )
+                        folderError?.let {
+                            Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                        }
                     }
                 )
             }
@@ -194,16 +208,23 @@ fun FilesApp(
             if (showRenameDialogFor != null) {
                 val file = showRenameDialogFor!!
                 var newName by remember(file.absolutePath) { mutableStateOf(file.name) }
+                var renameError by remember(file.absolutePath) { mutableStateOf<String?>(null) }
                 ShellDialog(
                     title = "Rename",
                     confirmText = "Rename",
                     onDismiss = { showRenameDialogFor = null },
                     onConfirm = {
                         if (newName.isNotBlank() && newName != file.name) {
-                            file.renameTo(File(file.parentFile, newName))
-                            refreshTrigger++
+                            if (newName.contains('/') || newName.contains('\\') || newName.contains("..")) {
+                                renameError = "Name cannot contain / \\ or .."
+                            } else if (!file.renameTo(File(file.parentFile, newName))) {
+                                renameError = "Could not rename the file"
+                            } else {
+                                renameError = null
+                                refreshTrigger++
+                            }
                         }
-                        showRenameDialogFor = null
+                        if (renameError == null) showRenameDialogFor = null
                     },
                     body = {
                         OutlinedTextField(
@@ -221,8 +242,10 @@ fun FilesApp(
                                                 onKey = { keyCode, pressed ->
                                                     if (pressed && keyCode == KeyEvent.KEYCODE_DEL && newName.isNotEmpty()) {
                                                         newName = newName.dropLast(1)
+                                                        true
+                                                    } else {
+                                                        false
                                                     }
-                                                    true
                                                 }
                                             )
                                         }
@@ -230,6 +253,9 @@ fun FilesApp(
                                 }
                             }
                         )
+                        renameError?.let {
+                            Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                        }
                     }
                 )
             }
@@ -266,7 +292,7 @@ private fun FileRow(file: File, onClick: () -> Unit, onRename: () -> Unit, onDel
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
+            imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,
             contentDescription = null,
             tint = if (file.isDirectory) Color(0xFFFFD54F) else Color.LightGray,
             modifier = Modifier.size(32.dp)
@@ -311,34 +337,51 @@ private fun FileViewer(file: File, onBack: () -> Unit) {
             Text(file.name, color = Color.White, fontWeight = FontWeight.Bold)
         }
         
-        Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            if (canRead) {
-                val content = try {
-                    file.readText()
-                } catch (e: Exception) {
-                    "Failed to read file: ${e.message}"
+    Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        if (canRead) {
+            // Cap the read: a 200 MB .log preview would otherwise balloon memory.
+            val content = try {
+                file.inputStream().bufferedReader().use { reader ->
+                    val sb = StringBuilder()
+                    val buf = CharArray(2048)
+                    var read: Int
+                    var total = 0
+                    while (reader.read(buf).also { read = it } > 0 && total < PREVIEW_MAX_CHARS) {
+                        sb.append(buf, 0, read)
+                        total += read
+                    }
+                    if (total >= PREVIEW_MAX_CHARS) sb.append("\n\n…preview truncated at $PREVIEW_MAX_CHARS chars…")
+                    sb.toString()
                 }
-                Text(
-                    text = content,
-                    color = Color.LightGray,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    modifier = Modifier.verticalScroll(rememberScrollState())
-                )
-            } else {
-                Text(
-                    text = "Cannot preview this file type.",
-                    color = Color.Gray,
-                    modifier = Modifier.align(Alignment.Center)
-                )
+            } catch (e: Exception) {
+                "Failed to read file: ${e.message}"
             }
+            Text(
+                text = content,
+                color = Color.LightGray,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            )
+        } else {
+            Text(
+                text = "Cannot preview this file type.",
+                color = Color.Gray,
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
     }
+    }
 }
+
+private const val PREVIEW_MAX_CHARS = 64_000
 
 private fun formatSize(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0
     if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb)
     val mb = kb / 1024.0
-    return String.format(Locale.US, "%.1f MB", mb)
+    if (mb < 1024) return String.format(Locale.US, "%.1f MB", mb)
+    val gb = mb / 1024.0
+    if (gb < 1024) return String.format(Locale.US, "%.2f GB", gb)
+    return String.format(Locale.US, "%.2f TB", gb / 1024.0)
 }

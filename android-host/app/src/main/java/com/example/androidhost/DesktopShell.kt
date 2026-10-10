@@ -1,6 +1,5 @@
 package com.example.androidhost
 
-import android.view.Surface
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,24 +14,31 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.androidhost.service.DisplayService
 import com.example.androidhost.ui.components.AppRegistry
 import com.example.androidhost.vm.ConnectionViewModel
-import com.example.androidhost.vm.DisplayViewModel
 import com.example.androidhost.vm.ShellHolder
 import com.example.androidhost.vm.ShellViewModel
 
+/**
+ * The streamed desktop. Composed inside the Presentation on the VirtualDisplay
+ * (and by DebugDesktopActivity on the physical display in debug builds).
+ *
+ * This must never bind DisplayService: it is composed inside the Presentation
+ * that the service itself shows, and a bind from here ties the service's
+ * lifetime to the Presentation's — dismissing the Presentation would unbind
+ * and destroy the very service that owns the display (F1). The service is
+ * started explicitly by MainActivity; the shell reads its state through the
+ * process-wide [DisplayService] companion.
+ */
 @Composable
 fun DesktopShell(
     viewModel: ConnectionViewModel = viewModel(),
-    displayViewModel: DisplayViewModel = viewModel(),
     shellViewModel: ShellViewModel = ShellHolder.shellViewModel,
     onLockSession: () -> Unit = {},
     onRequestAudioCapture: (Boolean) -> Unit = {}
 ) {
     val isReady by viewModel.isTetheringReady.collectAsState()
-    val surface by displayViewModel.virtualDisplaySurface.collectAsState()
 
     DesktopShellContent(
         isTetheringReady = isReady,
-        surface = surface,
         shellViewModel = shellViewModel,
         onLockSession = onLockSession,
         onRequestAudioCapture = onRequestAudioCapture
@@ -42,7 +48,6 @@ fun DesktopShell(
 @Composable
 fun DesktopShellContent(
     isTetheringReady: Boolean,
-    surface: Surface? = null,
     shellViewModel: ShellViewModel? = null,
     onLockSession: () -> Unit = {},
     onRequestAudioCapture: (Boolean) -> Unit = {}

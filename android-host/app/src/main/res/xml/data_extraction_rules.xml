@@ -1,11 +1,11 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="file" path="pairing.psk" />
+        <exclude domain="file" path="pairing_v2.psk" />
         <exclude domain="file" path="tls_identity.bin" />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="file" path="pairing.psk" />
+        <exclude domain="file" path="pairing_v2.psk" />
         <exclude domain="file" path="tls_identity.bin" />
     </device-transfer>
 </data-extraction-rules>

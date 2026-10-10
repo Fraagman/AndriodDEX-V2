@@ -25,6 +25,10 @@ pub struct UiActions {
     pub toggle_kiosk: bool,
     /// Exit the application cleanly.
     pub exit_app: bool,
+    /// egui wants a repaint after this delay (an animation or a scheduled clock
+    /// update). The event loop must wake for it: with the render loop otherwise
+    /// event-driven, the only alternatives are a frozen clock or a 100% CPU spin.
+    pub repaint_after: Option<std::time::Duration>,
 }
 
 /// Metadata for an app accessible from the Windows 10 Taskbar and Start Menu.
@@ -113,17 +117,16 @@ pub struct UiState {
     pub notifications: Vec<NotificationItem>,
     pub running_apps: HashSet<&'static str>,
     pub active_settings_tab: &'static str,
+    /// First click on the destructive "Forget Pairing" button arms it; the
+    /// second click confirms. Reset when the pointer leaves the button.
+    pub forget_pairing_armed: bool,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        let mut notifications = Vec::new();
-        notifications.push(NotificationItem {
-            title: "AndroidDEX Ready".to_string(),
-            message: "Windows 10 Receiver initialized. USB Tethering link active.".to_string(),
-            time: "Just now".to_string(),
-        });
-
+        // No seeded notification: "AndroidDEX Ready — link active" before anything
+        // is connected was a lie on every launch. Real state is visible in the
+        // status line and the phase banner instead.
         Self {
             start_menu_open: false,
             action_center_open: false,
@@ -136,9 +139,10 @@ impl Default for UiState {
             is_muted: false,
             volume_level: 1.0,
             show_hud_stats: true,
-            notifications,
+            notifications: Vec::new(),
             running_apps: HashSet::new(),
             active_settings_tab: "System",
+            forget_pairing_armed: false,
         }
     }
 }
@@ -157,7 +161,9 @@ mod tests {
             assert!(!app.name.is_empty(), "App name must not be empty");
             assert!(!app.icon_symbol.is_empty(), "App icon must not be empty");
         }
-        assert!(ALL_APPS.len() >= 5, "Must have all desktop apps configured");
+        // Must mirror the phone's AppRegistry: browser, files, terminal, settings.
+        // VS Code was removed "for now" (summary.md §3.4); re-add both sides together.
+        assert!(ALL_APPS.len() >= 4, "Must have the phone-registered apps");
     }
 
     #[test]
@@ -169,7 +175,7 @@ mod tests {
         assert!(!state.is_muted);
         assert_eq!(state.volume_level, 1.0);
         assert!(state.show_hud_stats);
-        assert!(!state.notifications.is_empty());
+        assert!(state.notifications.is_empty(), "no seeded notification: the startup 'link active' one was a lie");
         assert_eq!(state.active_settings_tab, "System");
     }
 

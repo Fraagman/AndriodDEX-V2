@@ -18,6 +18,15 @@ import java.net.NetworkInterface
 
 class TetheringService : Service() {
 
+    companion object {
+        private const val TAG = "Tethering"
+
+        /** The service's own foreground notification id; the "tap to enable" hint uses a
+         *  separate id so cancelling one can never cancel the other. */
+        private const val SERVICE_NOTIFICATION_ID = 2
+        private const val TAP_NOTIFICATION_ID = 1
+    }
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val action = intent.action
@@ -31,6 +40,10 @@ class TetheringService : Service() {
             }
         }
     }
+
+    /** Last observed tethering state, so the "tap to enable" notification is only
+     *  re-posted when the state actually flips instead of on every USB broadcast. */
+    private var lastTethered: Boolean? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -61,9 +74,9 @@ class TetheringService : Service() {
         // and broadcasts tethering availability for external communication with the connected PC.
         // It legitimately retains FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(2, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            startForeground(SERVICE_NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
-            startForeground(2, notification)
+            startForeground(SERVICE_NOTIFICATION_ID, notification)
         }
         checkTethering(this)
         return START_STICKY
@@ -72,34 +85,37 @@ class TetheringService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun checkTethering(context: Context) {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val isTethered = isUsbTetheringEnabled(cm)
+        val isTethered = isUsbTetheringEnabled()
 
         if (isTethered) {
-            Log.d("Tethering", "USB tethering active")
-            val intent = Intent("com.example.androidhost.ACTION_TETHERING_READY")
-            sendBroadcast(intent)
-            
-            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.cancel(1)
+            Log.d(TAG, "USB tethering active")
+            if (lastTethered != true) {
+                val intent = Intent("com.example.androidhost.ACTION_TETHERING_READY")
+                context.sendBroadcast(intent)
+            }
+            lastTethered = isTethered
+
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancel(TAP_NOTIFICATION_ID)
         } else {
+            lastTethered = isTethered
             showTetheringNotification(context)
         }
     }
 
-    private fun isUsbTetheringEnabled(cm: ConnectivityManager): Boolean {
+    /**
+     * Detects USB tethering by interface name. The reflective
+     * `ConnectivityManager.getTetheredIfaces()` path was removed: it is a non-SDK
+     * method that is blocked for targetSdk 28+ and always threw, so only this
+     * fallback ever ran.
+     */
+    private fun isUsbTetheringEnabled(): Boolean {
         return try {
-            val method = cm.javaClass.getDeclaredMethod("getTetheredIfaces")
-            val ifaces = method.invoke(cm) as Array<String>
-            ifaces.any { it.matches("usb.*".toRegex()) || it.matches("rndis.*".toRegex()) }
+            NetworkInterface.getNetworkInterfaces()?.toList()?.any {
+                (it.name.startsWith("rndis") || it.name.startsWith("usb")) && it.isUp
+            } ?: false
         } catch (e: Exception) {
-            try {
-                NetworkInterface.getNetworkInterfaces()?.toList()?.any {
-                    (it.name.startsWith("rndis") || it.name.startsWith("usb")) && it.isUp
-                } ?: false
-            } catch (e2: Exception) {
-                false
-            }
+            false
         }
     }
 
@@ -134,7 +150,7 @@ class TetheringService : Service() {
             .setAutoCancel(true)
             .build()
 
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(1, notification)
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(TAP_NOTIFICATION_ID, notification)
     }
 }

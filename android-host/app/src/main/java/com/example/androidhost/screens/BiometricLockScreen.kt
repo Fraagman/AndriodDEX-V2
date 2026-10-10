@@ -18,27 +18,33 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 
+/**
+ * The lock screen shown after "Lock Session". Locking stops the stream and the
+ * audio capture; unlocking requires biometrics or the device credential.
+ *
+ * A dead-end here would strand the user (no enrolled fingerprint, a cancelled
+ * prompt, a transient error), so this screen always offers "Try again" and an
+ * explicit "Skip" that ends the locked session — the same exit a forced app
+ * restart would give, made visible instead of hidden.
+ */
 @Composable
 fun BiometricLockScreen(
     onUnlockSuccess: () -> Unit
 ) {
     val fragmentActivity = LocalContext.current as? FragmentActivity
     var errorMsg by remember { mutableStateOf<String?>(null) }
+    var attempt by remember { mutableStateOf(0) }
 
-    LaunchedEffect(fragmentActivity) {
-        if (fragmentActivity == null) {
-            errorMsg = "Biometric authentication unavailable: host is not a FragmentActivity"
-            return@LaunchedEffect
-        }
-
-        val executor = ContextCompat.getMainExecutor(fragmentActivity)
+    fun showPrompt() {
+        val activity = fragmentActivity ?: return
+        val executor = ContextCompat.getMainExecutor(activity)
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Unlock AndroidDex")
             .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
             .build()
 
         val biometricPrompt = BiometricPrompt(
-            fragmentActivity,
+            activity,
             executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -53,12 +59,20 @@ fun BiometricLockScreen(
 
                 override fun onAuthenticationFailed() {
                     super.onAuthenticationFailed()
-                    errorMsg = "Authentication failed"
+                    errorMsg = "Authentication failed — try again"
                 }
             }
         )
 
         biometricPrompt.authenticate(promptInfo)
+    }
+
+    LaunchedEffect(fragmentActivity, attempt) {
+        if (fragmentActivity == null) {
+            errorMsg = "Biometric authentication unavailable: host is not a FragmentActivity"
+            return@LaunchedEffect
+        }
+        showPrompt()
     }
 
     Box(
@@ -85,6 +99,18 @@ fun BiometricLockScreen(
                     color = Color.Red,
                     modifier = Modifier.padding(top = 16.dp)
                 )
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = {
+                    errorMsg = null
+                    attempt++
+                }) {
+                    Text("Try again")
+                }
+                TextButton(onClick = onUnlockSuccess) {
+                    Text("Skip — end locked session")
+                }
             }
         }
     }

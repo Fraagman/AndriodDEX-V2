@@ -1,4 +1,3 @@
-use rand::Rng;
 use ring::{digest, hkdf, hmac};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -32,28 +31,6 @@ impl hkdf::KeyType for Okm4 {
     fn len(&self) -> usize {
         4
     }
-}
-
-/// Generates a legacy 6-digit PIN (kept for backward compatibility during migration).
-pub fn generate_pin() -> String {
-    let mut rng = rand::thread_rng();
-    let num: u32 = rng.gen_range(0..1_000_000);
-    format!("{:06}", num)
-}
-
-/// Derives legacy PSK (kept for backward compatibility during migration).
-pub fn derive_psk(pin: &str, ephemeral_public_key: &[u8; 32]) -> Result<[u8; 32], ring::error::Unspecified> {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"androiddex-v1");
-    let mut ikm = Vec::new();
-    ikm.extend_from_slice(pin.as_bytes());
-    ikm.extend_from_slice(ephemeral_public_key);
-    let prk = salt.extract(&ikm);
-    
-    let info = [b"psk".as_slice()];
-    let okm = prk.expand(&info, hkdf::HKDF_SHA256)?;
-    let mut psk = [0u8; 32];
-    okm.fill(&mut psk)?;
-    Ok(psk)
 }
 
 /// Derives the 6-digit SAS string and 32-byte PSK for Protocol v2 pairing.

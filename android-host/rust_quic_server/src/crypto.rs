@@ -8,7 +8,8 @@ use ring::constant_time;
 use ring::{digest, hkdf, hmac};
 
 pub const PSK_LEN: usize = 32;
-pub const SAS_LEN: usize = 6;
+#[cfg_attr(not(test), allow(dead_code))]
+pub const SAS_LEN: usize = 6; // verified in protocol_tests
 pub const PROOF_LEN: usize = 32;
 pub const NONCE_LEN: usize = 32;
 pub const BINDING_LEN: usize = 32;
@@ -58,6 +59,12 @@ impl hkdf::KeyType for Okm4 {
 /// 8. sas_bytes = HKDF-Expand(prk, info = b"sas", 4 bytes)
 ///    sas = u32::from_be_bytes(sas_bytes) % 1_000_000, formatted as %06d
 /// 9. psk = HKDF-Expand(prk, info = b"psk", 32 bytes)
+///
+/// The SAS carries ~20 bits of entropy: a guessed code matches with probability
+/// 1-in-a-million per attempt. The 500 ms pairing cooldown and the 60 s pairing
+/// window bound a single connection to ~120 attempts, the code must match on TWO
+/// screens, and the PSK proofs are bound to the TLS session — the documented
+/// residual MITM odds are deliberately 1-in-a-million, not lower.
 pub fn derive_pairing_v2(
     a: &[u8; EPHEMERAL_KEY_LEN],
     b: &[u8; EPHEMERAL_KEY_LEN],
@@ -152,6 +159,7 @@ pub fn verify_client_proof(
 
 /// Verifies server_proof in constant time.
 #[allow(deprecated)]
+#[cfg_attr(not(test), allow(dead_code))] // exercised by protocol_tests (PC-side proof check)
 pub fn verify_server_proof(
     psk: &Psk,
     client_nonce: &[u8; NONCE_LEN],

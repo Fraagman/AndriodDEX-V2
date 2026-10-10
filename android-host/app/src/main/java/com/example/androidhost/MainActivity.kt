@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,7 +58,11 @@ class MainActivity : FragmentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // Continue regardless of permission, we just won't show notifications or capture audio if denied
+        // Continue regardless of permission. Consequence of a denial: with
+        // POST_NOTIFICATIONS denied, the foreground-service notifications are
+        // silently suppressed (the services still run, but invisibly); with
+        // RECORD_AUDIO denied, the System Audio toggle simply fails at capture
+        // time. Streaming and input never need either permission.
     }
 
     private val mediaProjectionLauncher = registerForActivityResult(
@@ -83,8 +88,10 @@ class MainActivity : FragmentActivity() {
         AudioCaptureService.tryRestoreMutedVolume(this)
         enableEdgeToEdge()
         setContent {
-            val currentScreen = remember { 
-                mutableStateOf(if (SecurityBridge.isPaired()) Screen.DESKTOP else Screen.PAIRING) 
+            // rememberSaveable: configuration changes and process recreation must not
+            // reset the screen to PAIRING mid-session.
+            val currentScreen = rememberSaveable {
+                mutableStateOf(if (SecurityBridge.isPaired()) Screen.DESKTOP else Screen.PAIRING)
             }
 
             val ctx = LocalContext.current
@@ -100,12 +107,33 @@ class MainActivity : FragmentActivity() {
                     onPairingSuccess = { currentScreen.value = Screen.DESKTOP }
                 )
                 Screen.LOCK -> com.example.androidhost.screens.BiometricLockScreen(
-                    onUnlockSuccess = { currentScreen.value = Screen.DESKTOP }
+                    onUnlockSuccess = {
+                        currentScreen.value = Screen.DESKTOP
+                    }
                 )
                 Screen.DESKTOP -> ControlPanel(
-                    onLockSession = { 
+                    onLockSession = {
+                        // Never lock without a working unlock method: the lock screen
+                        // would be a dead end.
+                        val bm = androidx.biometric.BiometricManager.from(ctx)
+                        val canAuth = bm.canAuthenticate(
+                            androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                                androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                        )
+                        if (canAuth != androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS) {
+                            android.widget.Toast.makeText(
+                                ctx,
+                                "Cannot lock: no enrolled fingerprint or device credential",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            return@ControlPanel
+                        }
+                        // Locking stops the stream (DisplayService) AND the audio
+                        // capture — a locked device must not keep streaming to a PC.
                         ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
-                        currentScreen.value = Screen.LOCK 
+                        ctx.stopService(Intent(ctx, com.example.androidhost.service.AudioCaptureService::class.java))
+                        com.example.androidhost.service.AudioCaptureService.isServiceRunning.value = false
+                        currentScreen.value = Screen.LOCK
                     },
                     onRequestAudioCapture = { enabled ->
                         if (enabled) {
@@ -167,7 +195,6 @@ fun ControlPanel(
 ) {
     var quicState by remember { mutableStateOf(0) }
     var framesSent by remember { mutableStateOf(0) }
-    var wasConnected by remember { mutableStateOf(false) }
     var encoderFps by remember { mutableStateOf(0) }
     var encoderKbps by remember { mutableStateOf(0) }
     var droppedVideo by remember { mutableLongStateOf(0) }
@@ -182,29 +209,27 @@ fun ControlPanel(
             encoderFps = stats.fps
             encoderKbps = stats.kilobitsPerSecond
             droppedVideo = com.example.androidhost.quic.QuicServer.getDroppedVideoFrames()
-
-            if (quicState == 2) {
-                wasConnected = true
-            } else if (wasConnected && quicState != 2) {
-                ctx.stopService(Intent(ctx, com.example.androidhost.service.DisplayService::class.java))
-                wasConnected = false
-            }
-
+            // NOTE: the service itself pauses its pipeline when the client leaves
+            // (DisplayService's client watch) and resumes when it returns. Stopping
+            // the whole service from here would kill that watch, and the receiver
+            // could never reconnect without relaunching the app.
             delay(1000)
         }
     }
 
-    val statusText = when (quicState) {
-        0 -> "Idle"
-        1 -> "Pairing"
-        2 -> "Connected"
-        3 -> "Disconnected"
+    val statusText = when {
+        com.example.androidhost.quic.QuicServer.serverStartFailed -> "Server failed to start"
+        quicState == 0 -> "Idle"
+        quicState == 1 -> "Pairing"
+        quicState == 2 -> "Connected"
+        quicState == 3 -> "Disconnected"
         else -> "Unknown"
     }
-    val statusColor = when (quicState) {
-        2 -> Color(0xFF3DDC84)
-        1 -> Color(0xFFFFB300)
-        3 -> Color(0xFFFF5252)
+    val statusColor = when {
+        com.example.androidhost.quic.QuicServer.serverStartFailed -> Color(0xFFFF5252)
+        quicState == 2 -> Color(0xFF3DDC84)
+        quicState == 1 -> Color(0xFFFFB300)
+        quicState == 3 -> Color(0xFFFF5252)
         else -> Color(0xFF8B949E)
     }
 
@@ -253,7 +278,12 @@ fun ControlPanel(
             Column(modifier = Modifier.weight(1f)) {
                 Text(statusText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (quicState == 2) "Streaming desktop to receiver" else "Waiting for a receiver to connect",
+                    when {
+                        com.example.androidhost.quic.QuicServer.serverStartFailed ->
+                            "Port 4433 busy or storage unusable — reinstall or reboot the device"
+                        quicState == 2 -> "Streaming desktop to receiver"
+                        else -> "Waiting for a receiver to connect"
+                    },
                     color = Color(0xFF8B949E), fontSize = 12.sp
                 )
             }
@@ -319,6 +349,12 @@ fun ControlPanel(
                         if (isAudioCapturing) "Captured and streamed to the receiver" else "Not captured",
                         color = Color(0xFF8B949E), fontSize = 11.sp
                     )
+                    if (isAudioCapturing) {
+                        Text(
+                            "Phone playback is muted while streaming; DRM apps block capture by OS design.",
+                            color = Color(0xFF6B7280), fontSize = 10.sp
+                        )
+                    }
                 }
                 Switch(
                     checked = isAudioCapturing,

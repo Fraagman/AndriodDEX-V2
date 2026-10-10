@@ -26,11 +26,13 @@ object FrameSender {
     /** Message type byte for video, as read by `zc-core/src/main.rs`. */
     private const val MSG_TYPE_VIDEO: Byte = 0x01
 
+    /**
+     * Written from the main thread (start/stop with the pipeline), read on the
+     * encoder's callback thread for every frame.
+     */
+    @Volatile
     private var isRunning = false
     val framesSent = AtomicInteger(0)
-
-    val isConnected: Boolean
-        get() = QuicServer.handle != 0L
 
     fun start() {
         if (isRunning) return
@@ -43,16 +45,6 @@ object FrameSender {
         isRunning = false
     }
 
-    /**
-     * Sends one encoded access unit.
-     *
-     * @param nal   the encoder's output buffer, positioned at the payload. Consumed
-     *              in place; the caller still owns it and must release it afterwards.
-     * @param csd   cached SPS/PPS, non-null on keyframes. Prepended to [nal] so a
-     *              client that joins mid-session can start decoding immediately.
-     * @param isKeyframe whether this access unit is an IDR
-     * @param ptsUs presentation timestamp in microseconds
-     */
     /**
      * Serializes a HybridFrame protobuf preceded by the MSG_TYPE_VIDEO (0x01) header byte.
      */

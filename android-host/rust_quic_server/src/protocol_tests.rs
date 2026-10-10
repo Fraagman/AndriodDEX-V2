@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver};
 use quinn::{Connection, Endpoint};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -21,8 +20,9 @@ use crate::frames::FrameQueue;
 use crate::pairing::ConfirmationChannel;
 use crate::store::SecureStore;
 use crate::{
-    accept_loop, bind_endpoint, Server, ALPN_PAIRING, ALPN_STREAM, AUDIO_QUEUE_DEPTH,
-    STATE_AUTHENTICATED, STATE_IDLE, STATE_PAIRING, VIDEO_QUEUE_DEPTH,
+    accept_loop, bind_endpoint, InputQueue, Server, ALPN_PAIRING, ALPN_STREAM,
+    AUDIO_QUEUE_DEPTH, INPUT_QUEUE_DEPTH, STATE_AUTHENTICATED, STATE_IDLE, STATE_PAIRING,
+    VIDEO_QUEUE_DEPTH,
 };
 
 // -- Test harness -----------------------------------------------------------------------
@@ -31,7 +31,7 @@ struct Harness {
     server: Arc<Server>,
     addr: SocketAddr,
     dir: PathBuf,
-    _input_rx: Receiver<Vec<u8>>,
+    _input_queue: Arc<InputQueue>,
 }
 
 impl Harness {
@@ -47,13 +47,13 @@ impl Harness {
 
         let store = SecureStore::open(&dir).expect("open store");
         let persisted = store.load_psk();
-        let (input_tx, input_rx) = unbounded();
+        let input_queue = Arc::new(InputQueue::new(INPUT_QUEUE_DEPTH));
 
         let server = Arc::new(Server {
             state: AtomicI32::new(STATE_IDLE),
             video: Arc::new(FrameQueue::new(VIDEO_QUEUE_DEPTH)),
             audio: Arc::new(FrameQueue::new(AUDIO_QUEUE_DEPTH)),
-            input_tx,
+            input_queue: input_queue.clone(),
             confirmations: ConfirmationChannel::new(),
             store,
             psk: Mutex::new(persisted),
@@ -68,7 +68,7 @@ impl Harness {
 
         tokio::spawn(accept_loop(server.clone(), endpoint));
 
-        Harness { server, addr, dir, _input_rx: input_rx }
+        Harness { server, addr, dir, _input_queue: input_queue }
     }
 
     fn state(&self) -> i32 {

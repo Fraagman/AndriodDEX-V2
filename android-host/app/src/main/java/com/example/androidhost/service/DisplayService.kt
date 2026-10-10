@@ -41,9 +41,15 @@ class DisplayService : Service() {
          * Dimensions of the VirtualDisplay the desktop is rendered into. Public because
          * LocalInputDispatcher scales incoming PC coordinates into this space — there
          * must be exactly one definition of the desktop's resolution.
+         *
+         * Volatile: written from whatever thread applies a settings change, read from
+         * the MediaCodec callback thread when frames are framed for the wire.
          */
+        @Volatile
         var CAPTURE_WIDTH = 1920
+        @Volatile
         var CAPTURE_HEIGHT = 1080
+        @Volatile
         var BIT_RATE = 12_000_000 // 12 Mbps default
 
         /**
@@ -89,9 +95,13 @@ class DisplayService : Service() {
         }
 
         fun updateResolution(width: Int, height: Int) {
-            if (CAPTURE_WIDTH == width && CAPTURE_HEIGHT == height) return
-            CAPTURE_WIDTH = width
-            CAPTURE_HEIGHT = height
+            // Defensive validation: the Settings UI enforces this too, but the
+            // encoder dies on odd/oversized dimensions and must never see them.
+            val safeW = width.coerceIn(16, 3840) and 0xFE
+            val safeH = height.coerceIn(16, 3840) and 0xFE
+            if (CAPTURE_WIDTH == safeW && CAPTURE_HEIGHT == safeH) return
+            CAPTURE_WIDTH = safeW
+            CAPTURE_HEIGHT = safeH
             instance?.let { service ->
                 // Dynamically reconfigure pipeline to apply new resolution without destroying DesktopPresentation
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -101,7 +111,10 @@ class DisplayService : Service() {
         }
 
         fun updateBitrate(kbps: Int) {
-            val bps = kbps * 1000
+            // Overflow guard: kbps * 1000 overflows Int above ~2.1 Gbps, and a
+            // negative bitrate makes MediaCodec.configure throw.
+            val safe = kbps.coerceIn(100, 100_000)
+            val bps = safe * 1000
             if (BIT_RATE == bps) return
             BIT_RATE = bps
             instance?.screenEncoder?.setBitrate(bps)
@@ -114,8 +127,8 @@ class DisplayService : Service() {
     private var desktopPresentation: DesktopPresentation? = null
 
     /**
-     * The encoder's input surface. Exposed for DisplayViewModel, which surfaces it to
-     * the UI layer.
+     * The encoder's input surface. Retained for diagnostics; the shell reads
+     * pipeline state through this class's companion instead of binding.
      */
     var surface: Surface? = null
         private set
@@ -138,26 +151,15 @@ class DisplayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
-    private val appLaunchReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.androiddex.host.OPEN_APP") {
-                val pkg = intent.getStringExtra("package") ?: return
-                Log.i(TAG, "Opening app via Broadcast: $pkg")
-                com.example.androidhost.vm.ShellHolder.shellViewModel.openApp(pkg)
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         instance = this
-        val filter = android.content.IntentFilter("com.androiddex.host.OPEN_APP")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(appLaunchReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            registerReceiver(appLaunchReceiver, filter)
-        }
+        // Foreground status must be established before any pipeline work: if this
+        // service is ever created via bind instead of start, it still runs as a
+        // proper foreground service and cannot be culled by the system.
+        startForegroundWithNotification()
         startEncodingPipeline()
+        startClientWatch()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -214,7 +216,6 @@ class DisplayService : Service() {
         encoder.start()
         com.example.androidhost.network.FrameSender.start()
         launchDesktopPresentation()
-        startClientWatch()
         frameTickHandler.post(frameTickRunnable)
     }
 
@@ -236,19 +237,28 @@ class DisplayService : Service() {
     }
 
     /**
-     * Polls the QUIC connection state and asks for a keyframe on each transition into
-     * the authenticated state, so a newly paired client gets a decodable picture
-     * immediately instead of waiting for the next scheduled IDR.
+     * Polls the QUIC connection state so the pipeline tracks its client:
+     *  - a client arriving on a paused pipeline brings it back up and gets a keyframe,
+     *  - the client leaving pauses the pipeline, so no client means no encoder burn.
+     *
+     * The watch runs for the service's lifetime — it must survive
+     * [stopEncodingPipeline] (which is what a pause is) to notice the client
+     * returning. `QuicServer` exposes no callback, only a polled state.
      */
     private fun startClientWatch() {
         clientWatchHandler.post(object : Runnable {
             override fun run() {
-                if (virtualDisplay == null) return
-
                 val state = QuicServer.getConnectionState()
                 if (state == QUIC_STATE_AUTHENTICATED && lastQuicState != QUIC_STATE_AUTHENTICATED) {
+                    if (virtualDisplay == null) {
+                        Log.i(TAG, "Client authenticated — resuming paused pipeline")
+                        startEncodingPipeline()
+                    }
                     Log.i(TAG, "Client authenticated — requesting keyframe")
                     screenEncoder?.requestKeyframe(bypassCooldown = true)
+                } else if (state != QUIC_STATE_AUTHENTICATED && lastQuicState == QUIC_STATE_AUTHENTICATED && virtualDisplay != null) {
+                    Log.i(TAG, "Client gone — pausing pipeline until it returns")
+                    stopEncodingPipeline()
                 }
                 lastQuicState = state
 
@@ -272,11 +282,13 @@ class DisplayService : Service() {
             )
 
             val closed = encoderStats.record(size, isKeyframe) ?: return
-            Log.i(
-                TAG,
-                "encode ${closed.fps} fps, ${closed.kilobitsPerSecond} kbps, " +
-                    "${closed.keyframes} keyframes, ${closed.totalFrames} total"
-            )
+            if (com.example.androidhost.BuildConfig.DEBUG) {
+                Log.i(
+                    TAG,
+                    "encode ${closed.fps} fps, ${closed.kilobitsPerSecond} kbps, " +
+                        "${closed.keyframes} keyframes, ${closed.totalFrames} total"
+                )
+            }
         }
 
         override fun onEncoderError(cause: Exception) {
@@ -300,10 +312,18 @@ class DisplayService : Service() {
             notificationManager.createNotificationChannel(channel)
         }
 
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, com.example.androidhost.MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Display active")
             .setContentText("VirtualDisplay is running")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(com.example.androidhost.R.drawable.ic_launcher_foreground)
+            .setContentIntent(contentIntent)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -321,8 +341,10 @@ class DisplayService : Service() {
      * Dynamically switches the hardware encoder to the new resolution and updates
      * the existing VirtualDisplay without dismissing DesktopPresentation.
      *
-     * This avoids destroying the Compose view tree (and the SettingsApp executing
-     * inside it) while adapting the video pipeline to the new resolution.
+     * The new encoder is prepared *before* the old one is released: if the codec
+     * rejects the new size, the display keeps its live surface and the pipeline
+     * keeps streaming at the old resolution. Releasing first would leave the
+     * VirtualDisplay rendering into a dead surface — a permanent black screen.
      */
     private fun reconfigureResolution() {
         val display = virtualDisplay
@@ -333,29 +355,34 @@ class DisplayService : Service() {
 
         Log.i(TAG, "Reconfiguring resolution to ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}")
 
-        // 1. Release the previous encoder
-        screenEncoder?.release()
-        screenEncoder = null
-        surface = null
-
-        // 2. Prepare the new encoder with updated dimensions
+        // 1. Prepare the new encoder first. On failure the current pipeline is
+        //    untouched and keeps streaming at the previous size.
         val encoder = ScreenEncoder(CAPTURE_WIDTH, CAPTURE_HEIGHT, BIT_RATE, encoderListener)
         try {
             encoder.prepare()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to prepare encoder at ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT", e)
+            Log.e(TAG, "Encoder rejected ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT; keeping the live pipeline", e)
+            // Roll the companion back so the UI reflects what is actually streaming.
+            val mode = display.display.mode
+            if (mode != null) {
+                CAPTURE_WIDTH = mode.physicalWidth
+                CAPTURE_HEIGHT = mode.physicalHeight
+            }
             return
         }
 
-        screenEncoder = encoder
+        // 2. Swap the display onto the new surface, then release the old encoder:
+        //    the display must never point at a released surface.
+        val oldEncoder = screenEncoder
         val newSurface = encoder.inputSurface
-        surface = newSurface
-
-        // 3. Resize the VirtualDisplay and attach the new surface
         display.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_DPI)
         display.surface = newSurface
+        oldEncoder?.release()
 
-        // 4. Start the new encoder and immediately request an IDR keyframe
+        screenEncoder = encoder
+        surface = newSurface
+
+        // 3. Start the new encoder and immediately request an IDR keyframe
         encoderStats.reset()
         encoder.start()
         encoder.requestKeyframe(bypassCooldown = true)
@@ -365,9 +392,11 @@ class DisplayService : Service() {
     /**
      * Tears down in the reverse order of construction: stop drawing, stop the frame
      * producer, then release the consumer that owns the surface.
+     *
+     * The client watch is deliberately NOT stopped here — it is what notices a
+     * returning client and restarts the pipeline. It dies with the service.
      */
     private fun stopEncodingPipeline() {
-        clientWatchHandler.removeCallbacksAndMessages(null)
         frameTickHandler.removeCallbacks(frameTickRunnable)
 
         desktopPresentation?.dismiss()
@@ -387,9 +416,13 @@ class DisplayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            unregisterReceiver(appLaunchReceiver)
-        } catch (_: Exception) {}
+        // The poll thread is this service's concern; the QUIC server (process-global)
+        // outlives the service and is re-polled by the next start.
+        com.example.androidhost.service.InputManager.stopPolling()
         stopEncodingPipeline()
+        // The watch is the only thing that outlives the pipeline; it dies here,
+        // with the service — and so must the static reference to this context.
+        clientWatchHandler.removeCallbacksAndMessages(null)
+        if (instance === this) instance = null
     }
 }

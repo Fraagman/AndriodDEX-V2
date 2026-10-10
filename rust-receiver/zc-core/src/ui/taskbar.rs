@@ -39,6 +39,39 @@ fn get_local_time_and_date() -> (String, String) {
     ("12:00 PM".to_string(), "10/05/2026".to_string())
 }
 
+/// Seconds until the next minute boundary, from the same local clock the taskbar
+/// renders (the Windows fallback path can just use a fixed 30 s).
+#[cfg(windows)]
+fn seconds_to_next_minute() -> u64 {
+    unsafe {
+        #[repr(C)]
+        struct SystemTimeWin {
+            w_year: u16,
+            w_month: u16,
+            w_day_of_week: u16,
+            w_day: u16,
+            w_hour: u16,
+            w_minute: u16,
+            w_second: u16,
+            w_milliseconds: u16,
+        }
+        extern "system" {
+            fn GetLocalTime(lp_system_time: *mut SystemTimeWin);
+        }
+        let mut st = SystemTimeWin {
+            w_year: 0, w_month: 0, w_day_of_week: 0, w_day: 0,
+            w_hour: 0, w_minute: 0, w_second: 0, w_milliseconds: 0,
+        };
+        GetLocalTime(&mut st);
+        (60 - st.w_second as u64).max(1)
+    }
+}
+
+#[cfg(not(windows))]
+fn seconds_to_next_minute() -> u64 {
+    30
+}
+
 pub fn render_taskbar(
     ctx: &egui::Context,
     ui_state: &mut UiState,
@@ -49,11 +82,8 @@ pub fn render_taskbar(
     _decode_us: u64,
 ) {
     let screen_rect = ctx.screen_rect();
-    let taskbar_height = 42.0;
-    let taskbar_rect = Rect::from_min_size(
-        Pos2::new(screen_rect.min.x, screen_rect.max.y - taskbar_height),
-        Vec2::new(screen_rect.width(), taskbar_height),
-    );
+    let taskbar_height = super::layout::TASKBAR_HEIGHT;
+    let taskbar_rect = super::layout::taskbar_rect(screen_rect);
 
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("taskbar")));
 
@@ -290,6 +320,11 @@ pub fn render_taskbar(
 
     // --- Clock and Date (2-line layout) ---
     let (time_str, date_str) = get_local_time_and_date();
+    // The clock's text only changes on a minute boundary and nothing else on an
+    // idle desktop triggers a redraw, so schedule one for the next minute: without
+    // it the clock freezes the moment the stream goes quiet.
+    let secs_to_minute = seconds_to_next_minute();
+    ctx.request_repaint_after(std::time::Duration::from_secs(secs_to_minute.max(1)));
     right_x -= 72.0;
     let clock_rect = Rect::from_min_size(
         Pos2::new(right_x, taskbar_rect.min.y),

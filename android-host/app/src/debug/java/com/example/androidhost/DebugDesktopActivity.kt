@@ -53,7 +53,6 @@ class DebugDesktopActivity : FragmentActivity() {
             Box(modifier = Modifier.fillMaxSize().background(Color(0xFF1B1B1F))) {
                 DesktopShellContent(
                     isTetheringReady = true,
-                    surface = null,
                     shellViewModel = com.example.androidhost.vm.ShellHolder.shellViewModel
                 )
             }

@@ -79,7 +79,9 @@ pub fn render_dialogs(
                                 ui.label("Format: 48,000 Hz, 16-bit Stereo PCM");
                                 ui.label("Resampler: rubato FftFixedIn (Drift-compensated)");
                                 ui.separator();
-                                ui.checkbox(&mut ui_state.is_muted, "Mute audio output");
+                                if ui.checkbox(&mut ui_state.is_muted, "Mute audio output").changed() {
+                                    actions.toggle_mute = true;
+                                }
                                 ui.horizontal(|ui| {
                                     ui.label("Master Volume:");
                                     let mut vol = (ui_state.volume_level * 100.0) as u32;

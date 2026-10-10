@@ -77,12 +77,16 @@ fun SettingsApp(
 
 @Composable
 private fun DisplaySection() {
-    var widthText by remember { mutableStateOf(DisplayService.CAPTURE_WIDTH.toString()) }
+    // Keyed to the live pipeline values so a change applied elsewhere (another
+    // window, the QUIC side) is reflected here instead of showing stale numbers.
+    var widthText by remember(DisplayService.CAPTURE_WIDTH) { mutableStateOf(DisplayService.CAPTURE_WIDTH.toString()) }
     val widthOwner = remember { Any() }
-    var heightText by remember { mutableStateOf(DisplayService.CAPTURE_HEIGHT.toString()) }
+    var heightText by remember(DisplayService.CAPTURE_HEIGHT) { mutableStateOf(DisplayService.CAPTURE_HEIGHT.toString()) }
     val heightOwner = remember { Any() }
-    var bitrateText by remember { mutableStateOf((DisplayService.BIT_RATE / 1000).toString()) }
+    var bitrateText by remember(DisplayService.BIT_RATE) { mutableStateOf((DisplayService.BIT_RATE / 1000).toString()) }
     val bitrateOwner = remember { Any() }
+    var resolutionError by remember { mutableStateOf<String?>(null) }
+    var bitrateError by remember { mutableStateOf<String?>(null) }
 
     SectionCard(title = "Display & Encoding") {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -106,10 +110,14 @@ private fun DisplaySection() {
                                         widthOwner,
                                         onText = { text -> widthText += text },
                                         onKey = { keyCode, pressed ->
+                                            // Consume only Backspace; other keys fall
+                                            // through to the view tree (caret movement).
                                             if (pressed && keyCode == KeyEvent.KEYCODE_DEL && widthText.isNotEmpty()) {
                                                 widthText = widthText.dropLast(1)
+                                                true
+                                            } else {
+                                                false
                                             }
-                                            true
                                         }
                                     )
                                 }
@@ -140,8 +148,10 @@ private fun DisplaySection() {
                                         onKey = { keyCode, pressed ->
                                             if (pressed && keyCode == KeyEvent.KEYCODE_DEL && heightText.isNotEmpty()) {
                                                 heightText = heightText.dropLast(1)
+                                                true
+                                            } else {
+                                                false
                                             }
-                                            true
                                         }
                                     )
                                 }
@@ -153,12 +163,25 @@ private fun DisplaySection() {
             Button(onClick = {
                 val w = widthText.toIntOrNull()
                 val h = heightText.toIntOrNull()
-                if (w != null && h != null && w > 0 && h > 0) {
-                    DisplayService.updateResolution(w, h)
+                when {
+                    w == null || h == null ->
+                        resolutionError = "Width and height must be numbers."
+                    w !in 16..3840 || h !in 16..3840 ->
+                        resolutionError = "Each dimension must be between 16 and 3840."
+                    w % 2 != 0 || h % 2 != 0 ->
+                        resolutionError = "H.264 needs even dimensions; ${w}x$h is rejected as-is."
+                    else -> {
+                        resolutionError = null
+                        DisplayService.updateResolution(w, h)
+                    }
                 }
             }) {
                 Text("Apply Resolution")
             }
+        }
+
+        resolutionError?.let {
+            Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp)
         }
         
         Spacer(modifier = Modifier.height(16.dp))
@@ -186,8 +209,10 @@ private fun DisplaySection() {
                                         onKey = { keyCode, pressed ->
                                             if (pressed && keyCode == KeyEvent.KEYCODE_DEL && bitrateText.isNotEmpty()) {
                                                 bitrateText = bitrateText.dropLast(1)
+                                                true
+                                            } else {
+                                                false
                                             }
-                                            true
                                         }
                                     )
                                 }
@@ -198,12 +223,22 @@ private fun DisplaySection() {
             Spacer(modifier = Modifier.width(16.dp))
             Button(onClick = {
                 val kbps = bitrateText.toIntOrNull()
-                if (kbps != null && kbps > 0) {
-                    DisplayService.updateBitrate(kbps)
+                when {
+                    kbps == null -> bitrateError = "Bitrate must be a number."
+                    kbps !in 100..100_000 ->
+                        bitrateError = "Bitrate must be between 100 and 100000 kbps."
+                    else -> {
+                        bitrateError = null
+                        DisplayService.updateBitrate(kbps)
+                    }
                 }
             }) {
                 Text("Apply Bitrate")
             }
+        }
+
+        bitrateError?.let {
+            Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp)
         }
     }
 }
@@ -211,19 +246,16 @@ private fun DisplaySection() {
 @Composable
 private fun InputSection() {
     val context = LocalContext.current
-    val isImeEnabled = remember { 
-        try {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
-            imm?.enabledInputMethodList?.any { it.packageName == context.packageName } == true
-        } catch (e: Exception) {
-            false
-        }
-    }
-    val isA11yEnabled = remember { 
-        try {
-            com.example.androidhost.service.DesktopAccessibilityService.isEnabled(context)
-        } catch (e: Exception) {
-            false
+    // Read once, then re-checked periodically: the accessibility service can be
+    // enabled or disabled from system Settings while this window stays open.
+    var isImeEnabled by remember { mutableStateOf(checkImeEnabled(context)) }
+    var isA11yEnabled by remember { mutableStateOf(checkA11yEnabled(context)) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(10_000)
+            isImeEnabled = checkImeEnabled(context)
+            isA11yEnabled = checkA11yEnabled(context)
         }
     }
 
@@ -254,6 +286,19 @@ private fun InputSection() {
             }
         )
     }
+}
+
+private fun checkImeEnabled(context: Context): Boolean = try {
+    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+    imm?.enabledInputMethodList?.any { it.packageName == context.packageName } == true
+} catch (e: Exception) {
+    false
+}
+
+private fun checkA11yEnabled(context: Context): Boolean = try {
+    com.example.androidhost.service.DesktopAccessibilityService.isEnabled(context)
+} catch (e: Exception) {
+    false
 }
 
 @Composable

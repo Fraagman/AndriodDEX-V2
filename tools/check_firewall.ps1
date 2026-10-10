@@ -34,3 +34,8 @@ try {
 } catch {
     Write-Output "UDP send failed: $_"
 }
+
+Write-Output ""
+Write-Output "NOTE: the phone is the QUIC listener on UDP 4433; the Windows receiver only"
+Write-Output "      sends outbound, so no INBOUND firewall rule is needed on the PC. The"
+Write-Output "      receiver discovers the phone's tethered IP and connects to it."

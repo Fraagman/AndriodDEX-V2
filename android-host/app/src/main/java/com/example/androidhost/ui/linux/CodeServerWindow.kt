@@ -21,7 +21,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.androidhost.input.LocalInputDispatcher
 import com.example.androidhost.input.WebViewInputBridge
-import com.example.androidhost.input.buildControlKeyScript
 import com.example.androidhost.input.buildInsertTextScript
 import com.example.androidhost.service.NativeComputeService
 import com.example.androidhost.ui.components.WindowChrome
@@ -95,9 +94,6 @@ fun CodeServerWindow(
                         val bridge = object : WebViewInputBridge {
                             override fun insertText(text: CharSequence) {
                                 evaluateJavascript(buildInsertTextScript(text), null)
-                            }
-                            override fun controlKey(key: String, keyCode: Int, pressed: Boolean) {
-                                evaluateJavascript(buildControlKeyScript(key, keyCode, pressed), null)
                             }
                         }
                         // Removed focus listener; using touch listener instead.
